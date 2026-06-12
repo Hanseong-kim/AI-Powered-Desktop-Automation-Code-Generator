@@ -179,6 +179,29 @@ def step_generate_no_events():
     check("Returns 400 when no events", status == 400, f"got {status}")
 
 
+def step_delete_event():
+    print("\n[9] Event row delete (6 inject -> 1 delete -> 5 remain)")
+    request("DELETE", "/api/events")
+    # Inject exactly 6 events
+    for ev in MOCK_EVENTS[:6]:
+        request("POST", "/api/events", ev)
+    status, body = request("GET", "/api/events")
+    check("6 events injected", status == 200 and len(body) == 6, f"got {len(body) if isinstance(body, list) else body}")
+
+    # Delete array index 2 (3rd event)
+    status, body = request("DELETE", "/api/events/2")
+    check("DELETE /api/events/2 returns 200", status == 200, f"got {status}")
+    check("eventCount == 5 in response", body.get("eventCount") == 5, f"got {body}")
+
+    status, body = request("GET", "/api/events")
+    count = len(body) if isinstance(body, list) else -1
+    check("GET /api/events returns 5 events", count == 5, f"got {count}")
+
+    # Out-of-range delete returns 400
+    status, body = request("DELETE", "/api/events/999")
+    check("Out-of-range delete returns 400", status == 400, f"got {status}")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -195,6 +218,7 @@ def main():
     step_bad_exepath()
     step_missing_apikey()
     step_generate_no_events()
+    step_delete_event()
 
     # Re-load events for optional generation test
     step_clear_events()

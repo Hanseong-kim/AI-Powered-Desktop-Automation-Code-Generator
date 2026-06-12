@@ -108,6 +108,16 @@ app.delete("/api/events", (req, res) => {
   res.json({ ok: true });
 });
 
+app.delete("/api/events/:index", (req, res) => {
+  const idx = parseInt(req.params.index, 10);
+  if (isNaN(idx) || idx < 0 || idx >= events.length) {
+    return res.status(400).json({ ok: false, message: "Invalid event index" });
+  }
+  events.splice(idx, 1);
+  broadcast("snapshot", { events, recording });
+  res.json({ ok: true, eventCount: events.length });
+});
+
 app.get("/api/stream", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");

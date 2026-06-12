@@ -8,7 +8,7 @@ const ACTION_COLORS = {
   scroll: 'grey',
 };
 
-export default function EventTable({ events }) {
+export default function EventTable({ events, onDeleteEvent }) {
   const bottomRef = useRef(null);
 
   useEffect(() => {
@@ -29,11 +29,12 @@ export default function EventTable({ events }) {
               <th>ClassName</th>
               <th>Window Title</th>
               <th>Value</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
             {events.map((ev, i) => (
-              <tr key={ev.index ?? i}>
+              <tr key={ev.index ?? i} className="event-row">
                 <td className="mono">{ev.index ?? i + 1}</td>
                 <td>
                   <span className={`action-badge ${ACTION_COLORS[ev.action] ?? ''}`}>
@@ -45,6 +46,16 @@ export default function EventTable({ events }) {
                 <td className="mono truncate">{ev.element?.className ?? ''}</td>
                 <td className="truncate">{ev.element?.windowTitle ?? ''}</td>
                 <td className="truncate">{ev.value ?? ''}</td>
+                <td className="delete-cell">
+                  <button
+                    className="delete-row-btn"
+                    title="Delete event"
+                    onClick={() => onDeleteEvent?.(i)}
+                    aria-label={`Delete event ${ev.index ?? i + 1}`}
+                  >
+                    ×
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>

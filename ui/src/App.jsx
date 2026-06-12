@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useStream } from './useStream';
-import { getStatus, startRecording, stopRecording, clearEvents, generate } from './api';
+import { getStatus, startRecording, stopRecording, clearEvents, generate, deleteEvent } from './api';
 import ControlPanel from './components/ControlPanel';
 import EventTable from './components/EventTable';
 import CodeViewer from './components/CodeViewer';
@@ -106,6 +106,15 @@ export default function App() {
     }
   }
 
+  async function handleDeleteEvent(arrayIndex) {
+    try {
+      await deleteEvent(arrayIndex);
+      // Server broadcasts snapshot; onSnapshot will update state.
+    } catch (e) {
+      addToast('warn', `Delete failed: ${e.message}`);
+    }
+  }
+
   async function handleClear() {
     try {
       await clearEvents();
@@ -152,7 +161,7 @@ export default function App() {
           onGenerate={handleGenerate}
           generating={genState.generating}
         />
-        <EventTable events={events} />
+        <EventTable events={events} onDeleteEvent={handleDeleteEvent} />
         <CodeViewer files={genState.files} error={genState.error} />
       </main>
       <Toast toasts={toasts} dismiss={removeToast} />

@@ -20,3 +20,5 @@ export const stopRecording  = ()     => post('/stop', {});
 export const clearEvents    = ()     =>
   fetch(`${BASE}/events`, { method: 'DELETE' }).then(json);
 export const generate = (body) => post('/generate', body);
+export const deleteEvent = (index) =>
+  fetch(`${BASE}/events/${index}`, { method: 'DELETE' }).then(json);

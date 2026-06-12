@@ -127,6 +127,15 @@ tbody td { padding: 6px 12px; font-size: 12px; }
 .mono { font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 11px; }
 .truncate { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+.event-row .delete-cell { width: 28px; padding: 0 4px; }
+.delete-row-btn {
+  display: none; background: none; border: none;
+  color: var(--muted); cursor: pointer; font-size: 15px; line-height: 1;
+  padding: 2px 4px; border-radius: 3px;
+}
+.event-row:hover .delete-row-btn { display: inline-block; }
+.delete-row-btn:hover { color: var(--red); background: rgba(239,68,68,.12); }
+
 .action-badge {
   display: inline-block; padding: 2px 7px; border-radius: 4px;
   font-size: 11px; font-weight: 600; background: rgba(255,255,255,.08); color: var(--text);
