@@ -193,6 +193,65 @@ ${JSON.stringify(eventList, null, 2)}
 Output ONLY the Java source code of the single .java file. Start directly with "package com.qaforge.tests;".`;
 }
 
+
+// ---------------------------------------------------------------------------
+// Playwright Python generation
+// ---------------------------------------------------------------------------
+const PLAYWRIGHT_SYSTEM_PROMPT = `You are an expert test automation engineer. Generate COMPLETE, SYNTACTICALLY VALID Python Playwright test code. Output ONLY raw Python source code — no markdown fences, no explanations, no placeholders, no TODO comments.
+
+Hard rules:
+- Use playwright.sync_api: from playwright.sync_api import sync_playwright, expect, Page
+- pytest-style: one test function named test_<appname>_flow(page: Page)
+- Use a conftest-style fixture OR inline sync_playwright context if no page fixture available.
+- Every action must use a locator with an explicit timeout: page.locator(...).wait_for(timeout=15000)
+- Locator strategy: prefer get_by_role, get_by_label, get_by_text, or page.locator('[name="..."]')
+- NEVER use time.sleep() — use wait_for or expect(...).to_be_visible(timeout=15000)
+- Print step logs: print("[STEP n] ...")
+- End with an expect() assertion verifying visible state
+- The file must pass: python -c "compile(open('file.py').read(), 'file.py', 'exec')"`;
+
+function buildPlaywrightPrompt(appName, platform, eventList) {
+  const safeName = (appName || "myapp").replace(/[^a-z0-9]/gi, "_").toLowerCase();
+  return `Application: "${appName}" on ${platform}.
+Test function name: test_${safeName}_flow
+File name: test_${safeName}_playwright.py
+
+Convert EVERY recorded event into a Playwright action:
+- click -> page.locator(...).click()
+- doubleClick -> page.locator(...).dblclick()
+- rightClick -> page.locator(...).click(button="right")
+- type -> page.locator(...).fill(value)  (or .type() for char-by-char)
+- scroll -> page.mouse.wheel(0, delta_y)
+
+Recorded session:
+${JSON.stringify(eventList, null, 2)}
+
+Output ONLY the Python source. Start directly with the imports.`;
+}
+
+async function groqGeneratePlaywright(apiKey, appName, platform, eventList) {
+  const res = await fetch(GROQ_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      temperature: 0.2,
+      max_tokens: 4000,
+      messages: [
+        { role: "system", content: PLAYWRIGHT_SYSTEM_PROMPT },
+        { role: "user", content: buildPlaywrightPrompt(appName, platform, eventList) },
+      ],
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    const hints = { 401: "Invalid Groq API key", 429: "Groq rate limit exceeded" };
+    throw new Error(hints[res.status] ?? `Groq API ${res.status}: ${text.slice(0, 300)}`);
+  }
+  const data = await res.json();
+  return stripFences(data.choices?.[0]?.message?.content || "");
+}
+
 function stripFences(code) {
   return code.replace(/^```[a-z]*\s*/i, "").replace(/```\s*$/, "").trim();
 }
@@ -224,14 +283,13 @@ async function groqGenerate(apiKey, strategy, appName, platform, eventList) {
 }
 
 app.post("/api/generate", async (req, res) => {
-  const { apiKey, appName, platform } = req.body;
+  const { apiKey, appName, platform, framework = "appium" } = req.body;
   const name = appName || sessionInfo.appName || "MyApp";
   const plat = platform || sessionInfo.platform || "Windows";
 
   if (!apiKey) return res.status(400).json({ ok: false, message: "Groq API key is required" });
   if (events.length === 0) return res.status(400).json({ ok: false, message: "No recorded events to generate from" });
 
-  // slim event list for the prompt
   const slim = events.map((e, i) => ({
     step: i + 1,
     action: e.action,
@@ -245,20 +303,32 @@ app.post("/api/generate", async (req, res) => {
     },
   }));
 
-  broadcast("generation", { status: "started" });
+  broadcast("generation", { status: "started", framework });
   try {
-    const [byId, byClass] = await Promise.all([
-      groqGenerate(apiKey, "id", name, plat, slim),
-      groqGenerate(apiKey, "class", name, plat, slim),
-    ]);
-    const base = name.replace(/[^A-Za-z0-9]/g, "") || "MyApp";
-    const payload = {
-      ok: true,
-      files: [
-        { filename: `${base}TestById.java`, content: byId },
-        { filename: `${base}TestByClass.java`, content: byClass },
-      ],
-    };
+    let payload;
+    if (framework === "playwright") {
+      const base = name.replace(/[^a-z0-9]/gi, "_").toLowerCase() || "myapp";
+      const code = await groqGeneratePlaywright(apiKey, name, plat, slim);
+      payload = {
+        ok: true,
+        framework: "playwright",
+        files: [{ filename: `test_${base}_playwright.py`, content: code }],
+      };
+    } else {
+      const [byId, byClass] = await Promise.all([
+        groqGenerate(apiKey, "id", name, plat, slim),
+        groqGenerate(apiKey, "class", name, plat, slim),
+      ]);
+      const base = name.replace(/[^A-Za-z0-9]/g, "") || "MyApp";
+      payload = {
+        ok: true,
+        framework: "appium",
+        files: [
+          { filename: `${base}TestById.java`, content: byId },
+          { filename: `${base}TestByClass.java`, content: byClass },
+        ],
+      };
+    }
     broadcast("generation", { status: "success", files: payload.files.map(f => f.filename) });
     res.json(payload);
   } catch (e) {
@@ -270,4 +340,5 @@ app.post("/api/generate", async (req, res) => {
 app.listen(PORT, () =>
   console.log(`[bridge] Express server listening on http://localhost:${PORT}`)
 );
+
 

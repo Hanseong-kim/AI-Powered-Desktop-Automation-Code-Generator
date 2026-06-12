@@ -179,6 +179,32 @@ def step_generate_no_events():
     check("Returns 400 when no events", status == 400, f"got {status}")
 
 
+def step_playwright_generate(api_key):
+    print("\n[10] Playwright Python generation")
+    status, body = request("POST", "/api/generate", {
+        "apiKey": api_key,
+        "appName": APP_NAME,
+        "platform": PLATFORM,
+        "framework": "playwright",
+    }, timeout=60)
+    check("POST /api/generate (playwright) returns 200", status == 200, f"got {status}")
+    if status == 200:
+        check("ok == true", body.get("ok") is True)
+        files = body.get("files", [])
+        check("One file returned", len(files) == 1, f"got {len(files)}")
+        if files:
+            fname = files[0].get("filename", "")
+            content = files[0].get("content", "")
+            check(f"Filename ends with .py", fname.endswith(".py"), f"got {fname}")
+            check("Content is non-empty", bool(content.strip()))
+            # Python syntax check
+            try:
+                compile(content, fname, "exec")
+                check("Python syntax valid (compile)", True)
+            except SyntaxError as e:
+                check(f"Python syntax valid (compile)", False, str(e))
+
+
 def step_delete_event():
     print("\n[9] Event row delete (6 inject -> 1 delete -> 5 remain)")
     request("DELETE", "/api/events")
@@ -227,8 +253,10 @@ def main():
     api_key = os.environ.get("GROQ_API_KEY", "")
     if api_key:
         step_generate(api_key)
+        step_playwright_generate(api_key)
     else:
         print("\n[6] Code generation - SKIPPED (set GROQ_API_KEY env var to enable)")
+        print("\n[10] Playwright generation - SKIPPED (set GROQ_API_KEY env var to enable)")
 
     passed = sum(_results)
     total = len(_results)

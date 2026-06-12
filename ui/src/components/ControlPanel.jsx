@@ -1,6 +1,10 @@
 import React from 'react';
 
 const PLATFORMS = ['Windows', 'Android', 'iOS'];
+const FRAMEWORKS = [
+  { value: 'appium', label: 'Appium Java (TestNG)' },
+  { value: 'playwright', label: 'Playwright Python' },
+];
 
 export default function ControlPanel({
   form, onFormChange,
@@ -61,6 +65,19 @@ export default function ControlPanel({
           </select>
         </div>
 
+        <div className="field">
+          <label>Output Framework</label>
+          <select
+            value={form.framework}
+            onChange={(e) => onFormChange('framework', e.target.value)}
+            disabled={recording || generating}
+          >
+            {FRAMEWORKS.map(({ value, label }) => (
+              <option key={value} value={value}>{label}</option>
+            ))}
+          </select>
+        </div>
+
         {field('Groq API Key', 'apiKey', 'password', 'gsk_...')}
       </div>
 
@@ -91,7 +108,7 @@ export default function ControlPanel({
           onClick={onGenerate}
           disabled={recording || !form.apiKey || generating}
         >
-          {generating ? 'Generating…' : 'Generate Code'}
+          {generating ? 'Generating...' : 'Generate Code'}
         </button>
       </div>
     </section>

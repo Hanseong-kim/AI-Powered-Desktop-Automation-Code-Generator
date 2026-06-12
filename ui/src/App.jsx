@@ -10,6 +10,7 @@ const DEFAULT_FORM = {
   appName: '',
   exePath: '',
   platform: 'Windows',
+  framework: 'appium',
   apiKey: '',
 };
 
@@ -132,6 +133,7 @@ export default function App() {
         apiKey: form.apiKey,
         appName: form.appName || undefined,
         platform: form.platform || undefined,
+        framework: form.framework || 'appium',
       });
       if (res.ok) {
         setGenState({ generating: false, files: res.files, error: null });
