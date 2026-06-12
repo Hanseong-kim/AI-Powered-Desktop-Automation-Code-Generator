@@ -100,6 +100,14 @@ Both files use package `com.qaforge.tests`, TestNG, Page Object Model, `WebDrive
   (also counts as the "self-healing locator" bonus).
 - SSE through Express: keep `flushHeaders()`, no compression middleware.
 
+## Notes directory
+
+Project notes live at `C:\hansung\note\project\code-generator\`:
+- `dev-log.md` — session-by-session decision log
+- `00-overview.md` — grading criteria and architecture overview
+- `demo-script.md` — live demo walkthrough steps
+- `troubleshooting.md` — known issues and fixes
+
 ## Assignment grading weights (prioritize accordingly)
 
 capture 25% · element inspection 20% · generated code quality 25% ·
