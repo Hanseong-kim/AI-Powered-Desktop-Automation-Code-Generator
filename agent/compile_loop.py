@@ -5,13 +5,14 @@ compile_loop.py - Autonomous Java compile-validation loop
 2. Call /api/generate to get two .java files
 3. Save to test-runner/src/test/java/com/qaforge/tests/
 4. Run mvn clean test-compile
-5. If fail: parse error, report; if success: count consecutive passes
-6. Repeat until 3 consecutive passes or 10 attempts
+5. If compile FAIL: parse error, fix SYSTEM_PROMPT; reset consecutive
+   If generate FAIL (rate limit / network): wait + retry same attempt (no consecutive reset)
+6. Repeat until 3 consecutive BUILD SUCCESS or MAX_ATTEMPTS compile attempts
 
 Requires:
   - Express server running (node server/server.js)
   - GROQ_API_KEY env var set
-  - Java 11 and Maven in PATH (or set JAVA_HOME + MVN_BIN)
+  - Java 11 and Maven in PATH (or JAVA_HOME + MVN_BIN env vars)
 
 Usage:
   set GROQ_API_KEY=gsk_...
@@ -37,14 +38,17 @@ JAVA_HOME = os.environ.get("JAVA_HOME",
 MVN_BIN = os.environ.get("MVN_BIN",
     r"C:\tools\maven\apache-maven-3.9.6\bin\mvn.cmd")
 
-MAX_ATTEMPTS = 10
+MAX_COMPILE_ATTEMPTS = 10   # max times we actually try to compile (not counting gen retries)
+MAX_GEN_RETRIES = 8         # max retries per compile attempt when Groq is unavailable
 REQUIRED_CONSECUTIVE = 3
+GEN_RETRY_DELAY = 35        # seconds between Groq retries (rate limit window)
 
-PASS = "[PASS]"
-FAIL = "[FAIL]"
+PASS_TAG = "[PASS]"
+FAIL_TAG = "[FAIL]"
+WARN_TAG = "[WARN]"
 
 
-def req(method, path, body=None, timeout=60):
+def req(method, path, body=None, timeout=120):
     data = json.dumps(body).encode() if body is not None else None
     headers = {"Content-Type": "application/json"} if data else {}
     r = urllib.request.Request(f"{BASE}{path}", data=data, headers=headers, method=method)
@@ -52,12 +56,14 @@ def req(method, path, body=None, timeout=60):
         with urllib.request.urlopen(r, timeout=timeout) as resp:
             return resp.status, json.loads(resp.read())
     except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read())
+        try:
+            return e.code, json.loads(e.read())
+        except Exception:
+            return e.code, {"error": str(e)}
     except Exception as ex:
         return 0, {"error": str(ex)}
 
 
-# Re-use event definitions from mock_events
 sys.path.insert(0, os.path.dirname(__file__))
 from mock_events import MOCK_EVENTS
 
@@ -72,14 +78,16 @@ def inject_events():
 
 
 def generate_files(api_key):
+    """Returns (files, error_message). files=None on failure."""
     status, body = req("POST", "/api/generate", {
         "apiKey": api_key,
         "appName": APP_NAME,
         "platform": PLATFORM,
     }, timeout=120)
     if status == 200 and body.get("ok"):
-        return body["files"]
-    return None
+        return body["files"], None
+    msg = body.get("message", f"HTTP {status}")
+    return None, msg
 
 
 def save_files(files):
@@ -88,14 +96,14 @@ def save_files(files):
         path = os.path.join(TEST_DIR, f["filename"])
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(f["content"])
-        print(f"  Saved: {f['filename']}")
+        print(f"    Saved: {f['filename']} ({len(f['content'])} chars)")
 
 
 def mvn_compile():
     env = os.environ.copy()
     env["JAVA_HOME"] = JAVA_HOME
-    env["PATH"] = os.path.join(JAVA_HOME, "bin") + os.pathsep + \
-                  os.path.dirname(MVN_BIN) + os.pathsep + env.get("PATH", "")
+    env["PATH"] = (os.path.join(JAVA_HOME, "bin") + os.pathsep +
+                   os.path.dirname(MVN_BIN) + os.pathsep + env.get("PATH", ""))
     result = subprocess.run(
         [MVN_BIN, "clean", "test-compile"],
         cwd=RUNNER_DIR,
@@ -107,72 +115,111 @@ def mvn_compile():
     return result.returncode == 0, result.stdout + result.stderr
 
 
-def parse_errors(output):
+def parse_compile_errors(output):
+    """Return the most useful error lines from javac output."""
     lines = output.splitlines()
-    errors = [l for l in lines if "ERROR" in l or "error:" in l.lower()]
-    return errors[:15]
+    errors = []
+    for i, line in enumerate(lines):
+        if "error:" in line.lower() and "BUILD" not in line:
+            # include 2 lines of context
+            errors.append(line)
+            if i + 1 < len(lines):
+                errors.append("  " + lines[i + 1])
+    return errors[:20]
 
 
 def main():
     api_key = os.environ.get("GROQ_API_KEY", "")
     if not api_key:
-        print("ERROR: GROQ_API_KEY not set. Cannot run compile loop.")
+        print("ERROR: GROQ_API_KEY not set.")
         sys.exit(1)
 
-    print("=" * 58)
+    print("=" * 60)
     print("  compile_loop.py - Java compile validation loop")
-    print("=" * 58)
+    print(f"  Target: {MAX_COMPILE_ATTEMPTS} compile attempts, {REQUIRED_CONSECUTIVE} consecutive needed")
+    print("=" * 60)
 
     consecutive = 0
-    attempt = 0
+    compile_attempt = 0
 
-    while attempt < MAX_ATTEMPTS and consecutive < REQUIRED_CONSECUTIVE:
-        attempt += 1
-        print(f"\n--- Attempt {attempt}/{MAX_ATTEMPTS} (consecutive: {consecutive}/{REQUIRED_CONSECUTIVE}) ---")
+    while compile_attempt < MAX_COMPILE_ATTEMPTS and consecutive < REQUIRED_CONSECUTIVE:
+        compile_attempt += 1
+        print(f"\n--- Compile attempt {compile_attempt}/{MAX_COMPILE_ATTEMPTS} "
+              f"(consecutive: {consecutive}/{REQUIRED_CONSECUTIVE}) ---")
 
-        print("  [1] Injecting mock events...")
+        # Step 1: inject events
         if not inject_events():
-            print(f"  {FAIL} Could not inject events")
-            consecutive = 0
-            continue
-
-        print("  [2] Calling /api/generate...")
-        files = generate_files(api_key)
-        if not files:
-            print(f"  {FAIL} Generation failed")
+            print(f"  {FAIL_TAG} Could not inject events — is the server running?")
             consecutive = 0
             time.sleep(5)
             continue
 
+        # Step 2: generate with retry loop for rate limiting
+        files = None
+        for gen_try in range(1, MAX_GEN_RETRIES + 1):
+            print(f"  [gen try {gen_try}/{MAX_GEN_RETRIES}] Calling /api/generate...")
+            files, err_msg = generate_files(api_key)
+            if files:
+                break
+            is_rate_limit = "rate limit" in (err_msg or "").lower() or "429" in (err_msg or "")
+            is_auth = "401" in (err_msg or "") or "api key" in (err_msg or "").lower()
+            print(f"  {WARN_TAG} Generation failed: {err_msg}")
+            if is_auth:
+                print(f"  {FAIL_TAG} Auth error — check GROQ_API_KEY")
+                sys.exit(1)
+            if gen_try < MAX_GEN_RETRIES:
+                delay = GEN_RETRY_DELAY if is_rate_limit else 10
+                print(f"  Waiting {delay}s before retry...")
+                time.sleep(delay)
+
+        if not files:
+            print(f"  {FAIL_TAG} Could not get generated files after {MAX_GEN_RETRIES} tries — skipping compile")
+            # Don't reset consecutive — this is a Groq availability issue, not code quality
+            print(f"  {WARN_TAG} consecutive stays at {consecutive} (gen failure is not a code issue)")
+            time.sleep(10)
+            continue
+
+        # Step 3: save
         print("  [3] Saving files...")
         save_files(files)
 
+        # Step 4: compile
         print("  [4] Running mvn clean test-compile...")
         ok, output = mvn_compile()
 
         if ok:
             consecutive += 1
-            print(f"  {PASS} BUILD SUCCESS (consecutive: {consecutive})")
+            print(f"  {PASS_TAG} BUILD SUCCESS (consecutive: {consecutive}/{REQUIRED_CONSECUTIVE})")
         else:
             consecutive = 0
-            errors = parse_errors(output)
-            print(f"  {FAIL} BUILD FAILED")
-            print("  Top errors:")
-            for e in errors:
-                print(f"    {e}")
-            # Note: in autonomous mode, we would patch SYSTEM_PROMPT here.
-            # Since Groq output varies, the key fixes are already in SYSTEM_PROMPT.
-            # Print the full output section for diagnosis:
-            start = output.find("[ERROR]")
-            if start > -1:
-                print("  ... (see above for full error context)")
+            errors = parse_compile_errors(output)
+            print(f"  {FAIL_TAG} BUILD FAILED")
+            if errors:
+                print("  Compiler errors:")
+                for e in errors:
+                    print(f"    {e}")
+            else:
+                # Show raw [ERROR] lines as fallback
+                for line in output.splitlines():
+                    if "[ERROR]" in line:
+                        print(f"    {line}")
+            print()
+            print("  NOTE: Fix SYSTEM_PROMPT in server.js if this error is systematic.")
+            print("  The generated files are saved for inspection:")
+            for fname in os.listdir(TEST_DIR):
+                if fname.endswith(".java"):
+                    print(f"    {os.path.join(TEST_DIR, fname)}")
 
-    print(f"\n{'=' * 58}")
+        # Brief pause between compile attempts to avoid hammering Groq
+        if consecutive < REQUIRED_CONSECUTIVE and compile_attempt < MAX_COMPILE_ATTEMPTS:
+            time.sleep(8)
+
+    print(f"\n{'=' * 60}")
     if consecutive >= REQUIRED_CONSECUTIVE:
-        print(f"  SUCCESS: {REQUIRED_CONSECUTIVE} consecutive BUILD SUCCESS achieved in {attempt} attempts")
+        print(f"  SUCCESS: {REQUIRED_CONSECUTIVE} consecutive BUILD SUCCESS in {compile_attempt} compile attempts")
     else:
-        print(f"  INCOMPLETE: only {consecutive} consecutive passes after {attempt} attempts")
-    print("=" * 58)
+        print(f"  INCOMPLETE: {consecutive} consecutive passes after {compile_attempt} compile attempts")
+    print("=" * 60)
 
     return consecutive >= REQUIRED_CONSECUTIVE
 
