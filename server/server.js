@@ -1,4 +1,4 @@
-/**
+﻿/**
  * AI-Powered Desktop Automation Code Generator - Express Bridge Server
  * =====================================================================
  *  - Proxies start/stop commands from the React UI to the Python agent (4444)
@@ -143,7 +143,22 @@ Hard rules for every file you produce:
 - Before each action in the test method, print a step log: System.out.println("[STEP n] ...").
 - End the test with at least one Assert that verifies the final state (e.g. an element is displayed or the session is active).
 - Method and field names must be descriptive, derived from the element names.
-- The code must compile as-is with the standard Appium Java client + TestNG.`;
+- Full imports at the top (java.time.Duration, java.net.MalformedURLException, java.net.URL, org.openqa.selenium.*, org.openqa.selenium.support.ui.*, org.testng.annotations.*, org.testng.Assert, io.appium.java_client.AppiumBy, io.appium.java_client.windows.WindowsDriver, io.appium.java_client.windows.options.WindowsOptions).
+- Before each action in the test method, print a step log: System.out.println("[STEP n] ...").
+- End the test with at least one Assert that verifies the final state (e.g. an element is displayed or the session is active).
+- Method and field names must be descriptive, derived from the element names.
+- The code must compile with Appium java-client 8.6.0 and TestNG 7.x.
+
+CRITICAL - driver initialisation (W3C protocol, required for java-client 8.x):
+  WindowsOptions options = new WindowsOptions();
+  options.setApp("<exePath>");
+  driver = new WindowsDriver(new URL("http://127.0.0.1:4723"), options);
+  NEVER use DesiredCapabilities - it is incompatible with java-client 8.x.
+
+CRITICAL - locators (use AppiumBy, not MobileBy which is deprecated):
+  AppiumBy.accessibilityId("automationId")   // AutomationId-based strategy
+  By.className("className")                  // ClassName-based strategy
+  By.name("elementName")                     // fallback when id/class empty`;
 
 function buildUserPrompt(strategy, appName, platform, eventList) {
   const p = PLATFORM_MAP[platform] || PLATFORM_MAP.Windows;
@@ -189,8 +204,8 @@ async function groqGenerate(apiKey, strategy, appName, platform, eventList) {
   if (!res.ok) {
     const text = await res.text();
     const hints = {
-      401: 'Invalid Groq API key — check your key at console.groq.com',
-      429: 'Groq rate limit exceeded — wait a moment and retry',
+      401: 'Invalid Groq API key ??check your key at console.groq.com',
+      429: 'Groq rate limit exceeded ??wait a moment and retry',
     };
     throw new Error(hints[res.status] ?? `Groq API ${res.status}: ${text.slice(0, 300)}`);
   }
@@ -245,3 +260,4 @@ app.post("/api/generate", async (req, res) => {
 app.listen(PORT, () =>
   console.log(`[bridge] Express server listening on http://localhost:${PORT}`)
 );
+
