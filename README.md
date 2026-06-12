@@ -1,7 +1,7 @@
 # AI-Powered Desktop Automation Code Generator
 
 Records user interactions with any Windows desktop application and generates
-runnable Appium Java (TestNG) test code via Groq AI.
+runnable test code (Appium Java TestNG or Playwright Python) via Groq AI.
 
 ## Architecture
 
@@ -21,9 +21,9 @@ the AI; the React dashboard provides live monitoring and triggers code generatio
 |---|---|---|
 | Python | 3.9+ | Must run agent from **Administrator** terminal |
 | Node.js | 18+ | For Express bridge and React UI |
-| Java | 11+ | For running generated tests |
+| Java | 11+ | For running generated Appium tests |
 | Maven | 3.8+ | `mvn -version` to verify |
-| WinAppDriver | 1.2.1 | See section below |
+| WinAppDriver | 1.2.1 | Required for Appium Java test execution |
 | Groq API key | — | Free at console.groq.com |
 
 ---
@@ -60,35 +60,38 @@ npm run dev
 # Open http://localhost:3000
 ```
 
-### Smoke test (no UI)
+---
 
-```powershell
-# Start a recording session
-curl -X POST http://localhost:3002/api/start `
-  -H "Content-Type: application/json" `
-  -d '{"appName":"Calculator","exePath":"C:\\Windows\\System32\\calc.exe","platform":"Windows"}'
+## 2. Recording a Session
 
-# Stop
-curl -X POST http://localhost:3002/api/stop
+1. Fill in **App Name** and **Exe Path** in the dashboard.
+2. Select **Platform** (Windows / Android / iOS).
+3. Select **Output Framework**: `Appium Java (TestNG)` or `Playwright Python`.
+4. Click **Launch** — the target app opens and recording begins.
+5. Interact with the app (clicks, typing, scrolling).
+6. Click **Stop** when done.
+7. Each captured event row can be **deleted individually** by hovering over it and clicking the `×` button.
+8. Enter your **Groq API Key** and click **Generate Code**.
 
-# Generate code (replace YOUR_KEY)
-curl -X POST http://localhost:3002/api/generate `
-  -H "Content-Type: application/json" `
-  -d '{"apiKey":"YOUR_KEY","appName":"Calculator","platform":"Windows"}'
-```
+### Generated output
+
+| Framework | Files |
+|---|---|
+| Appium Java | `{App}TestById.java`, `{App}TestByClass.java` |
+| Playwright Python | `test_{app}_playwright.py` |
 
 ---
 
-## 2. Install WinAppDriver
+## 3. Install & Run WinAppDriver
 
 WinAppDriver is Microsoft's WebDriver server for Windows desktop apps.
-It must be running whenever you execute generated tests.
+Required only when **running** the generated Appium Java tests.
 
 ### Installation
 
-1. Download **WinAppDriver 1.2.1** installer:
+1. Download **WinAppDriver 1.2.1** installer from GitHub releases:
    `https://github.com/microsoft/WinAppDriver/releases/tag/v1.2.1`
-   → `WindowsApplicationDriver.msi`
+   File: `WindowsApplicationDriver.msi`
 
 2. Run the installer (default path:
    `C:\Program Files (x86)\Windows Application Driver\`)
@@ -110,45 +113,55 @@ Expected output:
 Windows Application Driver listening for requests at: http://127.0.0.1:4723/
 ```
 
-Leave this terminal open for the duration of your test run.
+Leave this terminal open during the test run.
 
 ---
 
-## 3. Run Generated Tests
+## 4. Run Generated Appium Java Tests
 
-### Step 1 — Generate test files
-
-Use the React UI or call `/api/generate` directly. The server returns two files:
-
-- `{AppName}TestById.java` — locates elements by `AutomationId`
-- `{AppName}TestByClass.java` — locates elements by `ClassName`
-
-### Step 2 — Drop files into the test-runner
-
-```
-test-runner/
-└── src/test/java/com/qaforge/tests/
-    ├── CalculatorTestById.java      <- paste here
-    └── CalculatorTestByClass.java   <- paste here
-```
-
-### Step 3 — Start WinAppDriver (Administrator terminal)
-
-See section 2 above.
-
-### Step 4 — Run tests
+### Setup
 
 ```powershell
-cd test-runner
-mvn test
+# Java 11 (Temurin)
+winget install EclipseAdoptium.Temurin.11.JDK
+
+# Maven (if winget doesn't find it, download manually from archive.apache.org)
+# Place in C:\tools\maven\apache-maven-3.9.6\
 ```
 
-Test reports are written to `test-runner/target/surefire-reports/`.
+### Step-by-step
+
+1. Generate test files using the UI.
+2. Save both `.java` files to:
+   ```
+   test-runner\src\test\java\com\qaforge\tests\
+   ```
+3. Start WinAppDriver as Administrator (port 4723).
+4. Run:
+   ```powershell
+   cd test-runner
+   mvn test
+   ```
+
+Test reports: `test-runner\target\surefire-reports\`
 
 To run only one file:
-
 ```powershell
 mvn test -Dtest=CalculatorTestById
+```
+
+---
+
+## 5. Regression Testing
+
+```powershell
+# Requires only server running (no agent, no admin rights needed)
+cd server; node server.js  # Terminal 1
+python agent/mock_events.py  # Terminal 2
+# Expected: 33/33 checks passed
+
+# With Groq key (tests code generation + Playwright syntax):
+$env:GROQ_API_KEY="gsk_..."; python agent/mock_events.py
 ```
 
 ---
@@ -157,24 +170,28 @@ mvn test -Dtest=CalculatorTestById
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `Agent unreachable` from Express | Python agent not running | Start `python agent.py` in an Admin terminal |
+| `Agent unreachable` from Express | Python agent not running | Start `python agent.py` in Admin terminal |
 | `Administrator rights: NO` | Agent not started as Administrator | Reopen PowerShell → Run as Administrator |
 | `Connection refused` on port 4723 | WinAppDriver not running | Start `WinAppDriver.exe` as Administrator |
-| `SessionNotCreatedException: app not found` | Wrong `.exe` path in capability | Verify the path passed to `/api/start` |
-| `NoSuchElementException` | Locator mismatch or timing | Try the `ByClass` file; check WinAppDriver console log |
-| `Cannot find symbol: WindowsDriver` | Wrong `java-client` version | Confirm `pom.xml` uses `java-client 8.6.0` |
-| UIA properties (`AutomationId`, `Name`) are empty | Not running as Admin | Restart agent terminal as Administrator |
-| comtypes initialisation delay on first run | Normal — generates COM wrapper | Wait ~5 seconds for first startup |
+| `SessionNotCreatedException` | Wrong `.exe` path in capability | Verify path passed to Launch |
+| `NoSuchElementException` | Locator mismatch or timing | Try the ByClass file instead of ById |
+| `Cannot find symbol: WindowsDriver` | Wrong java-client version | Confirm `pom.xml` uses `java-client 8.6.0` |
+| UIA properties empty | Not running as Admin | Restart agent terminal as Administrator |
+| Toast "Server connection lost" loops | Express server crashed | Restart `node server.js`; toasts fire once per episode |
+| `UnicodeEncodeError cp949` | Windows terminal encoding | Use `chcp 65001` before running Python scripts |
+| winget can't find Apache.Maven | Package not in winget catalog | Download from `archive.apache.org/dist/maven` |
 
 ---
 
-## Generated Code Requirements
+## Generated Code Requirements (Appium Java)
 
-Both `.java` files produced by `/api/generate` conform to:
+Both `.java` files conform to:
 
 - Package `com.qaforge.tests`
 - TestNG `@BeforeClass` / `@Test` / `@AfterClass`
-- Page Object Model (Page class + Test class in one `.java` file)
+- Page Object Model (Page + Test class in one `.java` file)
+- `WindowsOptions` for W3C-compliant driver init (java-client 8.x compatible)
+- `AppiumBy.accessibilityId()` / `By.className()` / `By.name()` locators
 - `WebDriverWait(driver, Duration.ofSeconds(15))` for every interaction
 - `System.out.println("[STEP n] ...")` before each action
 - Final `Assert` verifying session state
