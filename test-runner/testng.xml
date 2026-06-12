@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE suite SYSTEM "https://testng.org/testng-1.0.dtd">
+<suite name="QAForge-Desktop-Suite" verbose="2">
+
+    <!--
+        Drop generated .java files into:
+            src/test/java/com/qaforge/tests/
+        then run:
+            mvn test
+
+        WinAppDriver must be running at http://127.0.0.1:4723 before mvn test.
+        See README.md for full setup instructions.
+    -->
+
+    <test name="GeneratedTests" preserve-order="true">
+        <packages>
+            <package name="com.qaforge.tests"/>
+        </packages>
+    </test>
+
+</suite>
