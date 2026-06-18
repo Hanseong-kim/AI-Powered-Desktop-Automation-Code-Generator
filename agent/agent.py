@@ -61,7 +61,9 @@ UIA_CONTROL_TYPES = {
 }
 INPUT_CONTROL_TYPES = {"Edit", "Document", "ComboBox"}
 
-GA_ROOT = 2  # GetAncestor flag
+GA_ROOT = 2                    # GetAncestor flag
+UIA_Invoke_InvokedEventId = 20009
+TreeScope_Subtree = 4
 
 
 def log(*args):
@@ -139,6 +141,7 @@ class UIAInspector:
             "windowTitle": "",
             "xpath": "",
             "hwnd": 0,
+            "pid": 0,
         }
         if elem is None:
             return info
@@ -159,6 +162,10 @@ class UIAInspector:
             pass
         try:
             info["hwnd"] = elem.CurrentNativeWindowHandle or 0
+        except Exception:
+            pass
+        try:
+            info["pid"] = elem.CurrentProcessId or 0
         except Exception:
             pass
 
@@ -192,6 +199,29 @@ class UIAInspector:
         return info
 
 
+def _make_invoke_handler(raw_queue):
+    """Factory: lazy-imports IUIAutomationEventHandler so comtypes.gen is
+    guaranteed to already exist (GetModule must have run on the calling thread
+    before this is called). Stores no external references so GC is safe as
+    long as the caller keeps the returned object alive."""
+    from comtypes.gen.UIAutomationClient import IUIAutomationEventHandler
+
+    class _Handler(comtypes.COMObject):
+        _com_interfaces_ = [IUIAutomationEventHandler]
+
+        def HandleAutomationEvent(self, sender, eventId):
+            try:
+                info = UIAInspector.describe(sender)
+                log(f"[uia-events] invoke id='{info.get('automationId','')}' "
+                    f"name='{info.get('name','')[:20]}'")
+                raw_queue.put({"kind": "uia_invoke", "elem": info,
+                               "ts": time.time()})
+            except Exception:
+                pass
+
+    return _Handler()
+
+
 def hwnd_at_point(x, y):
     try:
         return ctypes.windll.user32.WindowFromPoint(wintypes.POINT(int(x), int(y)))
@@ -219,6 +249,8 @@ class Recorder:
         self.target_exe = ""         # lowercase basename, e.g. "notepad.exe"
         self.target_pids = set()     # launched pid + descendants (lazy refresh)
         self.proc = None
+        self.known_window_title = ""  # actual title of target window (may be non-English)
+        self._uia_event_thread = None
 
         self._mouse_listener = None
         self._kb_listener = None
@@ -239,6 +271,7 @@ class Recorder:
         self.target_exe = os.path.basename(exe_path).lower()
         self.event_count = 0
         self.target_pids = set()
+        self.known_window_title = ""
 
         # Launch the target application
         try:
@@ -279,6 +312,9 @@ class Recorder:
                 pass
         if self._worker:
             self._worker.join(timeout=5)
+        if self._uia_event_thread:
+            self._uia_event_thread.stop()
+            self._uia_event_thread = None
         log("Recording stopped")
         return True, "Recording stopped"
 
@@ -334,22 +370,40 @@ class Recorder:
             pass
         return False
 
-    def _belongs_to_target(self, hwnd, x=None, y=None):
+    def _belongs_to_target(self, hwnd, x=None, y=None, pid=None):
+        # 1. UIA process ID — most reliable path for UWP (bypasses hwnd=0 limitation)
+        if pid and self._is_target_pid(pid):
+            return True
+        # 2. hwnd-based PID lookup
         if not hwnd and x is not None:
             hwnd = hwnd_at_point(x, y)
         if self._is_target_pid(pid_of_hwnd(hwnd)):
             return True
-        # UWP fallback: accept if the top-level window title contains the app
-        # name.  UWP apps re-spawn under an unrelated PID that parent-walk
-        # never reaches.  Cache the matched PID so subsequent calls use the
-        # fast path.
-        return self._title_matches_app(hwnd)
+        # 3. Window title match (appName or cached real title like "계산기")
+        if self._title_matches_app(hwnd):
+            return True
+        # 4. UWP: WindowFromPoint returns ApplicationFrameHost's HWND.
+        #    CalculatorApp's CoreWindow is a child — enumerate children for its PID.
+        if hwnd:
+            found = [False]
+            def _check_child(child_hwnd, _):
+                if self._is_target_pid(pid_of_hwnd(child_hwnd)):
+                    found[0] = True
+                    return False
+                return True
+            try:
+                win32gui.EnumChildWindows(hwnd, _check_child, None)
+            except Exception:
+                pass
+            if found[0]:
+                return True
+        return False
 
     def _title_matches_app(self, hwnd):
         if not hwnd:
             return False
         app_name = self.session.get("appName", "").strip()
-        if not app_name:
+        if not app_name and not self.known_window_title:
             return False
         try:
             root = ctypes.windll.user32.GetAncestor(hwnd, GA_ROOT) or hwnd
@@ -358,7 +412,10 @@ class Recorder:
                 return False
             def norm(s):
                 return "".join(c for c in s.lower() if c.isalnum())
-            if norm(app_name) in norm(title):
+            n_title = norm(title)
+            matched = (app_name and norm(app_name) in n_title) or \
+                      (self.known_window_title and norm(self.known_window_title) == n_title)
+            if matched:
                 pid = pid_of_hwnd(root)
                 if pid:
                     self.target_pids.add(pid)
@@ -366,6 +423,52 @@ class Recorder:
         except Exception:
             pass
         return False
+
+    # ---------------- UWP pid / window discovery ----------------
+    def _find_target_window(self):
+        """Poll up to 3 s for the target app's top-level HWND.
+        Adds matching PIDs (incl. ApplicationFrameHost) to target_pids.
+        Returns the HWND (int) or 0 on timeout."""
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            result = [0]
+
+            def _enum_top(hwnd, _):
+                if not win32gui.IsWindowVisible(hwnd):
+                    return True
+                wpid = pid_of_hwnd(hwnd)
+                if wpid and self._is_target_pid(wpid):
+                    self.target_pids.add(wpid)
+                    result[0] = hwnd
+                    return False
+
+                def _enum_child(child, __):
+                    cpid = pid_of_hwnd(child)
+                    if cpid and self._is_target_pid(cpid):
+                        if wpid:
+                            self.target_pids.add(wpid)
+                        result[0] = hwnd
+                        return False
+                    return True
+
+                try:
+                    win32gui.EnumChildWindows(hwnd, _enum_child, None)
+                except Exception:
+                    pass
+                return result[0] == 0
+
+            try:
+                win32gui.EnumWindows(_enum_top, None)
+            except Exception:
+                pass
+
+            if result[0]:
+                log(f"[discover] target pids: {self.target_pids} hwnd: {result[0]}")
+                return result[0]
+            time.sleep(0.2)
+
+        log("[discover] timed out — using launch pid only")
+        return 0
 
     # ---------------- worker (UIA lookups + emission happen here) ----------
     def _worker_loop(self):
@@ -375,6 +478,11 @@ class Recorder:
             log("FATAL: could not initialise UI Automation")
             traceback.print_exc()
             return
+
+        target_hwnd = self._find_target_window()
+        if target_hwnd:
+            self._uia_event_thread = UIAEventThread(self.raw_queue)
+            self._uia_event_thread.start(target_hwnd)
 
         while True:
             try:
@@ -406,6 +514,16 @@ class Recorder:
             self._flush_pending_scroll()
             return
 
+        if kind == "uia_invoke":
+            # UIA Invoke event: upgrade the pending pynput click if it's still
+            # in the double-click hold window, otherwise emit directly.
+            if (self._pending_click
+                    and time.time() - self._pending_click["ts"] < DOUBLE_CLICK_INTERVAL):
+                self._pending_click["uia_elem"] = item["elem"]
+            else:
+                self._emit("click", item["elem"])
+            return
+
         if kind == "click":
             # focus moved -> typing into the previous field is complete
             self._flush_type_buffer()
@@ -428,7 +546,8 @@ class Recorder:
             else:
                 self._flush_pending_click()
                 self._pending_click = {"x": x, "y": y, "ts": ts,
-                                       "elem": self._inspect(ins, x, y)}
+                                       "elem": self._inspect(ins, x, y),
+                                       "uia_elem": None}
             return
 
         if kind == "scroll":
@@ -497,7 +616,7 @@ class Recorder:
             return ins.describe(elem)
         except Exception:
             return {"automationId": "", "className": "", "name": "",
-                    "controlType": "", "windowTitle": "", "xpath": "", "hwnd": 0}
+                    "controlType": "", "windowTitle": "", "xpath": "", "hwnd": 0, "pid": 0}
 
     # ---------------- pending flushes ----------------
     def _flush_stale(self, ins):
@@ -510,7 +629,8 @@ class Recorder:
     def _flush_pending_click(self):
         pc, self._pending_click = self._pending_click, None
         if pc:
-            self._emit("click", pc["elem"], x=pc["x"], y=pc["y"])
+            elem = pc["uia_elem"] if pc.get("uia_elem") else pc["elem"]
+            self._emit("click", elem, x=pc["x"], y=pc["y"])
 
     def _flush_pending_scroll(self):
         ps, self._pending_scroll = self._pending_scroll, None
@@ -531,10 +651,15 @@ class Recorder:
     def _emit(self, action, elem, x=None, y=None, value=None):
         elem = elem or {}
         hwnd = elem.get("hwnd", 0)
+        pid = elem.get("pid", 0)
         # application filtering (typing was already filtered at buffer start)
-        if action != "type" and not self._belongs_to_target(hwnd, x, y):
-            log(f"[skip] {action} hwnd={hwnd} x={x} y={y} — not target app")
+        if action != "type" and not self._belongs_to_target(hwnd, x, y, pid=pid):
+            log(f"[skip] {action} hwnd={hwnd} pid={pid} x={x} y={y} — not target app")
             return
+        # Cache actual window title for locale-independent _title_matches_app
+        wt = elem.get("windowTitle", "")
+        if wt and not self.known_window_title:
+            self.known_window_title = wt
 
         event = {
             "action": action,
@@ -566,6 +691,78 @@ class Recorder:
             requests.post(EXPRESS_EVENTS_URL, json=event, timeout=3)
         except Exception as e:
             log(f"WARN: could not POST to bridge: {e}")
+
+
+# ----------------------------------------------------------------------------
+# UIA event thread (dedicated STA + PumpMessages for Invoke events)
+# ----------------------------------------------------------------------------
+class UIAEventThread:
+    """Runs a dedicated STA COM thread with pythoncom.PumpMessages so that
+    UIA Invoke events are delivered without a message pump on the worker thread.
+    Events are posted to raw_queue as {kind: uia_invoke, elem: ..., ts: ...}.
+    self._handler is kept alive to prevent COMObject GC."""
+
+    def __init__(self, raw_queue):
+        self._queue = raw_queue
+        self._thread_id = 0
+        self._ready = threading.Event()
+        self._thread = None
+        self._handler = None  # GC anchor for the COMObject
+
+    def start(self, target_hwnd):
+        self._target_hwnd = target_hwnd
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        self._ready.wait(timeout=5.0)
+
+    def _run(self):
+        import pythoncom
+        import comtypes.client
+
+        pythoncom.CoInitialize()
+        self._thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
+        registered = False
+
+        try:
+            uia = comtypes.client.CreateObject(
+                "{ff48dba4-60ef-4201-aa87-54103eef594e}",
+                interface=comtypes.client.GetModule(
+                    "UIAutomationCore.dll").IUIAutomation,
+            )
+            if self._target_hwnd:
+                elem = uia.ElementFromHandle(self._target_hwnd)
+                # _make_invoke_handler lazy-imports IUIAutomationEventHandler;
+                # GetModule above ensures comtypes.gen module already exists.
+                self._handler = _make_invoke_handler(self._queue)
+                uia.AddAutomationEventHandler(
+                    UIA_Invoke_InvokedEventId,
+                    elem, TreeScope_Subtree, None, self._handler,
+                )
+                log(f"[uia-events] invoke handler registered hwnd={self._target_hwnd}")
+                registered = True
+            self._uia = uia
+        except Exception:
+            log("[uia-events] registration failed — pynput path is fallback")
+            traceback.print_exc()
+        finally:
+            self._ready.set()
+
+        if not registered:
+            return  # no message loop needed; pynput handles everything
+
+        pythoncom.PumpMessages()  # blocks; UIA Invoke events delivered on this thread
+
+        try:
+            if hasattr(self, '_uia'):
+                self._uia.RemoveAllEventHandlers()
+        except Exception:
+            pass
+
+    def stop(self):
+        if self._thread_id:
+            # WM_QUIT = 0x0012 breaks PumpMessages
+            ctypes.windll.user32.PostThreadMessageW(
+                self._thread_id, 0x0012, 0, 0)
 
 
 # ----------------------------------------------------------------------------
