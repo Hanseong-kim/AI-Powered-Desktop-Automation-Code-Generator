@@ -19,6 +19,7 @@ Usage:
   python agent/compile_loop.py
 """
 
+import io
 import json
 import os
 import subprocess
@@ -26,6 +27,18 @@ import sys
 import time
 import urllib.error
 import urllib.request
+
+# Force UTF-8 output to handle non-ASCII in Groq error messages on cp949 terminals
+if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
+# Load .env for local validation (UI requests still use user-supplied key)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+except ImportError:
+    pass
 
 BASE = "http://localhost:3002"
 APP_NAME = "Calculator"

@@ -86,7 +86,43 @@ class UIAInspector:
 
     def element_at(self, x, y):
         pt = wintypes.POINT(int(x), int(y))
-        return self._uia.ElementFromPoint(pt)
+        elem = self._uia.ElementFromPoint(pt)
+        if elem is not None:
+            try:
+                if not elem.CurrentAutomationId:
+                    deeper = self._deepen(elem, int(x), int(y))
+                    if deeper is not None:
+                        try:
+                            if deeper.CurrentAutomationId or deeper.CurrentName:
+                                return deeper
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        return elem
+
+    def _deepen(self, elem, x, y, depth=0):
+        """Walk ControlView tree to find the deepest child containing (x, y)."""
+        if depth >= 5:
+            return None
+        try:
+            walker = self._uia.ControlViewWalker
+            child = walker.GetFirstChildElement(elem)
+            while child is not None:
+                try:
+                    rect = child.CurrentBoundingRectangle
+                    if rect.left <= x <= rect.right and rect.top <= y <= rect.bottom:
+                        deeper = self._deepen(child, x, y, depth + 1)
+                        return deeper if deeper is not None else child
+                except Exception:
+                    pass
+                try:
+                    child = walker.GetNextSiblingElement(child)
+                except Exception:
+                    break
+        except Exception:
+            pass
+        return None
 
     def focused_element(self):
         return self._uia.GetFocusedElement()
@@ -134,6 +170,17 @@ class UIAInspector:
                 info["windowTitle"] = win32gui.GetWindowText(root or hwnd)
         except Exception:
             pass
+        # Fallback: foreground window for UWP elements where hwnd=0
+        # (UWP elements often return CurrentNativeWindowHandle=0, leaving windowTitle empty,
+        #  causing buildUserPrompt to fall back to the English appName instead of the
+        #  localized title like "계산기")
+        if not info["windowTitle"]:
+            try:
+                fg = ctypes.windll.user32.GetForegroundWindow()
+                if fg:
+                    info["windowTitle"] = win32gui.GetWindowText(fg)
+            except Exception:
+                pass
 
         # Locator / XPath from the most stable identifier
         if info["automationId"]:
@@ -266,7 +313,8 @@ class Recorder:
             return True
         try:
             p = psutil.Process(pid)
-            if p.name().lower() == self.target_exe:
+            proc_name = p.name().lower()
+            if proc_name == self.target_exe:
                 self.target_pids.add(pid)
                 return True
             # accept descendants of the launched process (some apps re-spawn)
@@ -275,6 +323,13 @@ class Recorder:
                     if anc.pid == self.proc.pid:
                         self.target_pids.add(pid)
                         return True
+            # UWP stub match: "calc.exe" launcher exits immediately; the real
+            # process is "CalculatorApp.exe".  Match by exe stem as a substring
+            # of the actual process name (language-independent).
+            target_stem = os.path.splitext(self.target_exe)[0].lower()
+            if len(target_stem) >= 3 and target_stem in proc_name:
+                self.target_pids.add(pid)
+                return True
         except Exception:
             pass
         return False
@@ -282,7 +337,35 @@ class Recorder:
     def _belongs_to_target(self, hwnd, x=None, y=None):
         if not hwnd and x is not None:
             hwnd = hwnd_at_point(x, y)
-        return self._is_target_pid(pid_of_hwnd(hwnd))
+        if self._is_target_pid(pid_of_hwnd(hwnd)):
+            return True
+        # UWP fallback: accept if the top-level window title contains the app
+        # name.  UWP apps re-spawn under an unrelated PID that parent-walk
+        # never reaches.  Cache the matched PID so subsequent calls use the
+        # fast path.
+        return self._title_matches_app(hwnd)
+
+    def _title_matches_app(self, hwnd):
+        if not hwnd:
+            return False
+        app_name = self.session.get("appName", "").strip()
+        if not app_name:
+            return False
+        try:
+            root = ctypes.windll.user32.GetAncestor(hwnd, GA_ROOT) or hwnd
+            title = win32gui.GetWindowText(root)
+            if not title:
+                return False
+            def norm(s):
+                return "".join(c for c in s.lower() if c.isalnum())
+            if norm(app_name) in norm(title):
+                pid = pid_of_hwnd(root)
+                if pid:
+                    self.target_pids.add(pid)
+                return True
+        except Exception:
+            pass
+        return False
 
     # ---------------- worker (UIA lookups + emission happen here) ----------
     def _worker_loop(self):
@@ -367,7 +450,13 @@ class Recorder:
             special = item.get("special")
             char = item.get("char")
 
-            if special in ("tab", "enter"):
+            if special == "tab":
+                self._flush_type_buffer()
+                return
+            if special == "enter":
+                # Preserve newline so sendKeys("...\n") can replay it
+                if self._type_buffer:
+                    self._type_buffer += "\n"
                 self._flush_type_buffer()
                 return
             if special == "backspace":
@@ -377,6 +466,8 @@ class Recorder:
                 char = " "
             if char is None:
                 return  # shift/ctrl/arrows etc. - ignored
+            if not (0x20 <= ord(char) <= 0x7E):
+                return  # non-ASCII (IME/CJK composition) — ignore silently
 
             # first keystroke of a burst: bind buffer to the focused element
             if not self._type_buffer:
@@ -391,6 +482,11 @@ class Recorder:
                     if elem is not None and elem.get("hwnd") and \
                             not self._is_target_pid(pid_of_hwnd(elem["hwnd"])):
                         return  # typing in another app -> ignore
+                # Skip keystrokes on non-input controls (e.g. UWP buttons emit
+                # synthetic keyboard events on click — they must not become type events)
+                ctrl_type = (elem or {}).get("controlType", "")
+                if ctrl_type and ctrl_type not in INPUT_CONTROL_TYPES:
+                    return
                 self._type_elem = elem or {}
             self._type_buffer += char
             return
@@ -437,6 +533,7 @@ class Recorder:
         hwnd = elem.get("hwnd", 0)
         # application filtering (typing was already filtered at buffer start)
         if action != "type" and not self._belongs_to_target(hwnd, x, y):
+            log(f"[skip] {action} hwnd={hwnd} x={x} y={y} — not target app")
             return
 
         event = {

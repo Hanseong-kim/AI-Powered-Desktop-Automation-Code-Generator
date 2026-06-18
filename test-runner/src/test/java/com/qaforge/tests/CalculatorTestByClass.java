@@ -3,18 +3,15 @@ package com.qaforge.tests;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.time.Duration;
-
 import org.openqa.selenium.By;
-import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.WebElement;
 import org.openqa.selenium.interactions.Actions;
 import org.openqa.selenium.support.ui.ExpectedConditions;
 import org.openqa.selenium.support.ui.WebDriverWait;
+import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
-import org.testng.Assert;
-
 import io.appium.java_client.AppiumBy;
 import io.appium.java_client.windows.WindowsDriver;
 import io.appium.java_client.windows.options.WindowsOptions;
@@ -24,53 +21,58 @@ public class CalculatorTestByClass {
     private CalculatorPageByClass calculatorPage;
 
     @BeforeClass
-    public void setup() throws MalformedURLException {
+    public void setUp() throws Exception {
+        // 1. Launch (works for Win32 and UWP; setApp(exePath) alone fails for UWP)
+        new ProcessBuilder("C:\\Windows\\System32\\calc.exe").start();
+
+        // 2. Root session — wait for the window, capture its native handle
+        WindowsOptions desktopOpts = new WindowsOptions();
+        desktopOpts.setApp("Root");
+        WindowsDriver desktopDriver = new WindowsDriver(new URL("http://127.0.0.1:4723"), desktopOpts);
+        WebDriverWait desktopWait = new WebDriverWait(desktopDriver, Duration.ofSeconds(15));
+        WebElement appWindow = desktopWait.until(
+                ExpectedConditions.presenceOfElementLocated(
+                        By.xpath("//Window[contains(@Name,'계산기')]")));
+        String hexHandle = "0x" + Long.toHexString(Long.parseLong(appWindow.getAttribute("NativeWindowHandle")));
+        desktopDriver.quit();
+
+        // 3. Attach to the running window via appTopLevelWindow
         WindowsOptions options = new WindowsOptions();
-        options.setApp("C:\\Windows\\System32\\calc.exe");
+        options.setCapability("appTopLevelWindow", hexHandle);
         driver = new WindowsDriver(new URL("http://127.0.0.1:4723"), options);
         calculatorPage = new CalculatorPageByClass(driver);
     }
 
     @Test
     public void testCalculator() {
-        System.out.println("[STEP 1] Click on the 'Five' button");
-        WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
-        WebElement fiveButton = wait.until(ExpectedConditions.elementToBeClickable(By.className("Button")));
-        Actions actions = new Actions(driver);
-        actions.moveToElement(fiveButton).click().perform();
+        System.out.println("[STEP 1] Click on Five button");
+        calculatorPage.clickFiveButton();
 
-        System.out.println("[STEP 2] Type '5' into the 'Display' field");
-        WebElement displayField = wait.until(ExpectedConditions.presenceOfElementLocated(By.name("Display")));
-        displayField.clear();
-        displayField.sendKeys("5");
+        System.out.println("[STEP 2] Type 5 into Display");
+        calculatorPage.typeIntoDisplay("5");
 
-        System.out.println("[STEP 3] Click on the 'Plus' button");
-        WebElement plusButton = wait.until(ExpectedConditions.elementToBeClickable(By.name("Plus")));
-        actions.moveToElement(plusButton).click().perform();
+        System.out.println("[STEP 3] Click on Plus button");
+        calculatorPage.clickPlusButton();
 
-        System.out.println("[STEP 4] Click on the 'Three' button");
-        WebElement threeButton = wait.until(ExpectedConditions.elementToBeClickable(By.name("Three")));
-        actions.moveToElement(threeButton).click().perform();
+        System.out.println("[STEP 4] Click on Three button");
+        calculatorPage.clickThreeButton();
 
-        System.out.println("[STEP 5] Type '3' into the 'Display' field");
-        displayField = wait.until(ExpectedConditions.presenceOfElementLocated(By.name("Display")));
-        displayField.clear();
-        displayField.sendKeys("3");
+        System.out.println("[STEP 5] Type 3 into Display");
+        calculatorPage.typeIntoDisplay("3");
 
-        System.out.println("[STEP 6] Click on the 'Equals' button");
-        WebElement equalsButton = wait.until(ExpectedConditions.elementToBeClickable(By.name("Equals")));
-        actions.moveToElement(equalsButton).click().perform();
+        System.out.println("[STEP 6] Click on Equals button");
+        calculatorPage.clickEqualsButton();
 
-        System.out.println("[STEP 7] Double click on the 'Result display' field");
-        WebElement resultDisplay = wait.until(ExpectedConditions.presenceOfElementLocated(By.name("Display")));
-        actions.moveToElement(resultDisplay).doubleClick().perform();
+        System.out.println("[STEP 7] Double click on Result display");
+        calculatorPage.doubleClickOnResultDisplay();
 
-        System.out.println("[STEP 8] Scroll the window");
-        actions.moveToElement(driver.findElement(By.className("ApplicationFrameWindow"))).scrollToElement(driver.findElement(By.className("ApplicationFrameWindow"))).perform();
+        System.out.println("[STEP 8] Scroll on ApplicationFrameWindow");
+        calculatorPage.scrollOnApplicationFrameWindow();
 
-        System.out.println("[STEP 9] Verify the result is displayed");
-        WebElement result = wait.until(ExpectedConditions.presenceOfElementLocated(By.name("Display")));
-        Assert.assertTrue(result.isDisplayed());
+        System.out.println("[STEP 9] Right click on Result display");
+        calculatorPage.rightClickOnResultDisplay();
+
+        Assert.assertTrue(calculatorPage.isResultDisplayDisplayed());
     }
 
     @AfterClass
@@ -78,7 +80,7 @@ public class CalculatorTestByClass {
         driver.quit();
     }
 
-    class CalculatorPageByClass {
+    private class CalculatorPageByClass {
         private WindowsDriver driver;
 
         public CalculatorPageByClass(WindowsDriver driver) {
@@ -87,49 +89,59 @@ public class CalculatorTestByClass {
 
         public void clickFiveButton() {
             WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
-            WebElement fiveButton = wait.until(ExpectedConditions.elementToBeClickable(By.className("Button")));
-            Actions actions = new Actions(driver);
-            actions.moveToElement(fiveButton).click().perform();
+            WebElement fiveButton = wait.until(ExpectedConditions.elementToBeClickable(By.xpath("//Button[@Name='5']")));
+            fiveButton.click();
         }
 
-        public void typeInDisplayField(String value) {
+        public void typeIntoDisplay(String value) {
             WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
-            WebElement displayField = wait.until(ExpectedConditions.presenceOfElementLocated(By.name("Display")));
-            displayField.clear();
-            displayField.sendKeys(value);
+            WebElement display = wait.until(ExpectedConditions.presenceOfElementLocated(AppiumBy.accessibilityId("CalculatorResults")));
+            display.clear();
+            display.sendKeys(value);
         }
 
         public void clickPlusButton() {
             WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
-            WebElement plusButton = wait.until(ExpectedConditions.elementToBeClickable(By.name("Plus")));
-            Actions actions = new Actions(driver);
-            actions.moveToElement(plusButton).click().perform();
+            WebElement plusButton = wait.until(ExpectedConditions.elementToBeClickable(By.xpath("//Button[@Name='더하기']")));
+            plusButton.click();
         }
 
         public void clickThreeButton() {
             WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
-            WebElement threeButton = wait.until(ExpectedConditions.elementToBeClickable(By.name("Three")));
-            Actions actions = new Actions(driver);
-            actions.moveToElement(threeButton).click().perform();
+            WebElement threeButton = wait.until(ExpectedConditions.elementToBeClickable(By.xpath("//Button[@Name='3']")));
+            threeButton.click();
         }
 
         public void clickEqualsButton() {
             WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
-            WebElement equalsButton = wait.until(ExpectedConditions.elementToBeClickable(By.name("Equals")));
-            Actions actions = new Actions(driver);
-            actions.moveToElement(equalsButton).click().perform();
+            WebElement equalsButton = wait.until(ExpectedConditions.elementToBeClickable(By.xpath("//Button[@Name='일치']")));
+            equalsButton.click();
         }
 
-        public void doubleClickResultDisplay() {
+        public void doubleClickOnResultDisplay() {
             WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
-            WebElement resultDisplay = wait.until(ExpectedConditions.presenceOfElementLocated(By.name("Display")));
+            WebElement resultDisplay = wait.until(ExpectedConditions.presenceOfElementLocated(AppiumBy.accessibilityId("CalculatorResults")));
             Actions actions = new Actions(driver);
-            actions.moveToElement(resultDisplay).doubleClick().perform();
+            actions.doubleClick(resultDisplay).perform();
         }
 
-        public void scrollWindow() {
+        public void scrollOnApplicationFrameWindow() {
+            WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
+            WebElement applicationFrameWindow = wait.until(ExpectedConditions.presenceOfElementLocated(By.className("ApplicationFrameWindow")));
             Actions actions = new Actions(driver);
-            actions.moveToElement(driver.findElement(By.className("ApplicationFrameWindow"))).scrollToElement(driver.findElement(By.className("ApplicationFrameWindow"))).perform();
+            actions.moveToElement(applicationFrameWindow).moveByOffset(0, -300).perform();
+        }
+
+        public void rightClickOnResultDisplay() {
+            WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
+            WebElement resultDisplay = wait.until(ExpectedConditions.presenceOfElementLocated(AppiumBy.accessibilityId("CalculatorResults")));
+            Actions actions = new Actions(driver);
+            actions.contextClick(resultDisplay).perform();
+        }
+
+        public boolean isResultDisplayDisplayed() {
+            WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
+            return wait.until(ExpectedConditions.presenceOfElementLocated(AppiumBy.accessibilityId("CalculatorResults"))).isDisplayed();
         }
     }
 }

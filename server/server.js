@@ -4,11 +4,18 @@
  *  - Proxies start/stop commands from the React UI to the Python agent (4444)
  *  - Receives captured events from the agent and broadcasts them over SSE
  *  - Calls the Groq API (llama-3.3-70b-versatile) to generate two TestNG
- *    Page-Object Java files in parallel (ById + ByClass)
+ *    Page-Object Java files sequentially (ById then ByClass, 4s apart)
+ *    to stay within Groq free-tier rate limits
  *
  *    npm install
  *    node server.js          -> http://localhost:3002
  */
+
+const path = require("path");
+const fs = require("fs");
+
+// Load .env for local validation (UI requests still use user-supplied key)
+require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
 
 const express = require("express");
 const cors = require("cors");
@@ -17,6 +24,9 @@ const PORT = 3002;
 const AGENT_URL = "http://localhost:4444";
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const GROQ_MODEL = "llama-3.3-70b-versatile";
+
+const TESTRUNNER_JAVA_DIR = path.join(__dirname, "..", "test-runner", "src", "test", "java", "com", "qaforge", "tests");
+const PLAYWRIGHT_OUT_DIR = path.join(__dirname, "..", "generated-playwright");
 
 const app = express();
 app.use(cors());
@@ -126,7 +136,7 @@ app.get("/api/stream", (req, res) => {
   // initial snapshot so a refreshed dashboard catches up
   res.write(`event: snapshot\ndata: ${JSON.stringify({ events, recording })}\n\n`);
   sseClients.push(res);
-  const hb = setInterval(() => { try { res.write(":hb\n\n"); } catch {} }, 15000);
+  const hb = setInterval(() => { try { res.write("event: heartbeat\ndata: {}\n\n"); } catch {} }, 10000);
   req.on("close", () => {
     clearInterval(hb);
     sseClients = sseClients.filter((c) => c !== res);
@@ -148,22 +158,57 @@ Hard rules for every file you produce:
 - package com.qaforge.tests;
 - TestNG framework with @BeforeClass (driver setup), @Test (the recorded flow), @AfterClass (driver.quit()).
 - Page Object Model: one Page class containing locators + action methods, one Test class that uses it. Both classes in the SAME file (Page class non-public).
-- Every interaction is preceded by an explicit wait: WebDriverWait with Duration.ofSeconds(15) and ExpectedConditions (elementToBeClickable for clicks, visibilityOf/presence for typing). NEVER use Thread.sleep().
-- Full imports at the top (java.time.Duration, java.net.URL, org.openqa.selenium.*, org.openqa.selenium.support.ui.*, org.testng.annotations.*, org.testng.Assert, io.appium.java_client.* as needed).
-- Before each action in the test method, print a step log: System.out.println("[STEP n] ...").
-- End the test with at least one Assert that verifies the final state (e.g. an element is displayed or the session is active).
-- Method and field names must be descriptive, derived from the element names.
-- Full imports at the top (java.time.Duration, java.net.MalformedURLException, java.net.URL, org.openqa.selenium.*, org.openqa.selenium.support.ui.*, org.testng.annotations.*, org.testng.Assert, io.appium.java_client.AppiumBy, io.appium.java_client.windows.WindowsDriver, io.appium.java_client.windows.options.WindowsOptions).
+- Every interaction is preceded by an explicit wait: WebDriverWait with Duration.ofSeconds(15) and ExpectedConditions (elementToBeClickable for clicks, presenceOfElementLocated/visibilityOfElementLocated for typing). NEVER use Thread.sleep().
 - Before each action in the test method, print a step log: System.out.println("[STEP n] ...").
 - End the test with at least one Assert that verifies the final state (e.g. an element is displayed or the session is active).
 - Method and field names must be descriptive, derived from the element names.
 - The code must compile with Appium java-client 8.6.0 and TestNG 7.x.
 
-CRITICAL - driver initialisation (W3C protocol, required for java-client 8.x):
+CRITICAL - exact imports (copy these verbatim, do not alter the package paths):
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.time.Duration;
+import org.openqa.selenium.By;
+import org.openqa.selenium.WebElement;
+import org.openqa.selenium.interactions.Actions;
+import org.openqa.selenium.support.ui.ExpectedConditions;
+import org.openqa.selenium.support.ui.WebDriverWait;
+import org.testng.Assert;
+import org.testng.annotations.AfterClass;
+import org.testng.annotations.BeforeClass;
+import org.testng.annotations.Test;
+import io.appium.java_client.AppiumBy;
+import io.appium.java_client.windows.WindowsDriver;
+import io.appium.java_client.windows.options.WindowsOptions;
+
+CRITICAL - driver initialisation (two-step; supports Win32 AND UWP apps):
+  Step 1: launch the process with ProcessBuilder (works for Win32 and UWP alike).
+  Step 2: root session — wait until the window appears, grab its handle, then attach.
+  Use this exact pattern in @BeforeClass setUp() throws Exception:
+
+  // 1. Launch (works for Win32 and UWP; setApp(exePath) alone fails for UWP)
+  new ProcessBuilder("<exePath>").start();
+
+  // 2. Root session — wait for the window, capture its native handle
+  WindowsOptions desktopOpts = new WindowsOptions();
+  desktopOpts.setApp("Root");
+  WindowsDriver desktopDriver = new WindowsDriver(new URL("http://127.0.0.1:4723"), desktopOpts);
+  WebDriverWait desktopWait = new WebDriverWait(desktopDriver, Duration.ofSeconds(15));
+  WebElement appWindow = desktopWait.until(
+      ExpectedConditions.presenceOfElementLocated(
+          By.xpath("//Window[contains(@Name,'<windowTitle>')]")));
+  String hexHandle = "0x" + Long.toHexString(Long.parseLong(appWindow.getAttribute("NativeWindowHandle")));
+  desktopDriver.quit();
+
+  // 3. Attach to the running window via appTopLevelWindow
   WindowsOptions options = new WindowsOptions();
-  options.setApp("<exePath>");
+  options.setCapability("appTopLevelWindow", hexHandle);
   driver = new WindowsDriver(new URL("http://127.0.0.1:4723"), options);
-  NEVER use DesiredCapabilities - it is incompatible with java-client 8.x.
+
+  NEVER use setApp(exePath) as the sole init — it cannot launch UWP apps.
+  NEVER use DesiredCapabilities — incompatible with java-client 8.x.
+  Replace <exePath> and <windowTitle> with the actual values provided in the user prompt.
+  NEVER translate or anglicize <windowTitle> — use the exact string as given (it may be non-English, e.g. "계산기").
 
 CRITICAL - locators (use AppiumBy, not MobileBy which is deprecated):
   AppiumBy.accessibilityId("automationId")   // AutomationId-based strategy
@@ -172,20 +217,24 @@ CRITICAL - locators (use AppiumBy, not MobileBy which is deprecated):
 
 function buildUserPrompt(strategy, appName, platform, eventList) {
   const p = PLATFORM_MAP[platform] || PLATFORM_MAP.Windows;
-  const className = `${appName.replace(/[^A-Za-z0-9]/g, "") || "MyApp"}Test${strategy === "id" ? "ById" : "ByClass"}`;
+  const raw = appName.replace(/[^A-Za-z0-9]/g, "") || "MyApp";
+  const className = `${raw.charAt(0).toUpperCase() + raw.slice(1)}Test${strategy === "id" ? "ById" : "ByClass"}`;
+  const windowTitle = eventList[0]?.element?.windowTitle || appName;
   const locatorRule = strategy === "id"
     ? `Locator strategy: use the element's AutomationId as the primary locator (${p.idHint}). If an event has an empty automationId, fall back to By.name(element name), then By.className.`
-    : `Locator strategy: use the element's ClassName as the primary locator (By.className). When several elements share a class, disambiguate with By.name or an XPath using the recorded Name attribute.`;
+    : `Locator strategy: use the element's ClassName as the primary locator (By.className). When several elements share a class, use XPath to disambiguate — e.g. By.xpath("//Button[@Name='계산기']"). NEVER chain By.className(...).and(...) — By has no and() method; use XPath instead.`;
 
   return `Target application: "${appName}" on platform ${platform} (${p.note}).
 Driver class: ${p.driver} (import ${p.driverImport}).
 Public test class name: ${className}. Page class name: ${className.replace("Test", "Page")}.
+Exe path for ProcessBuilder: use the exePath from the note section above.
+Window title for root-session XPath lookup in setUp: "${windowTitle}" (use as-is — may be non-English; do NOT translate or replace with the English app name)
 
 ${locatorRule}
 
 Recorded user session (in order). Convert EVERY event into a page-object action + a test step:
 - click / doubleClick / rightClick -> click(), Actions.doubleClick(), Actions.contextClick()
-- type -> sendKeys(value) into the recorded input field (clear() first)
+- type -> sendKeys(value) into the recorded input field (clear() first); if value contains "\\n", keep it verbatim — sendKeys("text\\n") triggers Enter in WinAppDriver
 - scroll -> a scroll action on the window (e.g. Actions or executeScript), keep it simple
 
 ${JSON.stringify(eventList, null, 2)}
@@ -273,8 +322,8 @@ async function groqGenerate(apiKey, strategy, appName, platform, eventList) {
   if (!res.ok) {
     const text = await res.text();
     const hints = {
-      401: 'Invalid Groq API key ??check your key at console.groq.com',
-      429: 'Groq rate limit exceeded ??wait a moment and retry',
+      401: 'Invalid Groq API key — check your key at console.groq.com',
+      429: 'Groq rate limit exceeded — wait a moment and retry',
     };
     throw new Error(hints[res.status] ?? `Groq API ${res.status}: ${text.slice(0, 300)}`);
   }
@@ -315,11 +364,11 @@ app.post("/api/generate", async (req, res) => {
         files: [{ filename: `test_${base}_playwright.py`, content: code }],
       };
     } else {
-      const [byId, byClass] = await Promise.all([
-        groqGenerate(apiKey, "id", name, plat, slim),
-        groqGenerate(apiKey, "class", name, plat, slim),
-      ]);
-      const base = name.replace(/[^A-Za-z0-9]/g, "") || "MyApp";
+      const rawBase = name.replace(/[^A-Za-z0-9]/g, "") || "MyApp";
+      const base = rawBase.charAt(0).toUpperCase() + rawBase.slice(1);
+      const byId = await groqGenerate(apiKey, "id", name, plat, slim);
+      await new Promise((r) => setTimeout(r, 4000));
+      const byClass = await groqGenerate(apiKey, "class", name, plat, slim);
       payload = {
         ok: true,
         framework: "appium",
@@ -329,6 +378,17 @@ app.post("/api/generate", async (req, res) => {
         ],
       };
     }
+    // Persist to disk (non-fatal)
+    if (framework === "playwright") {
+      const { savedPaths, saveError } = saveFiles(payload.files, PLAYWRIGHT_OUT_DIR);
+      payload.savedPaths = savedPaths;
+      if (saveError) payload.saveError = saveError;
+    } else {
+      cleanJavaTestFiles(TESTRUNNER_JAVA_DIR);
+      const { savedPaths, saveError } = saveFiles(payload.files, TESTRUNNER_JAVA_DIR);
+      payload.savedPaths = savedPaths;
+      if (saveError) payload.saveError = saveError;
+    }
     broadcast("generation", { status: "success", files: payload.files.map(f => f.filename) });
     res.json(payload);
   } catch (e) {
@@ -336,6 +396,35 @@ app.post("/api/generate", async (req, res) => {
     res.status(500).json({ ok: false, message: e.message });
   }
 });
+
+// ---------------------------------------------------------------------------
+// File persistence helpers (non-fatal — generation result is returned regardless)
+// ---------------------------------------------------------------------------
+function cleanJavaTestFiles(dir) {
+  try {
+    for (const f of fs.readdirSync(dir)) {
+      if (f.endsWith("TestById.java") || f.endsWith("TestByClass.java")) {
+        fs.unlinkSync(path.join(dir, f));
+      }
+    }
+  } catch { /* dir may not exist yet */ }
+}
+
+function saveFiles(files, dir) {
+  const savedPaths = [];
+  let saveError;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    for (const f of files) {
+      const fp = path.join(dir, f.filename);
+      fs.writeFileSync(fp, f.content, "utf8");
+      savedPaths.push(fp);
+    }
+  } catch (e) {
+    saveError = e.message;
+  }
+  return { savedPaths, saveError };
+}
 
 app.listen(PORT, () =>
   console.log(`[bridge] Express server listening on http://localhost:${PORT}`)

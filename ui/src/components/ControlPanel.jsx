@@ -5,16 +5,31 @@ const FRAMEWORKS = [
   { value: 'appium', label: 'Appium Java (TestNG)' },
   { value: 'playwright', label: 'Playwright Python' },
 ];
+const PRESETS = [
+  { label: 'Calculator',       appName: 'Calculator',       exePath: 'C:\\Windows\\System32\\calc.exe' },
+  { label: 'Notepad',          appName: 'Notepad',          exePath: 'C:\\Windows\\System32\\notepad.exe' },
+  // Version-dependent path — may change when Paint updates
+  { label: 'Paint (mspaint)',  appName: 'Paint',            exePath: 'C:\\Program Files\\WindowsApps\\Microsoft.Paint_11.2603.251.0_x64__8wekyb3d8bbwe\\PaintApp\\mspaint.exe' },
+  { label: 'Registry Editor',  appName: 'RegistryEditor',   exePath: 'C:\\Windows\\regedit.exe' },
+  { label: 'Custom...',        appName: '',                 exePath: '' },
+];
 
 export default function ControlPanel({
-  form, onFormChange,
+  form, onFormChange, onPresetChange,
   status,
   onLaunch, onStop, onClear, onGenerate,
   generating,
+  eventCount,
 }) {
   const { agentOnline, isAdmin, recording } = status;
+  const isCustom = form.preset === 'Custom...';
 
-  function field(label, key, type = 'text', placeholder = '') {
+  function handlePresetSelect(label) {
+    const found = PRESETS.find((p) => p.label === label);
+    onPresetChange(label, found?.appName ?? '', found?.exePath ?? '');
+  }
+
+  function field(label, key, type = 'text', placeholder = '', locked = false) {
     return (
       <div className="field">
         <label>{label}</label>
@@ -23,7 +38,7 @@ export default function ControlPanel({
           value={form[key]}
           placeholder={placeholder}
           onChange={(e) => onFormChange(key, e.target.value)}
-          disabled={recording}
+          disabled={recording || locked}
           autoComplete="off"
         />
       </div>
@@ -49,8 +64,21 @@ export default function ControlPanel({
       </div>
 
       <div className="fields">
-        {field('App Name', 'appName', 'text', 'Calculator')}
-        {field('Exe Path', 'exePath', 'text', 'C:\\Windows\\System32\\calc.exe')}
+        <div className="field">
+          <label>Target App</label>
+          <select
+            value={form.preset}
+            onChange={(e) => handlePresetSelect(e.target.value)}
+            disabled={recording}
+          >
+            {PRESETS.map(({ label }) => (
+              <option key={label}>{label}</option>
+            ))}
+          </select>
+        </div>
+
+        {field('App Name', 'appName', 'text', 'Calculator', !isCustom)}
+        {field('Exe Path', 'exePath', 'text', 'C:\\Windows\\System32\\calc.exe', !isCustom)}
 
         <div className="field">
           <label>Platform</label>
@@ -85,14 +113,14 @@ export default function ControlPanel({
         <button
           className="btn green"
           onClick={onLaunch}
-          disabled={recording || !form.exePath}
+          disabled={recording || !form.appName || !form.exePath}
         >
           Launch
         </button>
         <button
           className="btn red"
           onClick={onStop}
-          disabled={!recording}
+          disabled={false}
         >
           Stop
         </button>
@@ -106,7 +134,7 @@ export default function ControlPanel({
         <button
           className="btn blue"
           onClick={onGenerate}
-          disabled={recording || !form.apiKey || generating}
+          disabled={generating || eventCount === 0}
         >
           {generating ? 'Generating...' : 'Generate Code'}
         </button>

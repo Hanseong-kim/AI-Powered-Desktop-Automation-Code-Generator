@@ -1,114 +1,112 @@
-# CLAUDE.md
+# CLAUDE.md — AI-Powered Desktop Automation Code Generator
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Single entry point. Read this first every session.
+Details & history → `C:\hansung\note\project\code-generator\dev-log.md`
 
-# AI-Powered Desktop Automation Code Generator
+---
 
-Records user interactions with any Windows desktop app and generates runnable
-Appium Java (TestNG) test code via Groq AI. Three cooperating processes.
+## 1. Commands
 
-## Architecture
+```powershell
+# Terminal 1 — Express bridge
+cd server; node server.js                          # http://localhost:3002
+
+# Terminal 2 — Capture agent (ADMINISTRATOR PowerShell)
+cd agent; python agent.py
+# Must print: "Administrator rights: YES"
+
+# Terminal 3 — React UI
+cd ui; npm start                                   # http://localhost:3000
+
+# Run generated tests (WinAppDriver must be running at 4723 first)
+cd test-runner
+$env:JAVA_HOME = "C:\Program Files\Eclipse Adoptium\jdk-11.0.31.11-hotspot"
+mvn test
+
+# Regression (no agent needed, server must be running)
+python agent/mock_events.py                        # expect 35/35 non-Groq checks
+
+# Compile loop (3 consecutive BUILD SUCCESS target, needs .env GROQ_API_KEY)
+python agent/compile_loop.py
+```
+
+`.env` at repo root (gitignored): `GROQ_API_KEY=gsk_...`
+
+---
+
+## 2. Architecture
 
 ```
 React UI (3000) --HTTP--> Express (3002) --HTTP--> Python Agent (4444)
-      ^                      |
-      +---- SSE live feed ---+--> Groq API (llama-3.3-70b-versatile)
+      ^                        |
+      +------- SSE feed -------+--> Groq API (llama-3.3-70b-versatile)
 ```
 
-## Layout
+Key files:
+- `server/server.js` — SYSTEM_PROMPT, `/api/generate` (sequential ById→ByClass, 4s gap)
+- `agent/agent.py` — pynput hooks → raw_queue → worker thread (UIA/COM)
+- `ui/src/components/ControlPanel.jsx` — presets: Calculator/Notepad/Paint/Registry Editor/Custom
 
-- `agent/agent.py` — Python capture agent (port 4444). pynput global hooks,
-  Windows UI Automation element inspection (comtypes), app filtering,
-  typing buffer, double-click detection, scroll debounce. POSTs events to
-  Express `/api/events`.
-- `server/server.js` — Express bridge (port 3002). Proxies start/stop to the
-  agent, broadcasts events over SSE (`/api/stream`), calls Groq to generate
-  two Java files in parallel (`/api/generate`).
-- `ui/` — React dashboard (port 3000). (Phase 4 — may not exist yet.)
+Agent two-thread rule: pynput callbacks enqueue raw dicts only (never UIA).
+All UIA/COM runs on the worker thread after `CoInitialize`.
 
-## Agent internals (`agent/agent.py`)
+SYSTEM_PROMPT driver init: ProcessBuilder launch → Root session → `By.name(windowTitle)`
+→ `NativeWindowHandle` → `appTopLevelWindow` hex string. Covers Win32 + UWP.
 
-The agent has a strict two-thread design:
-- **pynput hook callbacks** — enqueue raw `{kind, x, y, ts, ...}` dicts onto `raw_queue` and return immediately. No COM/UIA calls here.
-- **Worker thread** — calls `CoInitialize`, runs `UIAInspector`, drains `raw_queue`, does all UIA lookups, buffers keystrokes, debounces scrolls, detects double-clicks, then POSTs enriched events to Express.
+---
 
-Timing constants in `agent.py`: `DOUBLE_CLICK_INTERVAL=0.50s`, `DOUBLE_CLICK_RADIUS=6px`, `SCROLL_FLUSH_IDLE=0.40s`.
+## 3. Hard Rules (never break)
 
-App filtering uses both `hwnd→pid` mapping (via `win32process`) and `psutil` parent-process walk to catch apps that re-spawn under a child process.
+- **Groq model**: `llama-3.3-70b-versatile` always. 8b is banned (code quality = 25% grade).
+- **API key**: never hardcode/print. UI uses `req.body.apiKey`; `.env` is script-only fallback.
+- **pynput callbacks**: enqueue + return immediately. No UIA/COM inside hooks.
+- **Java files**: `package com.qaforge.tests`, TestNG `@BeforeClass/@Test/@AfterClass`,
+  Page Object Model, `WebDriverWait(15s)`, no `Thread.sleep`, no TODOs, `System.out.println` steps.
+- **File naming**: public class name == filename (PascalCase). Server enforces this.
+- **Regression gates**: mock_events 35/35 non-Groq checks, compile_loop 3× BUILD SUCCESS.
+- **Documentation honesty**: never write GUI-unverified work as "DONE" in docs.
 
-## Hard constraints — do not violate
+---
 
-- **Native Windows only.** Never suggest WSL, Docker, or Linux paths. The agent
-  uses win32 APIs, pynput global hooks, and COM (UIAutomationCore.dll).
-- **Never do UIA lookups inside pynput hook callbacks.** Hooks must only
-  enqueue raw data and return immediately (OS input must never block).
-  All UIA/COM work happens on the worker thread (CoInitialize there).
-- **The agent must run from an Administrator terminal**, otherwise
-  AutomationId/Name come back empty. The integrated VS Code terminal is NOT
-  admin unless VS Code itself was launched as administrator.
-- **Generated Java requirements** (graded): package `com.qaforge.tests`,
-  TestNG @BeforeClass/@Test/@AfterClass, Page Object Model, WebDriverWait 15s
-  (never Thread.sleep), full imports, no TODOs, println step logs, final Assert.
-- **API key**: entered by the user per request, never hard-coded.
-- Events with unreadable element details are still recorded (empty fields),
-  never dropped or allowed to crash the agent.
+## 4. Current Status  *(update every session)*
 
-## Run
+**Verified (GUI + mvn test):**
+- Notepad end-to-end: type capture → Generate → `mvn test` → BUILD SUCCESS (Tests run: 2)
+- All 6 grading criteria implemented
 
-```powershell
-# Terminal 1 (normal)
-cd server; npm install; node server.js
+**Code-complete, GUI not yet re-verified:**
+- Calc click fix (session 11): `_is_target_pid` exe stem matching — "calc" ⊂ "calculatorapp"
+  → language-independent UWP process identification. `_emit` now logs `[skip]` when filtering.
+- Enter newline (session 10): `\n` appended to type buffer before flush.
+- TreeWalker fallback (session 10): deepens element resolution when automationId empty.
+- Non-input key filter (session 10): Button/etc. keystrokes ignored — prevents UWP synthetic keys.
+- Presets: WordPad removed (Win11 24H2), Registry Editor added.
 
-# Terminal 2 (ADMINISTRATOR PowerShell)
-cd agent; pip install -r requirements.txt; python agent.py
-# startup log must say "Administrator rights: YES"
+**Next actions:**
+1. Restart agent (Admin) → click Calculator button → verify `#N click id='num2Button'` in log.
+2. Test notepad "line1[Enter]line2" → verify two lines captured.
+3. Confirm no `[skip]` log entries for target app events.
+4. Check `INPUT_CONTROL_TYPES` if typing in new apps is silently dropped
+   (current set: `{"Edit", "Document", "ComboBox"}`).
 
-# Smoke test
-curl -X POST http://localhost:3002/api/start -H "Content-Type: application/json" -d '{"appName":"Calculator","exePath":"C:\\Windows\\System32\\calc.exe","platform":"Windows"}'
-curl -X POST http://localhost:3002/api/stop
-curl http://localhost:3002/api/generate ...   # needs Groq API key
-```
+**Risk:** If a text area's `controlType` is not in `INPUT_CONTROL_TYPES`, typing is filtered.
+Verify on each new app type.
 
-## Server API surface (`server/server.js`)
+---
 
-| Endpoint | Notes |
-|---|---|
-| `POST /api/start` | `{ appName, exePath, platform }` → proxies to agent `/start`, resets event list |
-| `POST /api/stop` | proxies to agent `/stop` |
-| `GET /api/status` | returns `{ agentOnline, isAdmin, recording, eventCount }` |
-| `POST /api/events` | agent POSTs each captured event here; broadcast over SSE |
-| `GET /api/events` | returns full recorded event array |
-| `DELETE /api/events` | clears event array |
-| `GET /api/stream` | SSE endpoint — sends `snapshot` on connect, then `status`/`capture`/`generation` events |
-| `POST /api/generate` | `{ apiKey, appName, platform }` → calls Groq in parallel for two strategies, returns `{ ok, files: [{filename, content}] }` |
+## 5. Known Traps
 
-### Code generation output
-`/api/generate` always produces two `.java` files in parallel:
-- `{AppName}TestById.java` — locates elements by `AutomationId` (falls back to `By.name`, then `By.className`)
-- `{AppName}TestByClass.java` — locates elements by `ClassName` (disambiguates with `By.name` or XPath `@Name`)
+- **UWP apps** (Win11 Calculator, Paint, Notepad): `setApp(exePath)` fails → use
+  appTopLevelWindow. Clicks/focus capture unreliable. Demo on Win32 (regedit, classic Notepad).
+- **By.name exact-match**: UWP window titles change on load. Use XPath `contains(@Name,...)` fallback.
+- **Agent not Admin**: element `automationId`/`name` come back empty. Always verify startup log.
+- **Groq 429**: account-level quota (not per-key). Wait ~35s or use `compile_loop` retry logic.
+- **WordPad**: removed from Win11 24H2. Do not add back as preset.
+- Full history → `dev-log.md` | Issues & fixes → `troubleshooting.md`
 
-Both files use package `com.qaforge.tests`, TestNG, Page Object Model, `WebDriverWait(15s)`.
+---
 
-## Known gotchas
-
-- comtypes generates the UIAutomationCore wrapper on first run (a few seconds).
-- Win11 Notepad/Calculator are UWP-ish and respawn under a different process;
-  the agent tracks child processes of the launched PID, but classic Win32 apps
-  give the most stable AutomationIds for demos.
-- `ElementFromPoint` sometimes returns a container instead of the clicked
-  control; if automationId is empty, consider a parent/child fallback
-  (also counts as the "self-healing locator" bonus).
-- SSE through Express: keep `flushHeaders()`, no compression middleware.
-
-## Notes directory
-
-Project notes live at `C:\hansung\note\project\code-generator\`:
-- `dev-log.md` — session-by-session decision log
-- `00-overview.md` — grading criteria and architecture overview
-- `demo-script.md` — live demo walkthrough steps
-- `troubleshooting.md` — known issues and fixes
-
-## Assignment grading weights (prioritize accordingly)
+## Assignment grading weights
 
 capture 25% · element inspection 20% · generated code quality 25% ·
 architecture/live feed 15% · reliability 10% · docs/demo 5%

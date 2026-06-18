@@ -64,14 +64,17 @@ npm run dev
 
 ## 2. Recording a Session
 
-1. Fill in **App Name** and **Exe Path** in the dashboard.
+1. Select a **Target App** from the preset dropdown (Calculator / Notepad / Paint / WordPad / Custom…).
+   - Presets auto-fill **App Name** and **Exe Path**.
+   - Choose **Custom…** to enter a path manually.
 2. Select **Platform** (Windows / Android / iOS).
 3. Select **Output Framework**: `Appium Java (TestNG)` or `Playwright Python`.
 4. Click **Launch** — the target app opens and recording begins.
-5. Interact with the app (clicks, typing, scrolling).
+5. Interact with the app (clicks, typing, scrolling). **English input only** — IME/CJK keystrokes are silently ignored.
 6. Click **Stop** when done.
 7. Each captured event row can be **deleted individually** by hovering over it and clicking the `×` button.
 8. Enter your **Groq API Key** and click **Generate Code**.
+   Generated files are **saved to disk automatically** (toast confirms the path).
 
 ### Generated output
 
@@ -79,6 +82,11 @@ npm run dev
 |---|---|
 | Appium Java | `{App}TestById.java`, `{App}TestByClass.java` |
 | Playwright Python | `test_{app}_playwright.py` |
+
+> **Note on generation order (Appium Java):** The two Java files are generated
+> *sequentially* (ById first, then ByClass, 4 seconds apart).  This is
+> intentional — Groq's free-tier TPM limit causes HTTP 429 errors when both
+> requests fire simultaneously.  Total generation time is ~15–25 seconds.
 
 ---
 
@@ -131,13 +139,11 @@ winget install EclipseAdoptium.Temurin.11.JDK
 
 ### Step-by-step
 
-1. Generate test files using the UI.
-2. Save both `.java` files to:
-   ```
-   test-runner\src\test\java\com\qaforge\tests\
-   ```
-3. Start WinAppDriver as Administrator (port 4723).
-4. Run:
+1. Generate test files using the UI — they are **automatically saved** to
+   `test-runner\src\test\java\com\qaforge\tests\` (old files from a previous
+   app are cleaned up first so Maven doesn't compile stale tests).
+2. Start WinAppDriver as Administrator (port 4723).
+3. Run:
    ```powershell
    cd test-runner
    mvn test
@@ -158,10 +164,11 @@ mvn test -Dtest=CalculatorTestById
 # Requires only server running (no agent, no admin rights needed)
 cd server; node server.js  # Terminal 1
 python agent/mock_events.py  # Terminal 2
-# Expected: 33/33 checks passed
+# Expected: 35/35 checks passed
 
 # With Groq key (tests code generation + Playwright syntax):
 $env:GROQ_API_KEY="gsk_..."; python agent/mock_events.py
+# Expected: 48/48 checks passed
 ```
 
 ---

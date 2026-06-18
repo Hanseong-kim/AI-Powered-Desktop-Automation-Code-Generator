@@ -7,8 +7,9 @@ import CodeViewer from './components/CodeViewer';
 import { Toast } from './components/Toast';
 
 const DEFAULT_FORM = {
-  appName: '',
-  exePath: '',
+  preset: 'Calculator',
+  appName: 'Calculator',
+  exePath: 'C:\\Windows\\System32\\calc.exe',
   platform: 'Windows',
   framework: 'appium',
   apiKey: '',
@@ -86,6 +87,10 @@ export default function App() {
     setForm((prev) => ({ ...prev, [key]: value }));
   }
 
+  function handlePresetChange(preset, appName, exePath) {
+    setForm((prev) => ({ ...prev, preset, appName, exePath }));
+  }
+
   async function handleLaunch() {
     try {
       const res = await startRecording({
@@ -137,13 +142,21 @@ export default function App() {
       });
       if (res.ok) {
         setGenState({ generating: false, files: res.files, error: null });
+        if (res.savedPaths?.length) {
+          const dest = res.framework === 'playwright'
+            ? 'generated-playwright/'
+            : 'test-runner/…/tests/';
+          addToast('info', `Files saved to ${dest}`);
+        }
       } else {
+        // SSE 'generation:error' event already fires addToast; only update state here
         setGenState({ generating: false, files: null, error: res.message });
-        addToast('error', res.message);
       }
     } catch (e) {
-      setGenState({ generating: false, files: null, error: e.message });
+      setGenState((prev) => ({ ...prev, files: null, error: e.message }));
       addToast('error', e.message);
+    } finally {
+      setGenState((prev) => ({ ...prev, generating: false }));
     }
   }
 
@@ -156,12 +169,14 @@ export default function App() {
         <ControlPanel
           form={form}
           onFormChange={handleFormChange}
+          onPresetChange={handlePresetChange}
           status={status}
           onLaunch={handleLaunch}
           onStop={handleStop}
           onClear={handleClear}
           onGenerate={handleGenerate}
           generating={genState.generating}
+          eventCount={events.length}
         />
         <EventTable events={events} onDeleteEvent={handleDeleteEvent} />
         <CodeViewer files={genState.files} error={genState.error} />

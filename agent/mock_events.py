@@ -12,12 +12,24 @@ With code generation (requires Groq key):
     python agent/mock_events.py
 """
 
+import io
 import json
 import os
 import sys
 import time
+
+if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 import urllib.error
 import urllib.request
+
+# Load .env for local validation (UI requests still use user-supplied key)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+except ImportError:
+    pass
 
 BASE = "http://localhost:3002"
 APP_NAME = "Calculator"
@@ -91,6 +103,7 @@ MOCK_EVENTS = [
     make_event("click",       name="Equals",         automation_id="equalButton",  class_name="Button", x=440, y=560, index=6),
     make_event("doubleClick", name="Result display", automation_id="CalculatorResults", class_name="TextBlock", control_type="Text", x=320, y=240, index=7),
     make_event("scroll",      name="",               automation_id="",             class_name="ApplicationFrameWindow", control_type="Window", value="-3", x=320, y=300, index=8),
+    make_event("rightClick",  name="Result display", automation_id="CalculatorResults", class_name="TextBlock", control_type="Text", x=320, y=240, index=9),
 ]
 
 
