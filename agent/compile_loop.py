@@ -43,6 +43,7 @@ except ImportError:
 BASE = "http://localhost:3002"
 APP_NAME = "Calculator"
 PLATFORM = "Windows"
+EXE_PATH = r"C:\Windows\System32\calc.exe"
 TEST_DIR = os.path.join(os.path.dirname(__file__), "..", "test-runner",
                         "src", "test", "java", "com", "qaforge", "tests")
 RUNNER_DIR = os.path.join(os.path.dirname(__file__), "..", "test-runner")
@@ -96,6 +97,7 @@ def generate_files(api_key):
         "apiKey": api_key,
         "appName": APP_NAME,
         "platform": PLATFORM,
+        "exePath": EXE_PATH,
     }, timeout=120)
     if status == 200 and body.get("ok"):
         return body["files"], None

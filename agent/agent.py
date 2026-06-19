@@ -2,8 +2,12 @@
 AI-Powered Desktop Automation Code Generator - Python Capture Agent
 ====================================================================
 - Launches the target .exe and hooks global mouse/keyboard input (pynput)
-- Reads element details from Windows UI Automation (pywinauto / comtypes)
-- Filters events to the target application only
+- Reads element details from Windows UI Automation (comtypes)
+- Filters events to the target application by TOP-LEVEL WINDOW HANDLE
+  (window under the pointer / foreground window == the launched app's window).
+  This is locale-independent and works for Win32 AND UWP (where the classic
+  hwnd->process->exe chain breaks: WindowFromPoint returns the
+  ApplicationFrameWindow whose GA_ROOT still equals the tracked window).
 - Buffers keystrokes into single `type` events
 - Detects double-clicks, debounces scrolls
 - POSTs each captured event to the Express bridge (port 3002)
@@ -25,7 +29,6 @@ import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import psutil
 import requests
 from pynput import keyboard, mouse
 
@@ -46,6 +49,7 @@ DOUBLE_CLICK_INTERVAL = 0.50   # seconds
 DOUBLE_CLICK_RADIUS = 6        # pixels
 SCROLL_FLUSH_IDLE = 0.40       # seconds of no scrolling -> emit scroll event
 QUEUE_POLL_TIMEOUT = 0.20      # worker wakeup interval for pending flushes
+DISCOVER_TIMEOUT = 5.0         # seconds to wait for the target window to appear
 
 UIA_CONTROL_TYPES = {
     50000: "Button", 50001: "Calendar", 50002: "CheckBox", 50003: "ComboBox",
@@ -59,11 +63,20 @@ UIA_CONTROL_TYPES = {
     50031: "SplitButton", 50032: "Window", 50033: "Pane", 50034: "Header",
     50035: "HeaderItem", 50036: "Table", 50037: "TitleBar", 50038: "Separator",
 }
+# Control types treated as text-input fields (used only to set the
+# isInputField flag — NOT used to drop keystrokes).
 INPUT_CONTROL_TYPES = {"Edit", "Document", "ComboBox"}
 
+# Numpad virtual-key codes -> character. Recovers numpad digits/operators even
+# when pynput reports them without a .char (e.g. NumLock off makes numpad 8 a
+# navigation key). VK_NUMPAD0..9 = 96..105, then operators.
+NUMPAD_VK = {
+    96: "0", 97: "1", 98: "2", 99: "3", 100: "4", 101: "5", 102: "6",
+    103: "7", 104: "8", 105: "9",
+    106: "*", 107: "+", 109: "-", 110: ".", 111: "/",
+}
+
 GA_ROOT = 2                    # GetAncestor flag
-UIA_Invoke_InvokedEventId = 20009
-TreeScope_Subtree = 4
 
 
 def log(*args):
@@ -141,7 +154,6 @@ class UIAInspector:
             "windowTitle": "",
             "xpath": "",
             "hwnd": 0,
-            "pid": 0,
         }
         if elem is None:
             return info
@@ -164,10 +176,6 @@ class UIAInspector:
             info["hwnd"] = elem.CurrentNativeWindowHandle or 0
         except Exception:
             pass
-        try:
-            info["pid"] = elem.CurrentProcessId or 0
-        except Exception:
-            pass
 
         # Window title: walk up to the top-level window
         hwnd = info["hwnd"]
@@ -178,9 +186,9 @@ class UIAInspector:
         except Exception:
             pass
         # Fallback: foreground window for UWP elements where hwnd=0
-        # (UWP elements often return CurrentNativeWindowHandle=0, leaving windowTitle empty,
-        #  causing buildUserPrompt to fall back to the English appName instead of the
-        #  localized title like "계산기")
+        # (UWP elements often return CurrentNativeWindowHandle=0, leaving
+        #  windowTitle empty, causing buildUserPrompt to fall back to the
+        #  English appName instead of the localized title like "계산기")
         if not info["windowTitle"]:
             try:
                 fg = ctypes.windll.user32.GetForegroundWindow()
@@ -199,34 +207,13 @@ class UIAInspector:
         return info
 
 
-def _make_invoke_handler(raw_queue):
-    """Factory: lazy-imports IUIAutomationEventHandler so comtypes.gen is
-    guaranteed to already exist (GetModule must have run on the calling thread
-    before this is called). Stores no external references so GC is safe as
-    long as the caller keeps the returned object alive."""
-    from comtypes.gen.UIAutomationClient import IUIAutomationEventHandler
-
-    class _Handler(comtypes.COMObject):
-        _com_interfaces_ = [IUIAutomationEventHandler]
-
-        def HandleAutomationEvent(self, sender, eventId):
-            try:
-                info = UIAInspector.describe(sender)
-                log(f"[uia-events] invoke id='{info.get('automationId','')}' "
-                    f"name='{info.get('name','')[:20]}'")
-                raw_queue.put({"kind": "uia_invoke", "elem": info,
-                               "ts": time.time()})
-            except Exception:
-                pass
-
-    return _Handler()
-
-
-def hwnd_at_point(x, y):
-    try:
-        return ctypes.windll.user32.WindowFromPoint(wintypes.POINT(int(x), int(y)))
-    except Exception:
-        return 0
+# ----------------------------------------------------------------------------
+# Window helpers
+# ----------------------------------------------------------------------------
+def is_aumid(s):
+    """True if `s` is a UWP Application User Model ID ("PackageFamilyName!AppId")
+    rather than a filesystem path. AUMIDs contain '!' and no path separators."""
+    return "!" in s and "\\" not in s and "/" not in s
 
 
 def pid_of_hwnd(hwnd):
@@ -235,6 +222,47 @@ def pid_of_hwnd(hwnd):
         return pid
     except Exception:
         return 0
+
+
+def top_window_at(x, y):
+    """Top-level window under a screen point.
+    For UWP this is the ApplicationFrameWindow (GA_ROOT of the CoreWindow)."""
+    try:
+        child = ctypes.windll.user32.WindowFromPoint(wintypes.POINT(int(x), int(y)))
+        if not child:
+            return 0
+        return ctypes.windll.user32.GetAncestor(child, GA_ROOT) or child
+    except Exception:
+        return 0
+
+
+def foreground_top_window():
+    try:
+        fg = ctypes.windll.user32.GetForegroundWindow()
+        if not fg:
+            return 0
+        return ctypes.windll.user32.GetAncestor(fg, GA_ROOT) or fg
+    except Exception:
+        return 0
+
+
+def visible_toplevel_windows():
+    """Set of currently visible top-level window handles."""
+    found = set()
+
+    def _enum(hwnd, _):
+        try:
+            if win32gui.IsWindowVisible(hwnd):
+                found.add(hwnd)
+        except Exception:
+            pass
+        return True
+
+    try:
+        win32gui.EnumWindows(_enum, None)
+    except Exception:
+        pass
+    return found
 
 
 # ----------------------------------------------------------------------------
@@ -246,11 +274,9 @@ class Recorder:
         self.recording = False
         self.event_count = 0
         self.session = {}            # appName, exePath, platform
-        self.target_exe = ""         # lowercase basename, e.g. "notepad.exe"
-        self.target_pids = set()     # launched pid + descendants (lazy refresh)
         self.proc = None
-        self.known_window_title = ""  # actual title of target window (may be non-English)
-        self._uia_event_thread = None
+        self.target_hwnds = set()    # top-level window handles owned by the target
+        self._pre_hwnds = set()      # visible top-levels snapshotted before launch
 
         self._mouse_listener = None
         self._kb_listener = None
@@ -258,7 +284,7 @@ class Recorder:
         self._stop_flag = threading.Event()
 
         # worker-side state
-        self._pending_click = None   # awaiting possible double-click
+        self._last_left_click = None  # timing/pos of previous left click (dbl-click)
         self._pending_scroll = None
         self._type_buffer = ""
         self._type_elem = None       # element info captured at first keystroke
@@ -268,16 +294,25 @@ class Recorder:
         if self.recording:
             return False, "Already recording"
         self.session = {"appName": app_name, "exePath": exe_path, "platform": platform}
-        self.target_exe = os.path.basename(exe_path).lower()
         self.event_count = 0
-        self.target_pids = set()
-        self.known_window_title = ""
+        self.target_hwnds = set()
 
-        # Launch the target application
+        # Snapshot visible top-level windows BEFORE launching, so discovery can
+        # diff to find the new window(s) the target opens (locale-independent).
+        self._pre_hwnds = visible_toplevel_windows()
+
+        # Launch the target application. A UWP AUMID ("PackageFamilyName!AppId")
+        # must be activated through the shell AppsFolder — launching the inner
+        # WindowsApps exe directly is ACL-blocked, version-pinned, and skips UWP
+        # activation. explorer shell:AppsFolder works even when not elevated.
         try:
-            self.proc = subprocess.Popen([exe_path])
-            self.target_pids.add(self.proc.pid)
-            log(f"Launched {exe_path} (pid={self.proc.pid})")
+            if is_aumid(exe_path):
+                self.proc = subprocess.Popen(
+                    ["explorer.exe", f"shell:AppsFolder\\{exe_path}"])
+                log(f"Launched UWP {exe_path} via shell:AppsFolder")
+            else:
+                self.proc = subprocess.Popen([exe_path])
+                log(f"Launched {exe_path} (pid={self.proc.pid})")
         except Exception as e:
             return False, f"Failed to launch '{exe_path}': {e}"
 
@@ -312,163 +347,86 @@ class Recorder:
                 pass
         if self._worker:
             self._worker.join(timeout=5)
-        if self._uia_event_thread:
-            self._uia_event_thread.stop()
-            self._uia_event_thread = None
         log("Recording stopped")
         return True, "Recording stopped"
 
     # ---------------- hook callbacks (hot path - keep tiny) ----------------
-    def _on_click(self, x, y, button, pressed):
-        if not self.recording or not pressed:
+    # pynput (win32 backend) passes an `injected` flag: True when the event was
+    # synthesised (e.g. UWP buttons emit injected keystrokes on click, or an
+    # automation tool sends input). We only record genuine physical input.
+    def _on_click(self, x, y, button, pressed, injected=False):
+        if not self.recording or not pressed or injected:
             return
         self.raw_queue.put({"kind": "click", "x": x, "y": y,
                             "button": button.name, "ts": time.time()})
 
-    def _on_scroll(self, x, y, dx, dy):
-        if not self.recording:
+    def _on_scroll(self, x, y, dx, dy, injected=False):
+        if not self.recording or injected:
             return
         self.raw_queue.put({"kind": "scroll", "x": x, "y": y,
                             "dy": dy, "ts": time.time()})
 
-    def _on_key(self, key):
-        if not self.recording:
+    def _on_key(self, key, injected=False):
+        if not self.recording or injected:
             return
-        item = {"kind": "key", "ts": time.time()}
+        item = {"kind": "key", "ts": time.time(), "vk": getattr(key, "vk", None)}
         if isinstance(key, keyboard.KeyCode) and key.char is not None:
             item["char"] = key.char
         else:
             item["special"] = getattr(key, "name", str(key))
         self.raw_queue.put(item)
 
-    # ---------------- target-app filtering ----------------
-    def _is_target_pid(self, pid):
-        if not pid:
-            return False
-        if pid in self.target_pids:
+    # ---------------- target-app filtering (by top-level window handle) -------
+    def _point_is_target(self, x, y):
+        if not self.target_hwnds:
+            return True  # discovery failed — do not silently drop everything
+        return top_window_at(x, y) in self.target_hwnds
+
+    def _foreground_is_target(self):
+        if not self.target_hwnds:
             return True
-        try:
-            p = psutil.Process(pid)
-            proc_name = p.name().lower()
-            if proc_name == self.target_exe:
-                self.target_pids.add(pid)
-                return True
-            # accept descendants of the launched process (some apps re-spawn)
-            if self.proc and self.proc.pid:
-                for anc in p.parents():
-                    if anc.pid == self.proc.pid:
-                        self.target_pids.add(pid)
-                        return True
-            # UWP stub match: "calc.exe" launcher exits immediately; the real
-            # process is "CalculatorApp.exe".  Match by exe stem as a substring
-            # of the actual process name (language-independent).
-            target_stem = os.path.splitext(self.target_exe)[0].lower()
-            if len(target_stem) >= 3 and target_stem in proc_name:
-                self.target_pids.add(pid)
-                return True
-        except Exception:
-            pass
-        return False
+        return foreground_top_window() in self.target_hwnds
 
-    def _belongs_to_target(self, hwnd, x=None, y=None, pid=None):
-        # 1. UIA process ID — most reliable path for UWP (bypasses hwnd=0 limitation)
-        if pid and self._is_target_pid(pid):
-            return True
-        # 2. hwnd-based PID lookup
-        if not hwnd and x is not None:
-            hwnd = hwnd_at_point(x, y)
-        if self._is_target_pid(pid_of_hwnd(hwnd)):
-            return True
-        # 3. Window title match (appName or cached real title like "계산기")
-        if self._title_matches_app(hwnd):
-            return True
-        # 4. UWP: WindowFromPoint returns ApplicationFrameHost's HWND.
-        #    CalculatorApp's CoreWindow is a child — enumerate children for its PID.
-        if hwnd:
-            found = [False]
-            def _check_child(child_hwnd, _):
-                if self._is_target_pid(pid_of_hwnd(child_hwnd)):
-                    found[0] = True
-                    return False
-                return True
-            try:
-                win32gui.EnumChildWindows(hwnd, _check_child, None)
-            except Exception:
-                pass
-            if found[0]:
-                return True
-        return False
-
-    def _title_matches_app(self, hwnd):
-        if not hwnd:
-            return False
-        app_name = self.session.get("appName", "").strip()
-        if not app_name and not self.known_window_title:
-            return False
-        try:
-            root = ctypes.windll.user32.GetAncestor(hwnd, GA_ROOT) or hwnd
-            title = win32gui.GetWindowText(root)
-            if not title:
-                return False
-            def norm(s):
-                return "".join(c for c in s.lower() if c.isalnum())
-            n_title = norm(title)
-            matched = (app_name and norm(app_name) in n_title) or \
-                      (self.known_window_title and norm(self.known_window_title) == n_title)
-            if matched:
-                pid = pid_of_hwnd(root)
-                if pid:
-                    self.target_pids.add(pid)
-                return True
-        except Exception:
-            pass
-        return False
-
-    # ---------------- UWP pid / window discovery ----------------
-    def _find_target_window(self):
-        """Poll up to 3 s for the target app's top-level HWND.
-        Adds matching PIDs (incl. ApplicationFrameHost) to target_pids.
-        Returns the HWND (int) or 0 on timeout."""
-        deadline = time.time() + 3.0
-        while time.time() < deadline:
-            result = [0]
-
-            def _enum_top(hwnd, _):
-                if not win32gui.IsWindowVisible(hwnd):
-                    return True
-                wpid = pid_of_hwnd(hwnd)
-                if wpid and self._is_target_pid(wpid):
-                    self.target_pids.add(wpid)
-                    result[0] = hwnd
-                    return False
-
-                def _enum_child(child, __):
-                    cpid = pid_of_hwnd(child)
-                    if cpid and self._is_target_pid(cpid):
-                        if wpid:
-                            self.target_pids.add(wpid)
-                        result[0] = hwnd
-                        return False
-                    return True
-
-                try:
-                    win32gui.EnumChildWindows(hwnd, _enum_child, None)
-                except Exception:
-                    pass
-                return result[0] == 0
-
-            try:
-                win32gui.EnumWindows(_enum_top, None)
-            except Exception:
-                pass
-
-            if result[0]:
-                log(f"[discover] target pids: {self.target_pids} hwnd: {result[0]}")
-                return result[0]
+    def _discover_target_windows(self):
+        """Poll up to DISCOVER_TIMEOUT for the window(s) the launched app opens.
+        Primary signal: top-level windows that appeared AFTER launch (diff vs
+        the pre-launch snapshot). Also accept windows owned by the launch pid
+        (classic Win32). Fallback: the current foreground top-level window."""
+        launch_pid = self.proc.pid if self.proc else 0
+        deadline = time.time() + DISCOVER_TIMEOUT
+        while time.time() < deadline and not self._stop_flag.is_set():
+            current = visible_toplevel_windows()
+            found = set()
+            for hwnd in current:
+                # newly-appeared, titled top-level window (UWP + most apps)
+                if hwnd not in self._pre_hwnds:
+                    try:
+                        if win32gui.GetWindowText(hwnd).strip():
+                            found.add(hwnd)
+                    except Exception:
+                        pass
+                # window owned by the launched process (classic Win32)
+                if launch_pid and pid_of_hwnd(hwnd) == launch_pid:
+                    found.add(hwnd)
+            if found:
+                self.target_hwnds |= found
+                titles = []
+                for h in self.target_hwnds:
+                    try:
+                        titles.append(win32gui.GetWindowText(h))
+                    except Exception:
+                        titles.append("")
+                log(f"[target] hwnds={self.target_hwnds} titles={titles}")
+                return
             time.sleep(0.2)
 
-        log("[discover] timed out — using launch pid only")
-        return 0
+        fg = foreground_top_window()
+        if fg:
+            self.target_hwnds.add(fg)
+            log(f"[target] fallback foreground hwnd={fg} "
+                f"title='{win32gui.GetWindowText(fg)}'")
+        else:
+            log("[target] discovery failed — filtering disabled (accept all)")
 
     # ---------------- worker (UIA lookups + emission happen here) ----------
     def _worker_loop(self):
@@ -479,10 +437,7 @@ class Recorder:
             traceback.print_exc()
             return
 
-        target_hwnd = self._find_target_window()
-        if target_hwnd:
-            self._uia_event_thread = UIAEventThread(self.raw_queue)
-            self._uia_event_thread.start(target_hwnd)
+        self._discover_target_windows()
 
         while True:
             try:
@@ -514,16 +469,6 @@ class Recorder:
             self._flush_pending_scroll()
             return
 
-        if kind == "uia_invoke":
-            # UIA Invoke event: upgrade the pending pynput click if it's still
-            # in the double-click hold window, otherwise emit directly.
-            if (self._pending_click
-                    and time.time() - self._pending_click["ts"] < DOUBLE_CLICK_INTERVAL):
-                self._pending_click["uia_elem"] = item["elem"]
-            else:
-                self._emit("click", item["elem"])
-            return
-
         if kind == "click":
             # focus moved -> typing into the previous field is complete
             self._flush_type_buffer()
@@ -536,18 +481,20 @@ class Recorder:
                 self._emit_pointer_event("rightClick", x, y, ins)
                 return
 
-            # double-click detection: hold the first click briefly
-            pc = self._pending_click
-            if (pc and ts - pc["ts"] <= DOUBLE_CLICK_INTERVAL
-                    and abs(x - pc["x"]) <= DOUBLE_CLICK_RADIUS
-                    and abs(y - pc["y"]) <= DOUBLE_CLICK_RADIUS):
-                self._pending_click = None
-                self._emit_pointer_event("doubleClick", x, y, ins)
+            # Every left click is recorded individually (preserves repeated
+            # presses like "9999" -> num9Button x4). A genuine fast double-click
+            # is recognised IN ADDITION, never by merging/dropping the clicks.
+            elem = self._inspect(ins, x, y)
+            self._emit("click", elem, x=x, y=y)
+
+            ll = self._last_left_click
+            if (ll and ts - ll["ts"] <= DOUBLE_CLICK_INTERVAL
+                    and abs(x - ll["x"]) <= DOUBLE_CLICK_RADIUS
+                    and abs(y - ll["y"]) <= DOUBLE_CLICK_RADIUS):
+                self._emit("doubleClick", elem, x=x, y=y)
+                self._last_left_click = None  # consume; avoid chaining triples
             else:
-                self._flush_pending_click()
-                self._pending_click = {"x": x, "y": y, "ts": ts,
-                                       "elem": self._inspect(ins, x, y),
-                                       "uia_elem": None}
+                self._last_left_click = {"x": x, "y": y, "ts": ts}
             return
 
         if kind == "scroll":
@@ -568,6 +515,7 @@ class Recorder:
             self._flush_pending_scroll()
             special = item.get("special")
             char = item.get("char")
+            vk = item.get("vk")
 
             if special == "tab":
                 self._flush_type_buffer()
@@ -583,29 +531,35 @@ class Recorder:
                 return
             if special == "space":
                 char = " "
+            # Recover numpad keys that arrived without a .char (NumLock off makes
+            # numpad digits report as navigation keys: up/down/end/...).
+            if char is None and vk in NUMPAD_VK:
+                char = NUMPAD_VK[vk]
             if char is None:
+                log(f"[keydrop] special={special} vk={vk} — no char (modifier/nav)")
                 return  # shift/ctrl/arrows etc. - ignored
             if not (0x20 <= ord(char) <= 0x7E):
+                log(f"[keydrop] char={char!r} ord={ord(char)} vk={vk} — non-ASCII/IME")
                 return  # non-ASCII (IME/CJK composition) — ignore silently
 
-            # first keystroke of a burst: bind buffer to the focused element
+            # first keystroke of a burst: gate on the foreground window being
+            # the target, then bind the buffer to the focused element.
             if not self._type_buffer:
+                if not self._foreground_is_target():
+                    log(f"[keydrop] char={char!r} fg={foreground_top_window()} "
+                        f"— foreground not target {self.target_hwnds}")
+                    return  # typing in another app -> ignore
                 elem = None
                 try:
                     fe = ins.focused_element()
                     elem = ins.describe(fe)
                 except Exception:
                     pass
-                if elem is None or not self._is_target_pid(pid_of_hwnd(elem.get("hwnd", 0))):
-                    # focused element unreadable or not in target app
-                    if elem is not None and elem.get("hwnd") and \
-                            not self._is_target_pid(pid_of_hwnd(elem["hwnd"])):
-                        return  # typing in another app -> ignore
-                # Skip keystrokes on non-input controls (e.g. UWP buttons emit
-                # synthetic keyboard events on click — they must not become type events)
-                ctrl_type = (elem or {}).get("controlType", "")
-                if ctrl_type and ctrl_type not in INPUT_CONTROL_TYPES:
-                    return
+                # NOTE: we deliberately do NOT drop based on controlType here.
+                # On calc the focused element while typing is the results Text,
+                # not an Edit; sendKeys to the focused element/window still
+                # replays the input. (Dropping by controlType was the reason
+                # keyboard input on calc was previously lost entirely.)
                 self._type_elem = elem or {}
             self._type_buffer += char
             return
@@ -616,21 +570,18 @@ class Recorder:
             return ins.describe(elem)
         except Exception:
             return {"automationId": "", "className": "", "name": "",
-                    "controlType": "", "windowTitle": "", "xpath": "", "hwnd": 0, "pid": 0}
+                    "controlType": "", "windowTitle": "", "xpath": "", "hwnd": 0}
 
     # ---------------- pending flushes ----------------
     def _flush_stale(self, ins):
         now = time.time()
-        if self._pending_click and now - self._pending_click["ts"] > DOUBLE_CLICK_INTERVAL:
-            self._flush_pending_click()
         if self._pending_scroll and now - self._pending_scroll["ts"] > SCROLL_FLUSH_IDLE:
             self._flush_pending_scroll()
 
     def _flush_pending_click(self):
-        pc, self._pending_click = self._pending_click, None
-        if pc:
-            elem = pc["uia_elem"] if pc.get("uia_elem") else pc["elem"]
-            self._emit("click", elem, x=pc["x"], y=pc["y"])
+        # Left clicks are emitted immediately; this only ends the open
+        # double-click window so an intervening event can't pair across it.
+        self._last_left_click = None
 
     def _flush_pending_scroll(self):
         ps, self._pending_scroll = self._pending_scroll, None
@@ -650,16 +601,19 @@ class Recorder:
     # ---------------- emission ----------------
     def _emit(self, action, elem, x=None, y=None, value=None):
         elem = elem or {}
-        hwnd = elem.get("hwnd", 0)
-        pid = elem.get("pid", 0)
-        # application filtering (typing was already filtered at buffer start)
-        if action != "type" and not self._belongs_to_target(hwnd, x, y, pid=pid):
-            log(f"[skip] {action} hwnd={hwnd} pid={pid} x={x} y={y} — not target app")
-            return
-        # Cache actual window title for locale-independent _title_matches_app
-        wt = elem.get("windowTitle", "")
-        if wt and not self.known_window_title:
-            self.known_window_title = wt
+        # Application filtering by top-level window handle.
+        # Pointer events carry (x, y) — filter by the window under the point.
+        # `type` events have no point; they were already gated on the
+        # foreground window being the target at capture time.
+        if action != "type" and x is not None:
+            # Accept if the point is over a target window OR the target app is
+            # foreground. The OR covers UWP (CoreWindow GA_ROOT != tracked
+            # ApplicationFrameWindow, so point matching alone fails) and the
+            # first click that raises a background target window.
+            if not (self._point_is_target(x, y) or self._foreground_is_target()):
+                log(f"[skip] {action} top={top_window_at(x, y)} "
+                    f"fg={foreground_top_window()} x={x} y={y} — not target app")
+                return
 
         event = {
             "action": action,
@@ -691,78 +645,6 @@ class Recorder:
             requests.post(EXPRESS_EVENTS_URL, json=event, timeout=3)
         except Exception as e:
             log(f"WARN: could not POST to bridge: {e}")
-
-
-# ----------------------------------------------------------------------------
-# UIA event thread (dedicated STA + PumpMessages for Invoke events)
-# ----------------------------------------------------------------------------
-class UIAEventThread:
-    """Runs a dedicated STA COM thread with pythoncom.PumpMessages so that
-    UIA Invoke events are delivered without a message pump on the worker thread.
-    Events are posted to raw_queue as {kind: uia_invoke, elem: ..., ts: ...}.
-    self._handler is kept alive to prevent COMObject GC."""
-
-    def __init__(self, raw_queue):
-        self._queue = raw_queue
-        self._thread_id = 0
-        self._ready = threading.Event()
-        self._thread = None
-        self._handler = None  # GC anchor for the COMObject
-
-    def start(self, target_hwnd):
-        self._target_hwnd = target_hwnd
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-        self._ready.wait(timeout=5.0)
-
-    def _run(self):
-        import pythoncom
-        import comtypes.client
-
-        pythoncom.CoInitialize()
-        self._thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
-        registered = False
-
-        try:
-            uia = comtypes.client.CreateObject(
-                "{ff48dba4-60ef-4201-aa87-54103eef594e}",
-                interface=comtypes.client.GetModule(
-                    "UIAutomationCore.dll").IUIAutomation,
-            )
-            if self._target_hwnd:
-                elem = uia.ElementFromHandle(self._target_hwnd)
-                # _make_invoke_handler lazy-imports IUIAutomationEventHandler;
-                # GetModule above ensures comtypes.gen module already exists.
-                self._handler = _make_invoke_handler(self._queue)
-                uia.AddAutomationEventHandler(
-                    UIA_Invoke_InvokedEventId,
-                    elem, TreeScope_Subtree, None, self._handler,
-                )
-                log(f"[uia-events] invoke handler registered hwnd={self._target_hwnd}")
-                registered = True
-            self._uia = uia
-        except Exception:
-            log("[uia-events] registration failed — pynput path is fallback")
-            traceback.print_exc()
-        finally:
-            self._ready.set()
-
-        if not registered:
-            return  # no message loop needed; pynput handles everything
-
-        pythoncom.PumpMessages()  # blocks; UIA Invoke events delivered on this thread
-
-        try:
-            if hasattr(self, '_uia'):
-                self._uia.RemoveAllEventHandlers()
-        except Exception:
-            pass
-
-    def stop(self):
-        if self._thread_id:
-            # WM_QUIT = 0x0012 breaks PumpMessages
-            ctypes.windll.user32.PostThreadMessageW(
-                self._thread_id, 0x0012, 0, 0)
 
 
 # ----------------------------------------------------------------------------

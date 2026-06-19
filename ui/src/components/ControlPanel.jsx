@@ -8,8 +8,10 @@ const FRAMEWORKS = [
 const PRESETS = [
   { label: 'Calculator',       appName: 'Calculator',       exePath: 'C:\\Windows\\System32\\calc.exe' },
   { label: 'Notepad',          appName: 'Notepad',          exePath: 'C:\\Windows\\System32\\notepad.exe' },
-  // Version-dependent path — may change when Paint updates
-  { label: 'Paint (mspaint)',  appName: 'Paint',            exePath: 'C:\\Program Files\\WindowsApps\\Microsoft.Paint_11.2603.251.0_x64__8wekyb3d8bbwe\\PaintApp\\mspaint.exe' },
+  // UWP app: launch by AUMID (Get-StartApps AppID), not a versioned WindowsApps
+  // exe path. The agent + generated code detect the "!" and launch via
+  // explorer shell:AppsFolder (avoids ACL/version/activation breakage).
+  { label: 'Paint (UWP)',      appName: 'Paint',            exePath: 'Microsoft.Paint_8wekyb3d8bbwe!App' },
   { label: 'Registry Editor',  appName: 'RegistryEditor',   exePath: 'C:\\Windows\\regedit.exe' },
   { label: 'Custom...',        appName: '',                 exePath: '' },
 ];

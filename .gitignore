@@ -2,3 +2,11 @@ node_modules/
 __pycache__/
 .claude/settings.local.json
 .env
+
+# background-process scratch logs (server / compile_loop run_in_background)
+_cloop.out
+_cloop.err
+_srv.out
+_srv.err
+**/_srv.out
+**/_srv.err

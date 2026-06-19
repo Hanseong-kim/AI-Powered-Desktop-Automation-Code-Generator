@@ -186,8 +186,11 @@ CRITICAL - driver initialisation (two-step; supports Win32 AND UWP apps):
   Step 2: root session — wait until the window appears, grab its handle, then attach.
   Use this exact pattern in @BeforeClass setUp() throws Exception:
 
-  // 1. Launch (works for Win32 and UWP; setApp(exePath) alone fails for UWP)
-  new ProcessBuilder("<exePath>").start();
+  // 1. Launch. Use the EXACT launch statement given in the user prompt.
+  //    Win32 -> new ProcessBuilder("C:\\path\\to\\app.exe").start();
+  //    UWP   -> new ProcessBuilder("explorer.exe", "shell:AppsFolder\\<AUMID>").start();
+  //    (setApp(exePath) alone fails for UWP; a versioned WindowsApps exe path is ACL-blocked)
+  <launchStatement from the user prompt>;
 
   // 2. Root session — wait for the window, capture its native handle
   WindowsOptions desktopOpts = new WindowsOptions();
@@ -207,7 +210,7 @@ CRITICAL - driver initialisation (two-step; supports Win32 AND UWP apps):
 
   NEVER use setApp(exePath) as the sole init — it cannot launch UWP apps.
   NEVER use DesiredCapabilities — incompatible with java-client 8.x.
-  Replace <exePath> and <windowTitle> with the actual values provided in the user prompt.
+  Use the launch statement and <windowTitle> exactly as provided in the user prompt.
   NEVER translate or anglicize <windowTitle> — use the exact string as given (it may be non-English, e.g. "계산기").
 
 CRITICAL - locators (use AppiumBy, not MobileBy which is deprecated):
@@ -215,11 +218,18 @@ CRITICAL - locators (use AppiumBy, not MobileBy which is deprecated):
   By.className("className")                  // ClassName-based strategy
   By.name("elementName")                     // fallback when id/class empty`;
 
-function buildUserPrompt(strategy, appName, platform, eventList) {
+function buildUserPrompt(strategy, appName, platform, eventList, exePath = "") {
   const p = PLATFORM_MAP[platform] || PLATFORM_MAP.Windows;
   const raw = appName.replace(/[^A-Za-z0-9]/g, "") || "MyApp";
   const className = `${raw.charAt(0).toUpperCase() + raw.slice(1)}Test${strategy === "id" ? "ById" : "ByClass"}`;
   const windowTitle = eventList[0]?.element?.windowTitle || appName;
+  // UWP apps are passed as an AUMID ("PackageFamilyName!AppId") and must be
+  // launched through the shell AppsFolder; Win32 apps use the plain exe path.
+  // Emit the EXACT ProcessBuilder statement so the model copies it verbatim.
+  const isUwp = exePath.includes("!");
+  const launchLine = isUwp
+    ? `new ProcessBuilder("explorer.exe", "shell:AppsFolder\\\\${exePath}").start();`
+    : `new ProcessBuilder("${exePath.replace(/\\/g, "\\\\")}").start();`;
   const locatorRule = strategy === "id"
     ? `Locator strategy: use the element's AutomationId as the primary locator (${p.idHint}). If an event has an empty automationId, fall back to By.name(element name), then By.className.`
     : `Locator strategy: use the element's ClassName as the primary locator (By.className). When several elements share a class, use XPath to disambiguate — e.g. By.xpath("//Button[@Name='계산기']"). NEVER chain By.className(...).and(...) — By has no and() method; use XPath instead.`;
@@ -227,7 +237,8 @@ function buildUserPrompt(strategy, appName, platform, eventList) {
   return `Target application: "${appName}" on platform ${platform} (${p.note}).
 Driver class: ${p.driver} (import ${p.driverImport}).
 Public test class name: ${className}. Page class name: ${className.replace("Test", "Page")}.
-Exe path for ProcessBuilder: use the exePath from the note section above.
+Launch step — use EXACTLY this statement for the ProcessBuilder launch in setUp() (copy verbatim, do not alter or substitute a path):
+  ${launchLine}
 Window title for root-session XPath lookup in setUp: "${windowTitle}" (use as-is — may be non-English; do NOT translate or replace with the English app name)
 
 ${locatorRule}
@@ -305,7 +316,7 @@ function stripFences(code) {
   return code.replace(/^```[a-z]*\s*/i, "").replace(/```\s*$/, "").trim();
 }
 
-async function groqGenerate(apiKey, strategy, appName, platform, eventList) {
+async function groqGenerate(apiKey, strategy, appName, platform, eventList, exePath) {
   const res = await fetch(GROQ_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
@@ -315,7 +326,7 @@ async function groqGenerate(apiKey, strategy, appName, platform, eventList) {
       max_tokens: 6000,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: buildUserPrompt(strategy, appName, platform, eventList) },
+        { role: "user", content: buildUserPrompt(strategy, appName, platform, eventList, exePath) },
       ],
     }),
   });
@@ -335,6 +346,7 @@ app.post("/api/generate", async (req, res) => {
   const { apiKey, appName, platform, framework = "appium" } = req.body;
   const name = appName || sessionInfo.appName || "MyApp";
   const plat = platform || sessionInfo.platform || "Windows";
+  const exe = req.body.exePath || sessionInfo.exePath || "";
 
   if (!apiKey) return res.status(400).json({ ok: false, message: "Groq API key is required" });
   if (events.length === 0) return res.status(400).json({ ok: false, message: "No recorded events to generate from" });
@@ -366,9 +378,9 @@ app.post("/api/generate", async (req, res) => {
     } else {
       const rawBase = name.replace(/[^A-Za-z0-9]/g, "") || "MyApp";
       const base = rawBase.charAt(0).toUpperCase() + rawBase.slice(1);
-      const byId = await groqGenerate(apiKey, "id", name, plat, slim);
+      const byId = await groqGenerate(apiKey, "id", name, plat, slim, exe);
       await new Promise((r) => setTimeout(r, 4000));
-      const byClass = await groqGenerate(apiKey, "class", name, plat, slim);
+      const byClass = await groqGenerate(apiKey, "class", name, plat, slim, exe);
       payload = {
         ok: true,
         framework: "appium",
