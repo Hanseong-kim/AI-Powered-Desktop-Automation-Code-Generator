@@ -24,7 +24,7 @@ the AI; the React dashboard provides live monitoring and triggers code generatio
 | Java | 11+ | For running generated Appium tests |
 | Maven | 3.8+ | `mvn -version` to verify |
 | WinAppDriver | 1.2.1 | Required for Appium Java test execution |
-| Groq API key | — | Free at console.groq.com |
+| Groq API key | — | Free at console.groq.com. Enter in the UI, **or** put `GROQ_API_KEY=gsk_...` in repo-root `.env` (server-side fallback) |
 
 ---
 
@@ -64,7 +64,7 @@ npm run dev
 
 ## 2. Recording a Session
 
-1. Select a **Target App** from the preset dropdown (Calculator / Notepad / Paint / WordPad / Custom…).
+1. Select a **Target App** from the preset dropdown (Calculator / Notepad / Paint (UWP) / Registry Editor / Custom…).
    - Presets auto-fill **App Name** and **Exe Path**.
    - Choose **Custom…** to enter a path manually.
 2. Select **Platform** (Windows / Android / iOS).
@@ -74,6 +74,8 @@ npm run dev
 6. Click **Stop** when done.
 7. Each captured event row can be **deleted individually** by hovering over it and clicking the `×` button.
 8. Enter your **Groq API Key** and click **Generate Code**.
+   If the server has `GROQ_API_KEY` set in `.env`, you can **leave the key field blank** — the
+   server uses its own key (the key is never sent to the browser). A typed key takes precedence.
    Generated files are **saved to disk automatically** (toast confirms the path).
 
 ### Generated output
@@ -83,10 +85,16 @@ npm run dev
 | Appium Java | `{App}TestById.java`, `{App}TestByClass.java` |
 | Playwright Python | `test_{app}_playwright.py` |
 
-> **Note on generation order (Appium Java):** The two Java files are generated
-> *sequentially* (ById first, then ByClass, 4 seconds apart).  This is
-> intentional — Groq's free-tier TPM limit causes HTTP 429 errors when both
-> requests fire simultaneously.  Total generation time is ~15–25 seconds.
+> **Note on generation (Appium Java):** The two Java files (ById + ByClass) are generated
+> **in parallel** (`Promise.all`). Each Groq call retries automatically on HTTP 429 (honouring
+> the `Retry-After` header, with backoff), so concurrent requests stay safe under the rate limit.
+> Typical generation time is ~5–12 seconds.
+>
+> **Groq free-tier limits** are account-wide: ~30 req/min (RPM), 12k tokens/min (TPM),
+> and **100k tokens/day (TPD)**. Each generation uses ~6k tokens (two files), so heavy
+> re-generation can exhaust the daily 100k. If you hit TPD, generation is blocked for
+> ~30 min to several hours — **don't re-generate to test; reuse the saved `.java` files and
+> just re-run `mvn test`** (running tests uses zero Groq tokens).
 
 ---
 
@@ -122,6 +130,13 @@ Windows Application Driver listening for requests at: http://127.0.0.1:4723/
 ```
 
 Leave this terminal open during the test run.
+
+> **Alternative — Appium Server.** Instead of `WinAppDriver.exe` directly, you can run
+> Appium Server (with `appium-windows-driver`), which listens on `4723` and proxies to an
+> internal WinAppDriver. The generated code connects to `http://127.0.0.1:4723` either way:
+> ```powershell
+> appium    # Appium v3.x with the 'windows' driver installed
+> ```
 
 ---
 
@@ -182,6 +197,9 @@ $env:GROQ_API_KEY="gsk_..."; python agent/mock_events.py
 | `Connection refused` on port 4723 | WinAppDriver not running | Start `WinAppDriver.exe` as Administrator |
 | `SessionNotCreatedException` | Wrong `.exe` path in capability | Verify path passed to Launch |
 | `NoSuchElementException` | Locator mismatch or timing | Try the ByClass file instead of ById |
+| `UnsupportedCommandException: only pen and touch...` | Generated code used `Actions`/`contextClick`/`doubleClick` | WinAppDriver has no W3C mouse Actions — regenerate (prompt now maps these to `element.click()`) |
+| Generation fails `429 ... tokens per day (TPD)` | Groq free-tier daily 100k tokens exhausted | Wait ~30 min–hours (rolling window); **reuse saved `.java` + re-run `mvn test`** instead of regenerating |
+| Generation fails `429 ... tokens per minute (TPM)` | Two requests momentarily exceeded 12k/min | Auto-retried by the server; if persistent, wait ~30s |
 | `Cannot find symbol: WindowsDriver` | Wrong java-client version | Confirm `pom.xml` uses `java-client 8.6.0` |
 | UIA properties empty | Not running as Admin | Restart agent terminal as Administrator |
 | Toast "Server connection lost" loops | Express server crashed | Restart `node server.js`; toasts fire once per episode |
@@ -201,5 +219,22 @@ Both `.java` files conform to:
 - `AppiumBy.accessibilityId()` / `By.className()` / `By.name()` locators
 - `WebDriverWait(driver, Duration.ofSeconds(15))` for every interaction
 - `System.out.println("[STEP n] ...")` before each action
-- Final `Assert` verifying session state
+- Final `Assert` that **reuses a recorded element's locator** (never an invented control)
 - No `Thread.sleep()`, no TODOs
+
+### WinAppDriver constraints baked into the prompt
+
+- **No W3C mouse `Actions`.** WinAppDriver supports only pen/touch pointer types. Recorded
+  right-click / double-click are mapped to a plain `element.click()`; `Actions`/`contextClick`/
+  `doubleClick` are never emitted.
+- **ByClass disambiguation.** Many controls share a ClassName (every calculator key is
+  `Button`), so a bare `By.className(...)` matches the wrong (first) element. The ByClass
+  strategy combines ClassName + Name as `By.xpath("//Button[@Name='9']")` whenever a Name exists.
+- **No invented input field.** `type` events `sendKeys` to the recorded element — the prompt
+  forbids fabricating a control like `By.className("Edit")` (absent in UWP apps).
+
+### Known limitation — Paint / canvas drawing
+
+Toolbar/button clicks in Paint work, but **freehand canvas drawing (mouse drag) cannot be
+replayed** — it requires W3C mouse Actions, which WinAppDriver rejects. Use **Notepad** or
+**Calculator** for end-to-end demos; treat Paint as click-only.

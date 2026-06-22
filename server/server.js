@@ -89,6 +89,12 @@ app.post("/api/stop", async (req, res) => {
   }
 });
 
+// Tell the UI whether the server has a .env key, WITHOUT exposing the key.
+// If true, the UI can leave the key field blank and the server uses its own key.
+app.get("/api/config", (req, res) => {
+  res.json({ hasServerKey: !!process.env.GROQ_API_KEY });
+});
+
 app.get("/api/status", async (req, res) => {
   let agent = { online: false };
   try { agent = await callAgent("/status"); agent.online = true; } catch { /* offline */ }
@@ -160,17 +166,24 @@ Hard rules for every file you produce:
 - Page Object Model: one Page class containing locators + action methods, one Test class that uses it. Both classes in the SAME file (Page class non-public).
 - Every interaction is preceded by an explicit wait: WebDriverWait with Duration.ofSeconds(15) and ExpectedConditions (elementToBeClickable for clicks, presenceOfElementLocated/visibilityOfElementLocated for typing). NEVER use Thread.sleep().
 - Before each action in the test method, print a step log: System.out.println("[STEP n] ...").
-- End the test with at least one Assert that verifies the final state (e.g. an element is displayed or the session is active).
+- End the @Test method (NOT @AfterClass) with at least one Assert that verifies the final state. The asserted element MUST be one that ALREADY appears earlier in the recorded session — reuse the exact locator of one of the recorded steps (e.g. the last clicked element). NEVER introduce a NEW locator or control just for the assert (do NOT invent By.className("Edit") or a results/display field that was never recorded). Only WebElement.isDisplayed()/isEnabled() or element text comparisons are allowed, e.g. Assert.assertTrue(element.isDisplayed()). NEVER assert on a non-existent driver API such as driver.getSessionDetails().
+- @AfterClass tearDown() must be null-safe: if (driver != null) { driver.quit(); } and contain NO assertions.
 - Method and field names must be descriptive, derived from the element names.
 - The code must compile with Appium java-client 8.6.0 and TestNG 7.x.
+
+CRITICAL - WinAppDriver interaction rules (never break):
+- NEVER import or use org.openqa.selenium.interactions.Actions. Do NOT include this import even if unused.
+- NEVER use contextClick(), doubleClick(), moveToElement(), or any W3C mouse pointer Actions. WinAppDriver 1.x does not support mouse pointer type in W3C Actions API and will throw UnsupportedCommandException at runtime.
+- If the recorded event is a right-click or double-click, map it strictly to a simple left-click: element.click();
+- All clicks must use element.click() directly on the WebElement.
 
 CRITICAL - exact imports (copy these verbatim, do not alter the package paths):
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.time.Duration;
 import org.openqa.selenium.By;
+import org.openqa.selenium.Keys;
 import org.openqa.selenium.WebElement;
-import org.openqa.selenium.interactions.Actions;
 import org.openqa.selenium.support.ui.ExpectedConditions;
 import org.openqa.selenium.support.ui.WebDriverWait;
 import org.testng.Assert;
@@ -232,7 +245,7 @@ function buildUserPrompt(strategy, appName, platform, eventList, exePath = "") {
     : `new ProcessBuilder("${exePath.replace(/\\/g, "\\\\")}").start();`;
   const locatorRule = strategy === "id"
     ? `Locator strategy: use the element's AutomationId as the primary locator (${p.idHint}). If an event has an empty automationId, fall back to By.name(element name), then By.className.`
-    : `Locator strategy: use the element's ClassName as the primary locator (By.className). When several elements share a class, use XPath to disambiguate — e.g. By.xpath("//Button[@Name='계산기']"). NEVER chain By.className(...).and(...) — By has no and() method; use XPath instead.`;
+    : `Locator strategy: locate EVERY element by XPath using ClassName and Name as ATTRIBUTES on a wildcard node — By.xpath("//*[@ClassName='<className>' and @Name='<name>']"), e.g. By.xpath("//*[@ClassName='Button' and @Name='9']"). CRITICAL: in WinAppDriver XPath the node tag is the CONTROL TYPE (Edit, Button, Document, Text, Window...), NOT the ClassName — so NEVER write //<className>[...] such as //RichEditD2DPT[@Name='...'] (RichEditD2DPT is a ClassName, not a control type → it matches nothing and times out). Always put ClassName in an [@ClassName='...'] predicate on //*. Why not a bare By.className: many controls share a ClassName (every calculator key is 'Button'), so By.className returns the FIRST match (often the wrong/menu element). RULES: (1) ClassName + Name both present → By.xpath("//*[@ClassName='cls' and @Name='name']"). (2) Name empty → By.className(cls). (3) ClassName empty → By.name(name); if Name also empty → AppiumBy.accessibilityId(automationId). NEVER fabricate a control such as By.className("Edit"). NEVER chain By.className(...).and(...) — By has no and() method; use the XPath form above.`;
 
   return `Target application: "${appName}" on platform ${platform} (${p.note}).
 Driver class: ${p.driver} (import ${p.driverImport}).
@@ -244,9 +257,17 @@ Window title for root-session XPath lookup in setUp: "${windowTitle}" (use as-is
 ${locatorRule}
 
 Recorded user session (in order). Convert EVERY event into a page-object action + a test step:
-- click / doubleClick / rightClick -> click(), Actions.doubleClick(), Actions.contextClick()
-- type -> sendKeys(value) into the recorded input field (clear() first); if value contains "\\n", keep it verbatim — sendKeys("text\\n") triggers Enter in WinAppDriver
-- scroll -> a scroll action on the window (e.g. Actions or executeScript), keep it simple
+- click / doubleClick / rightClick -> ALL map to element.click(). WinAppDriver does not support mouse Actions; NEVER emit Actions.doubleClick() or Actions.contextClick(). A double-click or right-click in the recording becomes a single element.click().
+- type -> locate the SAME element recorded for THIS event (using the locator strategy and its fallbacks defined above) and send the keys to it. NEVER invent or assume a separate input field such as By.className("Edit"). CRITICAL — newlines: WinAppDriver does NOT convert a literal "\\n" in a string into the Enter key (it gets swallowed → all text lands on one line). So do NOT call sendKeys("text\\n"). Instead split the value on "\\n" and send Keys.ENTER (org.openqa.selenium.Keys) between segments. Use a helper method like:
+      private void typeWithEnter(WebElement el, String value) {
+          String[] lines = value.split("\\n", -1);
+          for (int i = 0; i < lines.length; i++) {
+              if (!lines[i].isEmpty()) el.sendKeys(lines[i]);
+              if (i < lines.length - 1) el.sendKeys(Keys.ENTER);
+          }
+      }
+  Do NOT call clear() before typing — recorded type events are sequential/appended text, and clear() is unreliable on rich-text controls.
+- scroll -> use driver.executeScript(...) if strictly needed, otherwise omit the step. NEVER use Actions.
 
 ${JSON.stringify(eventList, null, 2)}
 
@@ -289,52 +310,37 @@ ${JSON.stringify(eventList, null, 2)}
 Output ONLY the Python source. Start directly with the imports.`;
 }
 
-async function groqGeneratePlaywright(apiKey, appName, platform, eventList) {
-  const res = await fetch(GROQ_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({
-      model: GROQ_MODEL,
-      temperature: 0.2,
-      max_tokens: 4000,
-      messages: [
-        { role: "system", content: PLAYWRIGHT_SYSTEM_PROMPT },
-        { role: "user", content: buildPlaywrightPrompt(appName, platform, eventList) },
-      ],
-    }),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    const hints = { 401: "Invalid Groq API key", 429: "Groq rate limit exceeded" };
-    throw new Error(hints[res.status] ?? `Groq API ${res.status}: ${text.slice(0, 300)}`);
-  }
-  const data = await res.json();
-  return stripFences(data.choices?.[0]?.message?.content || "");
-}
-
 function stripFences(code) {
   return code.replace(/^```[a-z]*\s*/i, "").replace(/```\s*$/, "").trim();
 }
 
-async function groqGenerate(apiKey, strategy, appName, platform, eventList, exePath) {
+// Single Groq chat call with automatic retry on 429 (rate limit). This lets us
+// fire the two generations in parallel safely: if a momentary TPM cap is hit,
+// we honour the Retry-After header (or back off) instead of failing the request.
+async function groqChat(apiKey, { system, user, maxTokens }, attempt = 0) {
   const res = await fetch(GROQ_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({
       model: GROQ_MODEL,
       temperature: 0.2,
-      max_tokens: 6000,
+      max_tokens: maxTokens,
       messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: buildUserPrompt(strategy, appName, platform, eventList, exePath) },
+        { role: "system", content: system },
+        { role: "user", content: user },
       ],
     }),
   });
+  if (res.status === 429 && attempt < 3) {
+    const retryAfter = parseFloat(res.headers.get("retry-after")) || (1.5 * (attempt + 1));
+    await new Promise((r) => setTimeout(r, Math.min(retryAfter, 10) * 1000));
+    return groqChat(apiKey, { system, user, maxTokens }, attempt + 1);
+  }
   if (!res.ok) {
     const text = await res.text();
     const hints = {
-      401: 'Invalid Groq API key — check your key at console.groq.com',
-      429: 'Groq rate limit exceeded — wait a moment and retry',
+      401: "Invalid Groq API key — check your key at console.groq.com",
+      429: "Groq rate limit exceeded — wait a moment and retry",
     };
     throw new Error(hints[res.status] ?? `Groq API ${res.status}: ${text.slice(0, 300)}`);
   }
@@ -342,13 +348,33 @@ async function groqGenerate(apiKey, strategy, appName, platform, eventList, exeP
   return stripFences(data.choices?.[0]?.message?.content || "");
 }
 
+function groqGeneratePlaywright(apiKey, appName, platform, eventList) {
+  return groqChat(apiKey, {
+    system: PLAYWRIGHT_SYSTEM_PROMPT,
+    user: buildPlaywrightPrompt(appName, platform, eventList),
+    maxTokens: 4000,
+  });
+}
+
+function groqGenerate(apiKey, strategy, appName, platform, eventList, exePath) {
+  return groqChat(apiKey, {
+    system: SYSTEM_PROMPT,
+    user: buildUserPrompt(strategy, appName, platform, eventList, exePath),
+    maxTokens: 4000,
+  });
+}
+
 app.post("/api/generate", async (req, res) => {
-  const { apiKey, appName, platform, framework = "appium" } = req.body;
+  const { appName, platform, framework = "appium" } = req.body;
   const name = appName || sessionInfo.appName || "MyApp";
   const plat = platform || sessionInfo.platform || "Windows";
   const exe = req.body.exePath || sessionInfo.exePath || "";
 
-  if (!apiKey) return res.status(400).json({ ok: false, message: "Groq API key is required" });
+  // Prefer a key the user typed in the UI; otherwise fall back to the server's
+  // .env key. The key never has to leave the server when .env is configured.
+  const apiKey = (req.body.apiKey && req.body.apiKey.trim()) || process.env.GROQ_API_KEY;
+
+  if (!apiKey) return res.status(400).json({ ok: false, message: "Groq API key is required (enter one in the UI or set GROQ_API_KEY in .env)" });
   if (events.length === 0) return res.status(400).json({ ok: false, message: "No recorded events to generate from" });
 
   const slim = events.map((e, i) => ({
@@ -378,9 +404,12 @@ app.post("/api/generate", async (req, res) => {
     } else {
       const rawBase = name.replace(/[^A-Za-z0-9]/g, "") || "MyApp";
       const base = rawBase.charAt(0).toUpperCase() + rawBase.slice(1);
-      const byId = await groqGenerate(apiKey, "id", name, plat, slim, exe);
-      await new Promise((r) => setTimeout(r, 4000));
-      const byClass = await groqGenerate(apiKey, "class", name, plat, slim, exe);
+      // Generate both files in parallel (spec: "produce the two files in parallel").
+      // groqChat retries on 429, so concurrent calls are safe under the rate limit.
+      const [byId, byClass] = await Promise.all([
+        groqGenerate(apiKey, "id", name, plat, slim, exe),
+        groqGenerate(apiKey, "class", name, plat, slim, exe),
+      ]);
       payload = {
         ok: true,
         framework: "appium",

@@ -22,6 +22,7 @@ export default function ControlPanel({
   onLaunch, onStop, onClear, onGenerate,
   generating,
   eventCount,
+  hasServerKey,
 }) {
   const { agentOnline, isAdmin, recording } = status;
   const isCustom = form.preset === 'Custom...';
@@ -108,7 +109,11 @@ export default function ControlPanel({
           </select>
         </div>
 
-        {field('Groq API Key', 'apiKey', 'password', 'gsk_...')}
+        {field('Groq API Key', 'apiKey', 'password',
+          hasServerKey ? 'Using server .env key — leave blank or override' : 'gsk_...')}
+        {hasServerKey && !form.apiKey && (
+          <p className="field-hint">🔑 서버 .env 키 사용 중 — 비워두면 서버 키로 생성됩니다.</p>
+        )}
       </div>
 
       <div className="buttons">
