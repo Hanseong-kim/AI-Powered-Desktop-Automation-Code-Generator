@@ -392,10 +392,11 @@ class Recorder:
         app_key = re.sub(r'[^a-z0-9]', '', self.session.get("appName", "").lower())
         if app_key:
             try:
-                title_key = re.sub(r'[^a-z0-9]', '', win32gui.GetWindowText(top).lower())
+                raw_title = win32gui.GetWindowText(top)
+                title_key = re.sub(r'[^a-z0-9]', '', raw_title.lower())
                 if app_key in title_key or title_key in app_key:
                     self.target_hwnds.add(top)
-                    log(f"[target] title-match hwnd={top} title='{win32gui.GetWindowText(top)}' accepted")
+                    log(f"[target] title-match hwnd={top} title='{raw_title}' accepted")
                     return True
             except Exception:
                 pass
