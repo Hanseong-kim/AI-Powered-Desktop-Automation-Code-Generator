@@ -13,6 +13,8 @@ const PRESETS = [
   // explorer shell:AppsFolder (avoids ACL/version/activation breakage).
   { label: 'Paint (UWP)',      appName: 'Paint',            exePath: 'Microsoft.Paint_8wekyb3d8bbwe!App' },
   { label: 'Registry Editor',  appName: 'RegistryEditor',   exePath: 'C:\\Windows\\regedit.exe' },
+  { label: 'IDM',              appName: 'IDM',              exePath: 'C:\\Program Files (x86)\\Internet Download Manager\\IDMan.exe' },
+  { label: 'VSCode',           appName: 'VSCode',           exePath: `${process.env.LOCALAPPDATA || 'C:\\Users\\user\\AppData\\Local'}\\Programs\\Microsoft VS Code\\Code.exe` },
   { label: 'Custom...',        appName: '',                 exePath: '' },
 ];
 
