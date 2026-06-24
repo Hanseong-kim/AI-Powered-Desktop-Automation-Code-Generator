@@ -180,7 +180,7 @@ CRITICAL - WinAppDriver interaction rules (never break):
 - EXCEPTION 2 (scroll): See SCROLL rule below.
 - NEVER use contextClick(), doubleClick(), moveToElement(), or any W3C mouse pointer Actions. WinAppDriver 1.x does not support mouse pointer type in W3C Actions API and will throw UnsupportedCommandException at runtime.
 - If the recorded event is a right-click or double-click, map it strictly to a simple left-click: element.click();
-- All clicks must use element.click() directly on the WebElement.
+- All clicks must use element.click() directly on the WebElement (except where EXCEPTION 1 or EXCEPTION 2 above apply).
 
 CRITICAL - exact imports (copy these verbatim, do not alter the package paths):
 import java.net.MalformedURLException;
