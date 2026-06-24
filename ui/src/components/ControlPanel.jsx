@@ -15,8 +15,10 @@ const PRESETS = [
   { label: 'Paint (UWP)',      appName: 'Paint',            exePath: 'Microsoft.Paint_8wekyb3d8bbwe!App' },
   { label: 'Registry Editor',  appName: 'RegistryEditor',   exePath: 'C:\\Windows\\regedit.exe' },
   { label: 'IDM',              appName: 'IDM',              exePath: 'C:\\Program Files (x86)\\Internet Download Manager\\IDMan.exe' },
-  { label: 'VSCode',           appName: 'VSCode',           exePath: `${process.env.LOCALAPPDATA || 'C:\\Users\\user\\AppData\\Local'}\\Programs\\Microsoft VS Code\\Code.exe` },
-  { label: 'GitHub Desktop',  appName: 'GitHubDesktop',    exePath: `${process.env.LOCALAPPDATA || 'C:\\Users\\user\\AppData\\Local'}\\GitHubDesktop\\GitHubDesktop.exe` },
+  // NOTE: LOCALAPPDATA is not available in CRA bundles; path uses "user" as default username.
+  // If your Windows profile is not "user", select "Custom..." and enter the correct path.
+  { label: 'VSCode',           appName: 'VSCode',           exePath: 'C:\\Users\\user\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe' },
+  { label: 'GitHub Desktop',  appName: 'GitHubDesktop',    exePath: 'C:\\Users\\user\\AppData\\Local\\GitHubDesktop\\GitHubDesktop.exe' },
   { label: 'Custom...',        appName: '',                 exePath: '' },
 ];
 

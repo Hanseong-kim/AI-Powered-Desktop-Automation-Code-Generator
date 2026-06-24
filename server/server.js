@@ -195,7 +195,6 @@ CRITICAL - WinAppDriver interaction rules (never break):
     import org.openqa.selenium.interactions.Actions;
     new Actions(driver).moveToLocation({x}, {y}).click().build().perform();
   Add this import ONLY when a coordinate-fallback event exists in the session.
-- EXCEPTION 2 (scroll): See SCROLL rule below.
 - NEVER use contextClick(), doubleClick(), moveToElement(), or any W3C mouse pointer Actions. WinAppDriver 1.x does not support mouse pointer type in W3C Actions API and will throw UnsupportedCommandException at runtime.
 - If the recorded event is a right-click or double-click, map it strictly to a simple left-click: element.click();
 - All clicks must use element.click() directly on the WebElement (except where EXCEPTION 1 or EXCEPTION 2 above apply).
@@ -319,11 +318,12 @@ Recorded user session (in order). Convert EVERY event into a page-object action 
           }
       }
   Do NOT call clear() before typing — recorded type events are sequential/appended text, and clear() is unreliable on rich-text controls.
-- scroll -> generate a W3C wheel action using Actions (this is the only other permitted use of Actions besides coordinate fallback):
-    import org.openqa.selenium.interactions.Actions;
-    new Actions(driver).moveToLocation({x}, {y}).scrollByAmount(0, {delta}).build().perform();
-  Use the event's x, y, and delta fields. Add the Actions import only when scroll events exist.
-  Do NOT use driver.executeScript for scroll.
+- scroll -> use java.awt.Robot to scroll (WinAppDriver 1.x does not support W3C wheel actions):
+    java.awt.Robot robot = new java.awt.Robot();
+    robot.mouseMove({x}, {y});
+    robot.mouseWheel({delta});
+  No additional import needed (java.awt.Robot is in the JDK). Use the event's x, y, and delta fields.
+  Do NOT use Actions.scrollByAmount — it is not supported by WinAppDriver 1.x.
 
 ${JSON.stringify(eventList, null, 2)}
 
@@ -392,9 +392,7 @@ function stripFences(code) {
 // fire the two generations in parallel safely: if a momentary TPM cap is hit,
 // we honour the Retry-After header (or back off) instead of failing the request.
 async function groqChat(apiKey, { system, user, maxTokens }, attempt = 0) {
-  // On retry, deliberately rotate to the next pool key even if the caller supplied a UI key.
-  // A rate-limited UI key benefits from a different-account pool key on retry (spec-conformant).
-  const effectiveKey = attempt === 0 ? apiKey : nextGroqKey(null);
+  const effectiveKey = apiKey; // caller is responsible for key selection/rotation
   const res = await fetch(GROQ_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${effectiveKey}` },
@@ -409,12 +407,13 @@ async function groqChat(apiKey, { system, user, maxTokens }, attempt = 0) {
     }),
   });
   if (res.status === 429 && attempt < 3) {
-    // If only one key, wait for Retry-After; otherwise rotate immediately.
     if (_groqKeyPool.length <= 1) {
       const retryAfter = parseFloat(res.headers.get("retry-after")) || (1.5 * (attempt + 1));
       await new Promise((r) => setTimeout(r, Math.min(retryAfter, 10) * 1000));
+      return groqChat(apiKey, { system, user, maxTokens }, attempt + 1); // same key, waited
     }
-    return groqChat(effectiveKey, { system, user, maxTokens }, attempt + 1);
+    // Multi-key pool: rotate immediately to a different key
+    return groqChat(nextGroqKey(null), { system, user, maxTokens }, attempt + 1);
   }
   if (!res.ok) {
     const text = await res.text();

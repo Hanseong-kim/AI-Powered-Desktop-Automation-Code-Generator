@@ -607,6 +607,8 @@ class Recorder:
             # locatorFallback mirrors locatorStrategy for backwards compat
             if info.get("locatorStrategy") == "coordinate":
                 info["locatorFallback"] = "coordinate"
+            else:
+                info["locatorFallback"] = ""
             return info
         except Exception:
             return {"automationId": "", "className": "", "name": "",
