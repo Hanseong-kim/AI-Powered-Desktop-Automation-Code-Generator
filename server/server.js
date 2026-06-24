@@ -392,7 +392,8 @@ function stripFences(code) {
 // fire the two generations in parallel safely: if a momentary TPM cap is hit,
 // we honour the Retry-After header (or back off) instead of failing the request.
 async function groqChat(apiKey, { system, user, maxTokens }, attempt = 0) {
-  // On retry after a 429, rotate to the next pooled key (no delay needed between different accounts).
+  // On retry, deliberately rotate to the next pool key even if the caller supplied a UI key.
+  // A rate-limited UI key benefits from a different-account pool key on retry (spec-conformant).
   const effectiveKey = attempt === 0 ? apiKey : nextGroqKey(null);
   const res = await fetch(GROQ_URL, {
     method: "POST",
@@ -413,7 +414,7 @@ async function groqChat(apiKey, { system, user, maxTokens }, attempt = 0) {
       const retryAfter = parseFloat(res.headers.get("retry-after")) || (1.5 * (attempt + 1));
       await new Promise((r) => setTimeout(r, Math.min(retryAfter, 10) * 1000));
     }
-    return groqChat(apiKey, { system, user, maxTokens }, attempt + 1);
+    return groqChat(effectiveKey, { system, user, maxTokens }, attempt + 1);
   }
   if (!res.ok) {
     const text = await res.text();
