@@ -156,6 +156,8 @@ class UIAInspector:
             "xpath": "",
             "hwnd": 0,
             "rootHwnd": 0,
+            "locatorStrategy": "",   # NEW
+            "locatorValue": "",      # NEW
         }
         if elem is None:
             return info
@@ -200,13 +202,27 @@ class UIAInspector:
             except Exception:
                 pass
 
-        # Locator / XPath from the most stable identifier
+        # Locator strategy — explicit, so SYSTEM_PROMPT never guesses
         if info["automationId"]:
+            info["locatorStrategy"] = "automationId"
+            info["locatorValue"] = info["automationId"]
             info["xpath"] = f'//*[@AutomationId="{info["automationId"]}"]'
         elif info["name"]:
+            info["locatorStrategy"] = "name"
+            info["locatorValue"] = info["name"]
             info["xpath"] = f'//*[@Name="{info["name"]}"]'
         elif info["className"]:
+            info["locatorStrategy"] = "className"
+            info["locatorValue"] = info["className"]
             info["xpath"] = f'//*[@ClassName="{info["className"]}"]'
+        elif info["controlType"]:
+            info["locatorStrategy"] = "xpath"
+            info["locatorValue"] = f'//*[@ControlType="{info["controlType"]}"]'
+            info["xpath"] = info["locatorValue"]
+        else:
+            info["locatorStrategy"] = "coordinate"
+            info["locatorValue"] = ""
+            info["xpath"] = ""
         return info
 
 
@@ -588,13 +604,16 @@ class Recorder:
         try:
             elem = ins.element_at(x, y)
             info = ins.describe(elem)
-            if not info.get("className") and not info.get("automationId"):
+            # locatorFallback mirrors locatorStrategy for backwards compat
+            if info.get("locatorStrategy") == "coordinate":
                 info["locatorFallback"] = "coordinate"
             return info
         except Exception:
             return {"automationId": "", "className": "", "name": "",
                     "controlType": "", "windowTitle": "", "xpath": "",
-                    "hwnd": 0, "rootHwnd": 0, "locatorFallback": "coordinate"}
+                    "hwnd": 0, "rootHwnd": 0,
+                    "locatorStrategy": "coordinate", "locatorValue": "",
+                    "locatorFallback": "coordinate"}
 
     # ---------------- pending flushes ----------------
     def _flush_stale(self, ins):
@@ -664,6 +683,8 @@ class Recorder:
                 "xpath": elem.get("xpath", ""),
                 "isInputField": elem.get("controlType", "") in INPUT_CONTROL_TYPES,
                 "locatorFallback": elem.get("locatorFallback", ""),   # NEW
+                "locatorStrategy": elem.get("locatorStrategy", ""),
+                "locatorValue": elem.get("locatorValue", ""),
             },
             "timestamp": time.time(),
             "app": self.session.get("appName", ""),

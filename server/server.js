@@ -231,10 +231,14 @@ CRITICAL - driver initialisation (two-step; supports Win32 AND UWP apps):
   Use the launch statement and <windowTitle> exactly as provided in the user prompt.
   NEVER translate or anglicize <windowTitle> — use the exact string as given (it may be non-English, e.g. "계산기").
 
-CRITICAL - locators (use AppiumBy, not MobileBy which is deprecated):
-  AppiumBy.accessibilityId("automationId")   // AutomationId-based strategy
-  By.className("className")                  // ClassName-based strategy
-  By.name("elementName")                     // fallback when id/class empty
+CRITICAL - locators: each event carries locatorStrategy and locatorValue — use them directly, never guess:
+  locatorStrategy == "automationId" → AppiumBy.accessibilityId("{locatorValue}")
+  locatorStrategy == "name"         → By.name("{locatorValue}")
+  locatorStrategy == "className"    → By.className("{locatorValue}")
+  locatorStrategy == "xpath"        → By.xpath("{locatorValue}")
+  locatorStrategy == "coordinate"   → new Actions(driver).moveToLocation({x}, {y}).click().build().perform()
+    (add import org.openqa.selenium.interactions.Actions only when coordinate events exist)
+  Never use MobileBy (deprecated). Never fabricate a locator not derived from locatorStrategy/locatorValue.
 
 POPUP WINDOWS: When an event carries "isPopup": true and "popupTitle": "<title>":
   Switch context to the popup before interacting with its elements:
