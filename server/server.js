@@ -314,6 +314,24 @@ Hard rules:
 - End with an expect() assertion verifying visible state
 - The file must pass: python -c "compile(open('file.py').read(), 'file.py', 'exec')"`;
 
+const WDIO_SYSTEM_PROMPT = `You are an expert QA automation engineer. Generate COMPLETE, RUNNABLE WebdriverIO v8 JavaScript test code for Windows Desktop apps via WinAppDriver. Output ONLY raw JavaScript — no markdown fences, no explanations, no TODO comments.
+
+Hard rules:
+- Use ESM-style async/await: import { remote } from 'webdriverio';
+- One file exports: a default describe() block with beforeAll, afterAll, and it() test cases.
+- beforeAll: connect to WinAppDriver at http://127.0.0.1:4723 using remote({ capabilities: { platformName: 'Windows', 'appium:app': 'Root' } }). After connecting, find the app window and re-attach with appTopLevelWindow capability.
+- afterAll: await driver.deleteSession()
+- Every action awaited: await $(selector).click(), await $(selector).setValue(value)
+- Locators:
+    AutomationId: await $('~automationId')   // accessibility id prefix ~
+    ClassName:    await $('ClassName')
+    XPath:        await $('//*[@AutomationId="id"]')
+- NEVER use browser global — always use the local driver variable from remote().
+- Scroll: await driver.action('wheel').move({ x, y }).scroll({ deltaX: 0, deltaY: delta }).perform()
+- For coordinate fallback (locatorFallback == "coordinate"): await driver.action('pointer').move({ x, y }).down().up().perform()
+- Print step logs: console.log('[STEP n] ...')
+- End with an expect assertion using expect(await $(selector).isDisplayed()).toBe(true)`;
+
 function buildPlaywrightPrompt(appName, platform, eventList) {
   const safeName = (appName || "myapp").replace(/[^a-z0-9]/gi, "_").toLowerCase();
   return `Application: "${appName}" on ${platform}.
@@ -387,6 +405,40 @@ function groqGenerate(apiKey, strategy, appName, platform, eventList, exePath) {
   });
 }
 
+function buildWdioPrompt(strategy, appName, platform, eventList, exePath) {
+  const raw = appName.replace(/[^A-Za-z0-9]/g, '') || 'MyApp';
+  const base = raw.charAt(0).toUpperCase() + raw.slice(1);
+  const className = `${base}Test${strategy === 'id' ? 'ById' : 'ByClass'}`;
+  const windowTitle = eventList[0]?.element?.windowTitle || appName;
+  const isUwp = (exePath || '').includes('!');
+  const launchLine = isUwp
+    ? `await exec('explorer.exe "shell:AppsFolder\\\\${exePath}"');`
+    : `await exec(${JSON.stringify(exePath)});`;
+  const locatorRule = strategy === 'id'
+    ? `Locator strategy: prefer $('~automationId') (accessibility id). Fall back to $('[name="${'name'}"]') then $('ClassName').`
+    : `Locator strategy: locate by XPath $('//*[@ClassName="cls" and @Name="name"]'). If Name empty: $('ClassName'). If ClassName empty: $('//*[@Name="name"]').`;
+
+  return `Application: "${appName}", platform: ${platform}.
+Describe block name: "${className}".
+Launch: ${launchLine}
+Window title for root attach: "${windowTitle}"
+${locatorRule}
+
+For each event, emit: console.log('[STEP n]...') then the wdio action.
+Recorded session:
+${JSON.stringify(eventList, null, 2)}
+
+Output ONLY the JavaScript source. Start with: import { remote } from 'webdriverio';`;
+}
+
+function groqGenerateWdio(apiKey, strategy, appName, platform, eventList, exePath) {
+  return groqChat(apiKey, {
+    system: WDIO_SYSTEM_PROMPT,
+    user: buildWdioPrompt(strategy, appName, platform, eventList, exePath),
+    maxTokens: 4000,
+  });
+}
+
 app.post("/api/generate", async (req, res) => {
   const { appName, platform, framework = "appium" } = req.body;
   const name = appName || sessionInfo.appName || "MyApp";
@@ -430,6 +482,25 @@ app.post("/api/generate", async (req, res) => {
         framework: "playwright",
         files: [{ filename: `test_${base}_playwright.py`, content: code }],
       };
+    } else if (framework === 'wdio') {
+      const rawBase = name.replace(/[^A-Za-z0-9]/g, '') || 'MyApp';
+      const base = rawBase.charAt(0).toUpperCase() + rawBase.slice(1);
+      const [byId, byClass] = await Promise.all([
+        groqGenerateWdio(apiKey, 'id', name, plat, slim, exe),
+        groqGenerateWdio(apiKey, 'class', name, plat, slim, exe),
+      ]);
+      payload = {
+        ok: true,
+        framework: 'wdio',
+        files: [
+          { filename: `${base}TestById.js`, content: byId },
+          { filename: `${base}TestByClass.js`, content: byClass },
+        ],
+      };
+      const wdioOutDir = path.join(__dirname, '..', 'generated-wdio');
+      const { savedPaths, saveError } = saveFiles(payload.files, wdioOutDir);
+      payload.savedPaths = savedPaths;
+      if (saveError) payload.saveError = saveError;
     } else {
       const rawBase = name.replace(/[^A-Za-z0-9]/g, "") || "MyApp";
       const base = rawBase.charAt(0).toUpperCase() + rawBase.slice(1);
@@ -453,7 +524,7 @@ app.post("/api/generate", async (req, res) => {
       const { savedPaths, saveError } = saveFiles(payload.files, PLAYWRIGHT_OUT_DIR);
       payload.savedPaths = savedPaths;
       if (saveError) payload.saveError = saveError;
-    } else {
+    } else if (framework !== 'wdio') {
       cleanJavaTestFiles(TESTRUNNER_JAVA_DIR);
       const { savedPaths, saveError } = saveFiles(payload.files, TESTRUNNER_JAVA_DIR);
       payload.savedPaths = savedPaths;

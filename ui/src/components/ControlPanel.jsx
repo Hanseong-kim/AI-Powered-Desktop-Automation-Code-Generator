@@ -4,6 +4,7 @@ const PLATFORMS = ['Windows', 'Android', 'iOS'];
 const FRAMEWORKS = [
   { value: 'appium', label: 'Appium Java (TestNG)' },
   { value: 'playwright', label: 'Playwright Python' },
+  { value: 'wdio', label: 'WebdriverIO JavaScript' },
 ];
 const PRESETS = [
   { label: 'Calculator',       appName: 'Calculator',       exePath: 'C:\\Windows\\System32\\calc.exe' },
