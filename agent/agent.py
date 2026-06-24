@@ -569,10 +569,14 @@ class Recorder:
     def _inspect(self, ins, x, y):
         try:
             elem = ins.element_at(x, y)
-            return ins.describe(elem)
+            info = ins.describe(elem)
+            if not info.get("className") and not info.get("automationId"):
+                info["locatorFallback"] = "coordinate"
+            return info
         except Exception:
             return {"automationId": "", "className": "", "name": "",
-                    "controlType": "", "windowTitle": "", "xpath": "", "hwnd": 0}
+                    "controlType": "", "windowTitle": "", "xpath": "",
+                    "hwnd": 0, "rootHwnd": 0, "locatorFallback": "coordinate"}
 
     # ---------------- pending flushes ----------------
     def _flush_stale(self, ins):
@@ -641,6 +645,7 @@ class Recorder:
                 "windowTitle": elem.get("windowTitle", ""),
                 "xpath": elem.get("xpath", ""),
                 "isInputField": elem.get("controlType", "") in INPUT_CONTROL_TYPES,
+                "locatorFallback": elem.get("locatorFallback", ""),   # NEW
             },
             "timestamp": time.time(),
             "app": self.session.get("appName", ""),

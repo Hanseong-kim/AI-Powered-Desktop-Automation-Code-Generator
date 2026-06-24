@@ -172,7 +172,12 @@ Hard rules for every file you produce:
 - The code must compile with Appium java-client 8.6.0 and TestNG 7.x.
 
 CRITICAL - WinAppDriver interaction rules (never break):
-- NEVER import or use org.openqa.selenium.interactions.Actions. Do NOT include this import even if unused.
+- NEVER import or use org.openqa.selenium.interactions.Actions for pointer actions (click, doubleClick, moveToElement, contextClick). These are unsupported by WinAppDriver 1.x and will throw UnsupportedCommandException.
+- EXCEPTION 1 (coordinate fallback): When event.element.locatorFallback == "coordinate", the element cannot be resolved by UIA. Generate a coordinate click using Actions wheel/pointer is still banned — use instead:
+    import org.openqa.selenium.interactions.Actions;
+    new Actions(driver).moveToLocation({x}, {y}).click().build().perform();
+  Add this import ONLY when a coordinate-fallback event exists in the session.
+- EXCEPTION 2 (scroll): See SCROLL rule below.
 - NEVER use contextClick(), doubleClick(), moveToElement(), or any W3C mouse pointer Actions. WinAppDriver 1.x does not support mouse pointer type in W3C Actions API and will throw UnsupportedCommandException at runtime.
 - If the recorded event is a right-click or double-click, map it strictly to a simple left-click: element.click();
 - All clicks must use element.click() directly on the WebElement.
@@ -271,6 +276,7 @@ ${locatorRule}
 
 Recorded user session (in order). Convert EVERY event into a page-object action + a test step:
 - click / doubleClick / rightClick -> ALL map to element.click(). WinAppDriver does not support mouse Actions; NEVER emit Actions.doubleClick() or Actions.contextClick(). A double-click or right-click in the recording becomes a single element.click().
+  If element.locatorFallback == "coordinate": use new Actions(driver).moveToLocation(x, y).click().build().perform() instead.
 - type -> locate the SAME element recorded for THIS event (using the locator strategy and its fallbacks defined above) and send the keys to it. NEVER invent or assume a separate input field such as By.className("Edit"). CRITICAL — newlines: WinAppDriver does NOT convert a literal "\\n" in a string into the Enter key (it gets swallowed → all text lands on one line). So do NOT call sendKeys("text\\n"). Instead split the value on "\\n" and send Keys.ENTER (org.openqa.selenium.Keys) between segments. Use a helper method like:
       private void typeWithEnter(WebElement el, String value) {
           String[] lines = value.split("\\n", -1);
