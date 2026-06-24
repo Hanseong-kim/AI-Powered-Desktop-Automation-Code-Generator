@@ -4,6 +4,7 @@ const PLATFORMS = ['Windows', 'Android', 'iOS'];
 const FRAMEWORKS = [
   { value: 'appium', label: 'Appium Java (TestNG)' },
   { value: 'playwright', label: 'Playwright Python' },
+  { value: 'wdio', label: 'WebdriverIO JavaScript' },
 ];
 const PRESETS = [
   { label: 'Calculator',       appName: 'Calculator',       exePath: 'C:\\Windows\\System32\\calc.exe' },
@@ -13,6 +14,11 @@ const PRESETS = [
   // explorer shell:AppsFolder (avoids ACL/version/activation breakage).
   { label: 'Paint (UWP)',      appName: 'Paint',            exePath: 'Microsoft.Paint_8wekyb3d8bbwe!App' },
   { label: 'Registry Editor',  appName: 'RegistryEditor',   exePath: 'C:\\Windows\\regedit.exe' },
+  { label: 'IDM',              appName: 'IDM',              exePath: 'C:\\Program Files (x86)\\Internet Download Manager\\IDMan.exe' },
+  // NOTE: LOCALAPPDATA is not available in CRA bundles; path uses "user" as default username.
+  // If your Windows profile is not "user", select "Custom..." and enter the correct path.
+  { label: 'VSCode',           appName: 'VSCode',           exePath: 'C:\\Users\\user\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe' },
+  { label: 'GitHub Desktop',  appName: 'GitHubDesktop',    exePath: 'C:\\Users\\user\\AppData\\Local\\GitHubDesktop\\GitHubDesktop.exe' },
   { label: 'Custom...',        appName: '',                 exePath: '' },
 ];
 

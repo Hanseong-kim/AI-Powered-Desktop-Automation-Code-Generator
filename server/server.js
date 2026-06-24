@@ -17,6 +17,24 @@ const fs = require("fs");
 // Load .env for local validation (UI requests still use user-supplied key)
 require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
 
+// Multi-key pool: GROQ_API_KEYS (comma-separated) takes precedence over single GROQ_API_KEY.
+// Round-robin index is module-level so it persists across requests.
+const _groqKeyPool = (process.env.GROQ_API_KEYS || '')
+  .split(',')
+  .map((k) => k.trim())
+  .filter(Boolean);
+let _groqKeyIdx = 0;
+
+function nextGroqKey(override) {
+  if (override && override.trim()) return override.trim();        // UI-supplied key wins
+  if (_groqKeyPool.length > 0) {
+    const key = _groqKeyPool[_groqKeyIdx % _groqKeyPool.length];
+    _groqKeyIdx++;
+    return key;
+  }
+  return process.env.GROQ_API_KEY || '';                          // legacy single key
+}
+
 const express = require("express");
 const cors = require("cors");
 
@@ -92,7 +110,7 @@ app.post("/api/stop", async (req, res) => {
 // Tell the UI whether the server has a .env key, WITHOUT exposing the key.
 // If true, the UI can leave the key field blank and the server uses its own key.
 app.get("/api/config", (req, res) => {
-  res.json({ hasServerKey: !!process.env.GROQ_API_KEY });
+  res.json({ hasServerKey: _groqKeyPool.length > 0 || !!process.env.GROQ_API_KEY });
 });
 
 app.get("/api/status", async (req, res) => {
@@ -172,10 +190,14 @@ Hard rules for every file you produce:
 - The code must compile with Appium java-client 8.6.0 and TestNG 7.x.
 
 CRITICAL - WinAppDriver interaction rules (never break):
-- NEVER import or use org.openqa.selenium.interactions.Actions. Do NOT include this import even if unused.
+- NEVER import or use org.openqa.selenium.interactions.Actions for pointer actions (click, doubleClick, moveToElement, contextClick). These are unsupported by WinAppDriver 1.x and will throw UnsupportedCommandException.
+- EXCEPTION 1 (coordinate fallback): When event.element.locatorFallback == "coordinate", the element cannot be resolved by UIA. Generate a coordinate click using Actions wheel/pointer is still banned — use instead:
+    import org.openqa.selenium.interactions.Actions;
+    new Actions(driver).moveToLocation({x}, {y}).click().build().perform();
+  Add this import ONLY when a coordinate-fallback event exists in the session.
 - NEVER use contextClick(), doubleClick(), moveToElement(), or any W3C mouse pointer Actions. WinAppDriver 1.x does not support mouse pointer type in W3C Actions API and will throw UnsupportedCommandException at runtime.
 - If the recorded event is a right-click or double-click, map it strictly to a simple left-click: element.click();
-- All clicks must use element.click() directly on the WebElement.
+- All clicks must use element.click() directly on the WebElement (except where EXCEPTION 1 or EXCEPTION 2 above apply).
 
 CRITICAL - exact imports (copy these verbatim, do not alter the package paths):
 import java.net.MalformedURLException;
@@ -226,10 +248,38 @@ CRITICAL - driver initialisation (two-step; supports Win32 AND UWP apps):
   Use the launch statement and <windowTitle> exactly as provided in the user prompt.
   NEVER translate or anglicize <windowTitle> — use the exact string as given (it may be non-English, e.g. "계산기").
 
-CRITICAL - locators (use AppiumBy, not MobileBy which is deprecated):
-  AppiumBy.accessibilityId("automationId")   // AutomationId-based strategy
-  By.className("className")                  // ClassName-based strategy
-  By.name("elementName")                     // fallback when id/class empty`;
+CRITICAL - locators: each event carries locatorStrategy and locatorValue — use them directly, never guess:
+  locatorStrategy == "automationId" → AppiumBy.accessibilityId("{locatorValue}")
+  locatorStrategy == "name"         → By.name("{locatorValue}")
+  locatorStrategy == "className"    → By.className("{locatorValue}")
+  locatorStrategy == "xpath"        → By.xpath("{locatorValue}")
+  locatorStrategy == "coordinate"   → new Actions(driver).moveToLocation({x}, {y}).click().build().perform()
+    (add import org.openqa.selenium.interactions.Actions only when coordinate events exist)
+  Never use MobileBy (deprecated). Never fabricate a locator not derived from locatorStrategy/locatorValue.
+
+POPUP WINDOWS: When an event carries "isPopup": true and "popupTitle": "<title>":
+  Switch context to the popup before interacting with its elements:
+
+  WebDriverWait popupWait = new WebDriverWait(driver, Duration.ofSeconds(15));
+  WebElement popupWindow = popupWait.until(
+      ExpectedConditions.presenceOfElementLocated(
+          By.xpath("//Window[contains(@Name,\"<popupTitle>\")]")));
+
+  Then locate the popup's child element within the driver session normally
+  (WinAppDriver searches the full tree from the attached window, so a standard
+  driver.findElement() call will find elements inside the popup).
+  Do NOT close the popup unless a recorded dismiss action (click X / Cancel) exists.
+
+MULTI-WINDOW PAGE OBJECTS: Events carry a "screenId" field (sanitized window title).
+  When two or more distinct screenIds appear in the session:
+  - Create one Page Object class per screenId. Class name: PascalCase of screenId + "Page"
+    (e.g. screenId "add_new_download" → AddNewDownloadPage).
+  - The main/first screenId maps to the primary Page class (already named {App}Page).
+  - Each secondary Page class receives the driver in its constructor; no new driver session.
+  - In the @Test method, call methods in order. When screenId changes between steps,
+    add a comment: // --- switch to <screenId> ---
+  - NEVER create a new WindowsDriver for a secondary window; use the same driver instance.
+  If all events share the same screenId, use a single Page class (no change from default).`;
 
 function buildUserPrompt(strategy, appName, platform, eventList, exePath = "") {
   const p = PLATFORM_MAP[platform] || PLATFORM_MAP.Windows;
@@ -258,6 +308,7 @@ ${locatorRule}
 
 Recorded user session (in order). Convert EVERY event into a page-object action + a test step:
 - click / doubleClick / rightClick -> ALL map to element.click(). WinAppDriver does not support mouse Actions; NEVER emit Actions.doubleClick() or Actions.contextClick(). A double-click or right-click in the recording becomes a single element.click().
+  If element.locatorFallback == "coordinate": use new Actions(driver).moveToLocation(x, y).click().build().perform() instead.
 - type -> locate the SAME element recorded for THIS event (using the locator strategy and its fallbacks defined above) and send the keys to it. NEVER invent or assume a separate input field such as By.className("Edit"). CRITICAL — newlines: WinAppDriver does NOT convert a literal "\\n" in a string into the Enter key (it gets swallowed → all text lands on one line). So do NOT call sendKeys("text\\n"). Instead split the value on "\\n" and send Keys.ENTER (org.openqa.selenium.Keys) between segments. Use a helper method like:
       private void typeWithEnter(WebElement el, String value) {
           String[] lines = value.split("\\n", -1);
@@ -267,7 +318,12 @@ Recorded user session (in order). Convert EVERY event into a page-object action 
           }
       }
   Do NOT call clear() before typing — recorded type events are sequential/appended text, and clear() is unreliable on rich-text controls.
-- scroll -> use driver.executeScript(...) if strictly needed, otherwise omit the step. NEVER use Actions.
+- scroll -> use java.awt.Robot to scroll (WinAppDriver 1.x does not support W3C wheel actions):
+    java.awt.Robot robot = new java.awt.Robot();
+    robot.mouseMove({x}, {y});
+    robot.mouseWheel({delta});
+  No additional import needed (java.awt.Robot is in the JDK). Use the event's x, y, and delta fields.
+  Do NOT use Actions.scrollByAmount — it is not supported by WinAppDriver 1.x.
 
 ${JSON.stringify(eventList, null, 2)}
 
@@ -290,6 +346,24 @@ Hard rules:
 - Print step logs: print("[STEP n] ...")
 - End with an expect() assertion verifying visible state
 - The file must pass: python -c "compile(open('file.py').read(), 'file.py', 'exec')"`;
+
+const WDIO_SYSTEM_PROMPT = `You are an expert QA automation engineer. Generate COMPLETE, RUNNABLE WebdriverIO v8 JavaScript test code for Windows Desktop apps via WinAppDriver. Output ONLY raw JavaScript — no markdown fences, no explanations, no TODO comments.
+
+Hard rules:
+- Use ESM-style async/await: import { remote } from 'webdriverio';
+- One file exports: a default describe() block with beforeAll, afterAll, and it() test cases.
+- beforeAll: connect to WinAppDriver at http://127.0.0.1:4723 using remote({ capabilities: { platformName: 'Windows', 'appium:app': 'Root' } }). After connecting, find the app window and re-attach with appTopLevelWindow capability.
+- afterAll: await driver.deleteSession()
+- Every action awaited: await $(selector).click(), await $(selector).setValue(value)
+- Locators:
+    AutomationId: await $('~automationId')   // accessibility id prefix ~
+    ClassName:    await $('ClassName')
+    XPath:        await $('//*[@AutomationId="id"]')
+- NEVER use browser global — always use the local driver variable from remote().
+- Scroll: await driver.action('wheel').move({ x, y }).scroll({ deltaX: 0, deltaY: delta }).perform()
+- For coordinate fallback (locatorFallback == "coordinate"): await driver.action('pointer').move({ x, y }).down().up().perform()
+- Print step logs: console.log('[STEP n] ...')
+- End with an expect assertion using expect(await $(selector).isDisplayed()).toBe(true)`;
 
 function buildPlaywrightPrompt(appName, platform, eventList) {
   const safeName = (appName || "myapp").replace(/[^a-z0-9]/gi, "_").toLowerCase();
@@ -318,9 +392,10 @@ function stripFences(code) {
 // fire the two generations in parallel safely: if a momentary TPM cap is hit,
 // we honour the Retry-After header (or back off) instead of failing the request.
 async function groqChat(apiKey, { system, user, maxTokens }, attempt = 0) {
+  const effectiveKey = apiKey; // caller is responsible for key selection/rotation
   const res = await fetch(GROQ_URL, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${effectiveKey}` },
     body: JSON.stringify({
       model: GROQ_MODEL,
       temperature: 0.2,
@@ -332,9 +407,13 @@ async function groqChat(apiKey, { system, user, maxTokens }, attempt = 0) {
     }),
   });
   if (res.status === 429 && attempt < 3) {
-    const retryAfter = parseFloat(res.headers.get("retry-after")) || (1.5 * (attempt + 1));
-    await new Promise((r) => setTimeout(r, Math.min(retryAfter, 10) * 1000));
-    return groqChat(apiKey, { system, user, maxTokens }, attempt + 1);
+    if (_groqKeyPool.length <= 1) {
+      const retryAfter = parseFloat(res.headers.get("retry-after")) || (1.5 * (attempt + 1));
+      await new Promise((r) => setTimeout(r, Math.min(retryAfter, 10) * 1000));
+      return groqChat(apiKey, { system, user, maxTokens }, attempt + 1); // same key, waited
+    }
+    // Multi-key pool: rotate immediately to a different key
+    return groqChat(nextGroqKey(null), { system, user, maxTokens }, attempt + 1);
   }
   if (!res.ok) {
     const text = await res.text();
@@ -364,6 +443,40 @@ function groqGenerate(apiKey, strategy, appName, platform, eventList, exePath) {
   });
 }
 
+function buildWdioPrompt(strategy, appName, platform, eventList, exePath) {
+  const raw = appName.replace(/[^A-Za-z0-9]/g, '') || 'MyApp';
+  const base = raw.charAt(0).toUpperCase() + raw.slice(1);
+  const className = `${base}Test${strategy === 'id' ? 'ById' : 'ByClass'}`;
+  const windowTitle = eventList[0]?.element?.windowTitle || appName;
+  const isUwp = (exePath || '').includes('!');
+  const launchLine = isUwp
+    ? `await exec('explorer.exe "shell:AppsFolder\\\\${exePath}"');`
+    : `await exec(${JSON.stringify(exePath)});`;
+  const locatorRule = strategy === 'id'
+    ? `Locator strategy: prefer $('~automationId') (accessibility id). Fall back to $('[name="${'name'}"]') then $('ClassName').`
+    : `Locator strategy: locate by XPath $('//*[@ClassName="cls" and @Name="name"]'). If Name empty: $('ClassName'). If ClassName empty: $('//*[@Name="name"]').`;
+
+  return `Application: "${appName}", platform: ${platform}.
+Describe block name: "${className}".
+Launch: ${launchLine}
+Window title for root attach: "${windowTitle}"
+${locatorRule}
+
+For each event, emit: console.log('[STEP n]...') then the wdio action.
+Recorded session:
+${JSON.stringify(eventList, null, 2)}
+
+Output ONLY the JavaScript source. Start with: import { remote } from 'webdriverio';`;
+}
+
+function groqGenerateWdio(apiKey, strategy, appName, platform, eventList, exePath) {
+  return groqChat(apiKey, {
+    system: WDIO_SYSTEM_PROMPT,
+    user: buildWdioPrompt(strategy, appName, platform, eventList, exePath),
+    maxTokens: 4000,
+  });
+}
+
 app.post("/api/generate", async (req, res) => {
   const { appName, platform, framework = "appium" } = req.body;
   const name = appName || sessionInfo.appName || "MyApp";
@@ -372,7 +485,7 @@ app.post("/api/generate", async (req, res) => {
 
   // Prefer a key the user typed in the UI; otherwise fall back to the server's
   // .env key. The key never has to leave the server when .env is configured.
-  const apiKey = (req.body.apiKey && req.body.apiKey.trim()) || process.env.GROQ_API_KEY;
+  const apiKey = nextGroqKey(req.body.apiKey);
 
   if (!apiKey) return res.status(400).json({ ok: false, message: "Groq API key is required (enter one in the UI or set GROQ_API_KEY in .env)" });
   if (events.length === 0) return res.status(400).json({ ok: false, message: "No recorded events to generate from" });
@@ -381,12 +494,21 @@ app.post("/api/generate", async (req, res) => {
     step: i + 1,
     action: e.action,
     value: e.value,
+    x: e.x,
+    y: e.y,
+    delta: e.delta,
+    screenId: e.screenId,        // NEW
+    isPopup: e.isPopup,
+    popupTitle: e.popupTitle,
     element: {
       name: e.element?.name,
       automationId: e.element?.automationId,
       className: e.element?.className,
       controlType: e.element?.controlType,
       windowTitle: e.element?.windowTitle,
+      locatorFallback: e.element?.locatorFallback,
+      locatorStrategy: e.element?.locatorStrategy,   // from Task 9
+      locatorValue: e.element?.locatorValue,         // from Task 9
     },
   }));
 
@@ -401,6 +523,25 @@ app.post("/api/generate", async (req, res) => {
         framework: "playwright",
         files: [{ filename: `test_${base}_playwright.py`, content: code }],
       };
+    } else if (framework === 'wdio') {
+      const rawBase = name.replace(/[^A-Za-z0-9]/g, '') || 'MyApp';
+      const base = rawBase.charAt(0).toUpperCase() + rawBase.slice(1);
+      const [byId, byClass] = await Promise.all([
+        groqGenerateWdio(apiKey, 'id', name, plat, slim, exe),
+        groqGenerateWdio(apiKey, 'class', name, plat, slim, exe),
+      ]);
+      payload = {
+        ok: true,
+        framework: 'wdio',
+        files: [
+          { filename: `${base}TestById.js`, content: byId },
+          { filename: `${base}TestByClass.js`, content: byClass },
+        ],
+      };
+      const wdioOutDir = path.join(__dirname, '..', 'generated-wdio');
+      const { savedPaths, saveError } = saveFiles(payload.files, wdioOutDir);
+      payload.savedPaths = savedPaths;
+      if (saveError) payload.saveError = saveError;
     } else {
       const rawBase = name.replace(/[^A-Za-z0-9]/g, "") || "MyApp";
       const base = rawBase.charAt(0).toUpperCase() + rawBase.slice(1);
@@ -424,10 +565,12 @@ app.post("/api/generate", async (req, res) => {
       const { savedPaths, saveError } = saveFiles(payload.files, PLAYWRIGHT_OUT_DIR);
       payload.savedPaths = savedPaths;
       if (saveError) payload.saveError = saveError;
-    } else {
-      cleanJavaTestFiles(TESTRUNNER_JAVA_DIR);
-      const { savedPaths, saveError } = saveFiles(payload.files, TESTRUNNER_JAVA_DIR);
+    } else if (framework !== 'wdio') {
+      const subdir = buildJavaSubdir(name, slim);
+      const javaOutDir = path.join(TESTRUNNER_JAVA_DIR, subdir);
+      const { savedPaths, saveError } = saveFiles(payload.files, javaOutDir);
       payload.savedPaths = savedPaths;
+      payload.subdir = subdir;
       if (saveError) payload.saveError = saveError;
     }
     broadcast("generation", { status: "success", files: payload.files.map(f => f.filename) });
@@ -441,14 +584,12 @@ app.post("/api/generate", async (req, res) => {
 // ---------------------------------------------------------------------------
 // File persistence helpers (non-fatal — generation result is returned regardless)
 // ---------------------------------------------------------------------------
-function cleanJavaTestFiles(dir) {
-  try {
-    for (const f of fs.readdirSync(dir)) {
-      if (f.endsWith("TestById.java") || f.endsWith("TestByClass.java")) {
-        fs.unlinkSync(path.join(dir, f));
-      }
-    }
-  } catch { /* dir may not exist yet */ }
+function buildJavaSubdir(appName, eventList) {
+  const safeApp = (appName || 'App').replace(/[^A-Za-z0-9]/g, '');
+  const actions = [...new Set(eventList.map((e) => e.action).filter(Boolean))].sort().join('_') || 'session';
+  const now = new Date();
+  const ts = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}${String(now.getSeconds()).padStart(2,'0')}`;
+  return `${safeApp}_${actions}_${ts}`;
 }
 
 function saveFiles(files, dir) {

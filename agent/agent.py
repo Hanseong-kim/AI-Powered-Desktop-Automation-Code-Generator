@@ -23,6 +23,7 @@ MUST be run from an *Administrator* terminal, otherwise UIA properties
 import json
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -154,6 +155,9 @@ class UIAInspector:
             "windowTitle": "",
             "xpath": "",
             "hwnd": 0,
+            "rootHwnd": 0,
+            "locatorStrategy": "",   # NEW
+            "locatorValue": "",      # NEW
         }
         if elem is None:
             return info
@@ -182,6 +186,7 @@ class UIAInspector:
         try:
             if hwnd:
                 root = ctypes.windll.user32.GetAncestor(hwnd, GA_ROOT)
+                info["rootHwnd"] = root or hwnd
                 info["windowTitle"] = win32gui.GetWindowText(root or hwnd)
         except Exception:
             pass
@@ -197,13 +202,27 @@ class UIAInspector:
             except Exception:
                 pass
 
-        # Locator / XPath from the most stable identifier
+        # Locator strategy — explicit, so SYSTEM_PROMPT never guesses
         if info["automationId"]:
+            info["locatorStrategy"] = "automationId"
+            info["locatorValue"] = info["automationId"]
             info["xpath"] = f'//*[@AutomationId="{info["automationId"]}"]'
         elif info["name"]:
+            info["locatorStrategy"] = "name"
+            info["locatorValue"] = info["name"]
             info["xpath"] = f'//*[@Name="{info["name"]}"]'
         elif info["className"]:
+            info["locatorStrategy"] = "className"
+            info["locatorValue"] = info["className"]
             info["xpath"] = f'//*[@ClassName="{info["className"]}"]'
+        elif info["controlType"]:
+            info["locatorStrategy"] = "xpath"
+            info["locatorValue"] = f'//*[@ControlType="{info["controlType"]}"]'
+            info["xpath"] = info["locatorValue"]
+        else:
+            info["locatorStrategy"] = "coordinate"
+            info["locatorValue"] = ""
+            info["xpath"] = ""
         return info
 
 
@@ -380,7 +399,24 @@ class Recorder:
     def _point_is_target(self, x, y):
         if not self.target_hwnds:
             return True  # discovery failed — do not silently drop everything
-        return top_window_at(x, y) in self.target_hwnds
+        top = top_window_at(x, y)
+        if top in self.target_hwnds:
+            return True
+        # Title-based fallback: Electron and some UWP apps spawn child processes
+        # whose hwnd->pid->exe chain doesn't match the launch pid. Accept and cache
+        # the hwnd if the window title contains the app name (stripped to alnum).
+        app_key = re.sub(r'[^a-z0-9]', '', self.session.get("appName", "").lower())
+        if app_key:
+            try:
+                raw_title = win32gui.GetWindowText(top)
+                title_key = re.sub(r'[^a-z0-9]', '', raw_title.lower())
+                if app_key in title_key or title_key in app_key:
+                    self.target_hwnds.add(top)
+                    log(f"[target] title-match hwnd={top} title='{raw_title}' accepted")
+                    return True
+            except Exception:
+                pass
+        return False
 
     def _foreground_is_target(self):
         if not self.target_hwnds:
@@ -567,10 +603,19 @@ class Recorder:
     def _inspect(self, ins, x, y):
         try:
             elem = ins.element_at(x, y)
-            return ins.describe(elem)
+            info = ins.describe(elem)
+            # locatorFallback mirrors locatorStrategy for backwards compat
+            if info.get("locatorStrategy") == "coordinate":
+                info["locatorFallback"] = "coordinate"
+            else:
+                info["locatorFallback"] = ""
+            return info
         except Exception:
             return {"automationId": "", "className": "", "name": "",
-                    "controlType": "", "windowTitle": "", "xpath": "", "hwnd": 0}
+                    "controlType": "", "windowTitle": "", "xpath": "",
+                    "hwnd": 0, "rootHwnd": 0,
+                    "locatorStrategy": "coordinate", "locatorValue": "",
+                    "locatorFallback": "coordinate"}
 
     # ---------------- pending flushes ----------------
     def _flush_stale(self, ins):
@@ -587,7 +632,7 @@ class Recorder:
         ps, self._pending_scroll = self._pending_scroll, None
         if ps:
             self._emit("scroll", ps["elem"], x=ps["x"], y=ps["y"],
-                       value=str(ps["amount"]))
+                       value=str(ps["amount"]), delta=ps["amount"])
 
     def _flush_type_buffer(self):
         text, self._type_buffer = self._type_buffer, ""
@@ -599,7 +644,7 @@ class Recorder:
         self._emit(action, self._inspect(ins, x, y), x=x, y=y)
 
     # ---------------- emission ----------------
-    def _emit(self, action, elem, x=None, y=None, value=None):
+    def _emit(self, action, elem, x=None, y=None, value=None, delta=None):
         elem = elem or {}
         # Application filtering by top-level window handle.
         # Pointer events carry (x, y) — filter by the window under the point.
@@ -615,6 +660,20 @@ class Recorder:
                     f"fg={foreground_top_window()} x={x} y={y} — not target app")
                 return
 
+        # Popup detection: element belongs to a top-level window that is NOT the main app window
+        root_hwnd = elem.get("rootHwnd", 0)
+        is_popup = (
+            bool(root_hwnd)
+            and bool(self.target_hwnds)
+            and root_hwnd not in self.target_hwnds
+        )
+        popup_title = ""
+        if is_popup:
+            try:
+                popup_title = win32gui.GetWindowText(root_hwnd)
+            except Exception:
+                popup_title = elem.get("windowTitle", "")
+
         event = {
             "action": action,
             "element": {
@@ -625,15 +684,29 @@ class Recorder:
                 "windowTitle": elem.get("windowTitle", ""),
                 "xpath": elem.get("xpath", ""),
                 "isInputField": elem.get("controlType", "") in INPUT_CONTROL_TYPES,
+                "locatorFallback": elem.get("locatorFallback", ""),   # NEW
+                "locatorStrategy": elem.get("locatorStrategy", ""),
+                "locatorValue": elem.get("locatorValue", ""),
             },
             "timestamp": time.time(),
             "app": self.session.get("appName", ""),
             "platform": self.session.get("platform", "Windows"),
         }
+        # Popup annotation
+        if is_popup:
+            event["isPopup"] = True
+            event["popupTitle"] = popup_title
         if value is not None:
             event["value"] = value
+        if delta is not None:
+            event["delta"] = delta
         if x is not None:
             event["x"], event["y"] = int(x), int(y)
+
+        # screenId: sanitized window title — groups events by UI context
+        raw_title = event["element"].get("windowTitle", "") or self.session.get("appName", "")
+        screen_id = re.sub(r'[^a-z0-9]+', '_', raw_title.lower()).strip('_') or "unknown"
+        event["screenId"] = screen_id
 
         self.event_count += 1
         event["index"] = self.event_count
