@@ -16,6 +16,7 @@ const PRESETS = [
   { label: 'Registry Editor',  appName: 'RegistryEditor',   exePath: 'C:\\Windows\\regedit.exe' },
   { label: 'IDM',              appName: 'IDM',              exePath: 'C:\\Program Files (x86)\\Internet Download Manager\\IDMan.exe' },
   { label: 'VSCode',           appName: 'VSCode',           exePath: `${process.env.LOCALAPPDATA || 'C:\\Users\\user\\AppData\\Local'}\\Programs\\Microsoft VS Code\\Code.exe` },
+  { label: 'GitHub Desktop',  appName: 'GitHubDesktop',    exePath: `${process.env.LOCALAPPDATA || 'C:\\Users\\user\\AppData\\Local'}\\GitHubDesktop\\GitHubDesktop.exe` },
   { label: 'Custom...',        appName: '',                 exePath: '' },
 ];
 
