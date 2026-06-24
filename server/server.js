@@ -17,6 +17,24 @@ const fs = require("fs");
 // Load .env for local validation (UI requests still use user-supplied key)
 require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
 
+// Multi-key pool: GROQ_API_KEYS (comma-separated) takes precedence over single GROQ_API_KEY.
+// Round-robin index is module-level so it persists across requests.
+const _groqKeyPool = (process.env.GROQ_API_KEYS || '')
+  .split(',')
+  .map((k) => k.trim())
+  .filter(Boolean);
+let _groqKeyIdx = 0;
+
+function nextGroqKey(override) {
+  if (override && override.trim()) return override.trim();        // UI-supplied key wins
+  if (_groqKeyPool.length > 0) {
+    const key = _groqKeyPool[_groqKeyIdx % _groqKeyPool.length];
+    _groqKeyIdx++;
+    return key;
+  }
+  return process.env.GROQ_API_KEY || '';                          // legacy single key
+}
+
 const express = require("express");
 const cors = require("cors");
 
@@ -92,7 +110,7 @@ app.post("/api/stop", async (req, res) => {
 // Tell the UI whether the server has a .env key, WITHOUT exposing the key.
 // If true, the UI can leave the key field blank and the server uses its own key.
 app.get("/api/config", (req, res) => {
-  res.json({ hasServerKey: !!process.env.GROQ_API_KEY });
+  res.json({ hasServerKey: _groqKeyPool.length > 0 || !!process.env.GROQ_API_KEY });
 });
 
 app.get("/api/status", async (req, res) => {
@@ -374,9 +392,11 @@ function stripFences(code) {
 // fire the two generations in parallel safely: if a momentary TPM cap is hit,
 // we honour the Retry-After header (or back off) instead of failing the request.
 async function groqChat(apiKey, { system, user, maxTokens }, attempt = 0) {
+  // On retry after a 429, rotate to the next pooled key (no delay needed between different accounts).
+  const effectiveKey = attempt === 0 ? apiKey : nextGroqKey(null);
   const res = await fetch(GROQ_URL, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${effectiveKey}` },
     body: JSON.stringify({
       model: GROQ_MODEL,
       temperature: 0.2,
@@ -388,8 +408,11 @@ async function groqChat(apiKey, { system, user, maxTokens }, attempt = 0) {
     }),
   });
   if (res.status === 429 && attempt < 3) {
-    const retryAfter = parseFloat(res.headers.get("retry-after")) || (1.5 * (attempt + 1));
-    await new Promise((r) => setTimeout(r, Math.min(retryAfter, 10) * 1000));
+    // If only one key, wait for Retry-After; otherwise rotate immediately.
+    if (_groqKeyPool.length <= 1) {
+      const retryAfter = parseFloat(res.headers.get("retry-after")) || (1.5 * (attempt + 1));
+      await new Promise((r) => setTimeout(r, Math.min(retryAfter, 10) * 1000));
+    }
     return groqChat(apiKey, { system, user, maxTokens }, attempt + 1);
   }
   if (!res.ok) {
@@ -462,7 +485,7 @@ app.post("/api/generate", async (req, res) => {
 
   // Prefer a key the user typed in the UI; otherwise fall back to the server's
   // .env key. The key never has to leave the server when .env is configured.
-  const apiKey = (req.body.apiKey && req.body.apiKey.trim()) || process.env.GROQ_API_KEY;
+  const apiKey = nextGroqKey(req.body.apiKey);
 
   if (!apiKey) return res.status(400).json({ ok: false, message: "Groq API key is required (enter one in the UI or set GROQ_API_KEY in .env)" });
   if (events.length === 0) return res.status(400).json({ ok: false, message: "No recorded events to generate from" });
