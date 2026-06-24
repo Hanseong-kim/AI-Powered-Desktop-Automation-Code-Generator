@@ -154,6 +154,7 @@ class UIAInspector:
             "windowTitle": "",
             "xpath": "",
             "hwnd": 0,
+            "rootHwnd": 0,
         }
         if elem is None:
             return info
@@ -182,6 +183,7 @@ class UIAInspector:
         try:
             if hwnd:
                 root = ctypes.windll.user32.GetAncestor(hwnd, GA_ROOT)
+                info["rootHwnd"] = root or hwnd
                 info["windowTitle"] = win32gui.GetWindowText(root or hwnd)
         except Exception:
             pass
@@ -615,6 +617,20 @@ class Recorder:
                     f"fg={foreground_top_window()} x={x} y={y} — not target app")
                 return
 
+        # Popup detection: element belongs to a top-level window that is NOT the main app window
+        root_hwnd = elem.get("rootHwnd", 0)
+        is_popup = (
+            bool(root_hwnd)
+            and bool(self.target_hwnds)
+            and root_hwnd not in self.target_hwnds
+        )
+        popup_title = ""
+        if is_popup:
+            try:
+                popup_title = win32gui.GetWindowText(root_hwnd)
+            except Exception:
+                popup_title = elem.get("windowTitle", "")
+
         event = {
             "action": action,
             "element": {
@@ -630,6 +646,10 @@ class Recorder:
             "app": self.session.get("appName", ""),
             "platform": self.session.get("platform", "Windows"),
         }
+        # Popup annotation
+        if is_popup:
+            event["isPopup"] = True
+            event["popupTitle"] = popup_title
         if value is not None:
             event["value"] = value
         if x is not None:

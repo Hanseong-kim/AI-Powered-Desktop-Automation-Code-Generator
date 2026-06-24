@@ -229,7 +229,20 @@ CRITICAL - driver initialisation (two-step; supports Win32 AND UWP apps):
 CRITICAL - locators (use AppiumBy, not MobileBy which is deprecated):
   AppiumBy.accessibilityId("automationId")   // AutomationId-based strategy
   By.className("className")                  // ClassName-based strategy
-  By.name("elementName")                     // fallback when id/class empty`;
+  By.name("elementName")                     // fallback when id/class empty
+
+POPUP WINDOWS: When an event carries "isPopup": true and "popupTitle": "<title>":
+  Switch context to the popup before interacting with its elements:
+
+  WebDriverWait popupWait = new WebDriverWait(driver, Duration.ofSeconds(15));
+  WebElement popupWindow = popupWait.until(
+      ExpectedConditions.presenceOfElementLocated(
+          By.xpath("//Window[contains(@Name,\"<popupTitle>\")]")));
+
+  Then locate the popup's child element within the driver session normally
+  (WinAppDriver searches the full tree from the attached window, so a standard
+  driver.findElement() call will find elements inside the popup).
+  Do NOT close the popup unless a recorded dismiss action (click X / Cancel) exists.`;
 
 function buildUserPrompt(strategy, appName, platform, eventList, exePath = "") {
   const p = PLATFORM_MAP[platform] || PLATFORM_MAP.Windows;
