@@ -567,9 +567,11 @@ app.post("/api/generate", async (req, res) => {
       payload.savedPaths = savedPaths;
       if (saveError) payload.saveError = saveError;
     } else if (framework !== 'wdio') {
-      cleanJavaTestFiles(TESTRUNNER_JAVA_DIR);
-      const { savedPaths, saveError } = saveFiles(payload.files, TESTRUNNER_JAVA_DIR);
+      const subdir = buildJavaSubdir(name, slim);
+      const javaOutDir = path.join(TESTRUNNER_JAVA_DIR, subdir);
+      const { savedPaths, saveError } = saveFiles(payload.files, javaOutDir);
       payload.savedPaths = savedPaths;
+      payload.subdir = subdir;
       if (saveError) payload.saveError = saveError;
     }
     broadcast("generation", { status: "success", files: payload.files.map(f => f.filename) });
@@ -583,14 +585,12 @@ app.post("/api/generate", async (req, res) => {
 // ---------------------------------------------------------------------------
 // File persistence helpers (non-fatal — generation result is returned regardless)
 // ---------------------------------------------------------------------------
-function cleanJavaTestFiles(dir) {
-  try {
-    for (const f of fs.readdirSync(dir)) {
-      if (f.endsWith("TestById.java") || f.endsWith("TestByClass.java")) {
-        fs.unlinkSync(path.join(dir, f));
-      }
-    }
-  } catch { /* dir may not exist yet */ }
+function buildJavaSubdir(appName, eventList) {
+  const safeApp = (appName || 'App').replace(/[^A-Za-z0-9]/g, '');
+  const actions = [...new Set(eventList.map((e) => e.action).filter(Boolean))].sort().join('_') || 'session';
+  const now = new Date();
+  const ts = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}${String(now.getSeconds()).padStart(2,'0')}`;
+  return `${safeApp}_${actions}_${ts}`;
 }
 
 function saveFiles(files, dir) {
