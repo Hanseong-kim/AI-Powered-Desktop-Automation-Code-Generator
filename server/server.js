@@ -247,7 +247,18 @@ POPUP WINDOWS: When an event carries "isPopup": true and "popupTitle": "<title>"
   Then locate the popup's child element within the driver session normally
   (WinAppDriver searches the full tree from the attached window, so a standard
   driver.findElement() call will find elements inside the popup).
-  Do NOT close the popup unless a recorded dismiss action (click X / Cancel) exists.`;
+  Do NOT close the popup unless a recorded dismiss action (click X / Cancel) exists.
+
+MULTI-WINDOW PAGE OBJECTS: Events carry a "screenId" field (sanitized window title).
+  When two or more distinct screenIds appear in the session:
+  - Create one Page Object class per screenId. Class name: PascalCase of screenId + "Page"
+    (e.g. screenId "add_new_download" → AddNewDownloadPage).
+  - The main/first screenId maps to the primary Page class (already named {App}Page).
+  - Each secondary Page class receives the driver in its constructor; no new driver session.
+  - In the @Test method, call methods in order. When screenId changes between steps,
+    add a comment: // --- switch to <screenId> ---
+  - NEVER create a new WindowsDriver for a secondary window; use the same driver instance.
+  If all events share the same screenId, use a single Page class (no change from default).`;
 
 function buildUserPrompt(strategy, appName, platform, eventList, exePath = "") {
   const p = PLATFORM_MAP[platform] || PLATFORM_MAP.Windows;
@@ -459,6 +470,7 @@ app.post("/api/generate", async (req, res) => {
     x: e.x,
     y: e.y,
     delta: e.delta,
+    screenId: e.screenId,        // NEW
     isPopup: e.isPopup,
     popupTitle: e.popupTitle,
     element: {
@@ -468,6 +480,8 @@ app.post("/api/generate", async (req, res) => {
       controlType: e.element?.controlType,
       windowTitle: e.element?.windowTitle,
       locatorFallback: e.element?.locatorFallback,
+      locatorStrategy: e.element?.locatorStrategy,   // from Task 9
+      locatorValue: e.element?.locatorValue,         // from Task 9
     },
   }));
 

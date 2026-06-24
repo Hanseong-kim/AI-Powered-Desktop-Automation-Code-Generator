@@ -680,6 +680,11 @@ class Recorder:
         if x is not None:
             event["x"], event["y"] = int(x), int(y)
 
+        # screenId: sanitized window title — groups events by UI context
+        raw_title = event["element"].get("windowTitle", "") or self.session.get("appName", "")
+        screen_id = re.sub(r'[^a-z0-9]+', '_', raw_title.lower()).strip('_') or "unknown"
+        event["screenId"] = screen_id
+
         self.event_count += 1
         event["index"] = self.event_count
         log(f"#{self.event_count} {action:11s} "
