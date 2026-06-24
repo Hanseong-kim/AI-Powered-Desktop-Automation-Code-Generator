@@ -286,7 +286,11 @@ Recorded user session (in order). Convert EVERY event into a page-object action 
           }
       }
   Do NOT call clear() before typing — recorded type events are sequential/appended text, and clear() is unreliable on rich-text controls.
-- scroll -> use driver.executeScript(...) if strictly needed, otherwise omit the step. NEVER use Actions.
+- scroll -> generate a W3C wheel action using Actions (this is the only other permitted use of Actions besides coordinate fallback):
+    import org.openqa.selenium.interactions.Actions;
+    new Actions(driver).moveToLocation({x}, {y}).scrollByAmount(0, {delta}).build().perform();
+  Use the event's x, y, and delta fields. Add the Actions import only when scroll events exist.
+  Do NOT use driver.executeScript for scroll.
 
 ${JSON.stringify(eventList, null, 2)}
 
@@ -400,12 +404,18 @@ app.post("/api/generate", async (req, res) => {
     step: i + 1,
     action: e.action,
     value: e.value,
+    x: e.x,
+    y: e.y,
+    delta: e.delta,
+    isPopup: e.isPopup,
+    popupTitle: e.popupTitle,
     element: {
       name: e.element?.name,
       automationId: e.element?.automationId,
       className: e.element?.className,
       controlType: e.element?.controlType,
       windowTitle: e.element?.windowTitle,
+      locatorFallback: e.element?.locatorFallback,
     },
   }));
 

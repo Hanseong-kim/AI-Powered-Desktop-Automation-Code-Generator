@@ -611,7 +611,7 @@ class Recorder:
         ps, self._pending_scroll = self._pending_scroll, None
         if ps:
             self._emit("scroll", ps["elem"], x=ps["x"], y=ps["y"],
-                       value=str(ps["amount"]))
+                       value=str(ps["amount"]), delta=ps["amount"])
 
     def _flush_type_buffer(self):
         text, self._type_buffer = self._type_buffer, ""
@@ -623,7 +623,7 @@ class Recorder:
         self._emit(action, self._inspect(ins, x, y), x=x, y=y)
 
     # ---------------- emission ----------------
-    def _emit(self, action, elem, x=None, y=None, value=None):
+    def _emit(self, action, elem, x=None, y=None, value=None, delta=None):
         elem = elem or {}
         # Application filtering by top-level window handle.
         # Pointer events carry (x, y) — filter by the window under the point.
@@ -675,6 +675,8 @@ class Recorder:
             event["popupTitle"] = popup_title
         if value is not None:
             event["value"] = value
+        if delta is not None:
+            event["delta"] = delta
         if x is not None:
             event["x"], event["y"] = int(x), int(y)
 
