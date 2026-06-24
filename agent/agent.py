@@ -23,6 +23,7 @@ MUST be run from an *Administrator* terminal, otherwise UIA properties
 import json
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -382,7 +383,23 @@ class Recorder:
     def _point_is_target(self, x, y):
         if not self.target_hwnds:
             return True  # discovery failed — do not silently drop everything
-        return top_window_at(x, y) in self.target_hwnds
+        top = top_window_at(x, y)
+        if top in self.target_hwnds:
+            return True
+        # Title-based fallback: Electron and some UWP apps spawn child processes
+        # whose hwnd->pid->exe chain doesn't match the launch pid. Accept and cache
+        # the hwnd if the window title contains the app name (stripped to alnum).
+        app_key = re.sub(r'[^a-z0-9]', '', self.session.get("appName", "").lower())
+        if app_key:
+            try:
+                title_key = re.sub(r'[^a-z0-9]', '', win32gui.GetWindowText(top).lower())
+                if app_key in title_key or title_key in app_key:
+                    self.target_hwnds.add(top)
+                    log(f"[target] title-match hwnd={top} title='{win32gui.GetWindowText(top)}' accepted")
+                    return True
+            except Exception:
+                pass
+        return False
 
     def _foreground_is_target(self):
         if not self.target_hwnds:
