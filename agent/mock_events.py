@@ -218,6 +218,48 @@ def step_playwright_generate(api_key):
                 check(f"Python syntax valid (compile)", False, str(e))
 
 
+def step_wdio_generate(api_key):
+    print("\n[11] WebdriverIO JavaScript generation")
+    # Ensure events are loaded before generate call
+    request("DELETE", "/api/events")
+    for ev in MOCK_EVENTS:
+        request("POST", "/api/events", ev)
+
+    status, body = request("POST", "/api/generate", {
+        "apiKey": api_key,
+        "appName": APP_NAME,
+        "platform": PLATFORM,
+        "framework": "wdio",
+    }, timeout=90)
+    check("POST /api/generate (wdio) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped file checks)", False, body.get("message", ""))
+        return
+    check("ok == true", body.get("ok") is True)
+    files = body.get("files", [])
+    check("Two .js files returned", len(files) == 2, f"got {len(files)}")
+    for f in files:
+        fname = f.get("filename", "")
+        content = f.get("content", "")
+        check(f"  {fname} ends with .js", fname.endswith(".js"), f"got '{fname}'")
+        check(f"  {fname} has content", bool(content.strip()))
+        check(
+            f"  {fname} contains waitForDisplayed",
+            "waitForDisplayed" in content,
+            "missing waitForDisplayed — possible pause() regression",
+        )
+        check(
+            f"  {fname} has at most 1 pause (startup only)",
+            content.count("pause(") <= 1,
+            f"found {content.count('pause(')} pause() calls — only 1 (startup) is allowed",
+        )
+        check(
+            f"  {fname} imports webdriverio",
+            "webdriverio" in content or "@wdio/globals" in content,
+            "missing webdriverio import",
+        )
+
+
 def step_delete_event():
     print("\n[9] Event row delete (6 inject -> 1 delete -> 5 remain)")
     request("DELETE", "/api/events")
@@ -267,9 +309,11 @@ def main():
     if api_key:
         step_generate(api_key)
         step_playwright_generate(api_key)
+        step_wdio_generate(api_key)
     else:
         print("\n[6] Code generation - SKIPPED (set GROQ_API_KEY env var to enable)")
         print("\n[10] Playwright generation - SKIPPED (set GROQ_API_KEY env var to enable)")
+        print("\n[11] WDIO generation - SKIPPED (set GROQ_API_KEY env var to enable)")
 
     passed = sum(_results)
     total = len(_results)
