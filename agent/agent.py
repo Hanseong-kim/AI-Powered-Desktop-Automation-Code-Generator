@@ -510,6 +510,7 @@ class Recorder:
             return
 
         self._discover_target_windows()
+        self._emit_session_meta()
 
         while True:
             try:
@@ -689,6 +690,28 @@ class Recorder:
         except Exception:
             pass
         return None
+
+    def _emit_session_meta(self):
+        """Emit a session_meta event with initial window geometry."""
+        hwnd = next(iter(self.target_hwnds), 0)
+        rect = self._get_win_rect(hwnd)
+        meta = {
+            "action": "session_meta",
+            "app": self.session.get("appName", ""),
+            "platform": self.session.get("platform", "Windows"),
+            "timestamp": time.time(),
+        }
+        if rect is not None:
+            win_left, win_top, win_w, win_h = rect
+            meta["initialWindow"] = {
+                "left": win_left, "top": win_top,
+                "width": win_w, "height": win_h,
+            }
+        try:
+            requests.post(EXPRESS_EVENTS_URL, json=meta, timeout=3)
+            log(f"[meta] session_meta emitted window={meta.get('initialWindow')}")
+        except Exception as e:
+            log(f"WARN: could not POST session_meta: {e}")
 
     def _emit(self, action, elem, x=None, y=None, value=None, delta=None):
         elem = elem or {}
