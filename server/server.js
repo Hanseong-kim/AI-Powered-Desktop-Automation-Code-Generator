@@ -282,53 +282,84 @@ MULTI-WINDOW PAGE OBJECTS: Events carry a "screenId" field (sanitized window tit
   - NEVER create a new WindowsDriver for a secondary window; use the same driver instance.
   If all events share the same screenId, use a single Page class (no change from default).`;
 
+// Pre-compute Java locators so LLM doesn't have to guess or translate element names.
+const EDITABLE_CONTROL_TYPES = new Set(['Edit', 'Document', 'RichEdit', 'RichEditD2DPT', 'ComboBox']);
+
+function _javaLocId(el) {
+  if (!el) return null;
+  if (el.locatorFallback === 'coordinate') return null;
+  if (el.automationId) return `AppiumBy.accessibilityId("${el.automationId}")`;
+  if (el.name) return `By.name("${el.name}")`;
+  if (el.className) return `By.className("${el.className}")`;
+  return null;
+}
+
+function _javaLocClass(el) {
+  if (!el) return null;
+  if (el.locatorFallback === 'coordinate') return null;
+  const cls = el.className, nm = el.name, aid = el.automationId;
+  if (cls && nm) return `By.xpath("//*[@ClassName='${cls}' and @Name='${nm}']")`;
+  if (cls)       return `By.className("${cls}")`;
+  if (nm)        return `By.name("${nm}")`;
+  if (aid)       return `AppiumBy.accessibilityId("${aid}")`;
+  return null;
+}
+
 function buildUserPrompt(strategy, appName, platform, eventList, exePath = "") {
   const p = PLATFORM_MAP[platform] || PLATFORM_MAP.Windows;
   const raw = appName.replace(/[^A-Za-z0-9]/g, "") || "MyApp";
   const className = `${raw.charAt(0).toUpperCase() + raw.slice(1)}Test${strategy === "id" ? "ById" : "ByClass"}`;
   const windowTitle = eventList[0]?.element?.windowTitle || appName;
-  // UWP apps are passed as an AUMID ("PackageFamilyName!AppId") and must be
-  // launched through the shell AppsFolder; Win32 apps use the plain exe path.
-  // Emit the EXACT ProcessBuilder statement so the model copies it verbatim.
   const isUwp = exePath.includes("!");
   const launchLine = isUwp
     ? `new ProcessBuilder("explorer.exe", "shell:AppsFolder\\\\${exePath}").start();`
     : `new ProcessBuilder("${exePath.replace(/\\/g, "\\\\")}").start();`;
-  const locatorRule = strategy === "id"
-    ? `Locator strategy: use the element's AutomationId as the primary locator (${p.idHint}). If an event has an empty automationId, fall back to By.name(element name), then By.className.`
-    : `Locator strategy: locate EVERY element by XPath using ClassName and Name as ATTRIBUTES on a wildcard node — By.xpath("//*[@ClassName='<className>' and @Name='<name>']"), e.g. By.xpath("//*[@ClassName='Button' and @Name='9']"). CRITICAL: in WinAppDriver XPath the node tag is the CONTROL TYPE (Edit, Button, Document, Text, Window...), NOT the ClassName — so NEVER write //<className>[...] such as //RichEditD2DPT[@Name='...'] (RichEditD2DPT is a ClassName, not a control type → it matches nothing and times out). Always put ClassName in an [@ClassName='...'] predicate on //*. Why not a bare By.className: many controls share a ClassName (every calculator key is 'Button'), so By.className returns the FIRST match (often the wrong/menu element). RULES: (1) ClassName + Name both present → By.xpath("//*[@ClassName='cls' and @Name='name']"). (2) Name empty → By.className(cls). (3) ClassName empty → By.name(name); if Name also empty → AppiumBy.accessibilityId(automationId). NEVER fabricate a control such as By.className("Edit"). NEVER chain By.className(...).and(...) — By has no and() method; use the XPath form above.`;
+
+  // Pre-build the window XPath so LLM copies it verbatim (prevents anglicization).
+  const windowXPath = `By.xpath("//Window[contains(@Name,'${windowTitle}')]")`;
+
+  // Annotate each event with a pre-computed locator and editability flag.
+  const annotated = eventList.map(e => {
+    const loc = strategy === "id" ? _javaLocId(e.element) : _javaLocClass(e.element);
+    const isEditable = EDITABLE_CONTROL_TYPES.has(e.element?.controlType);
+    return { ...e, _locator: loc, _isEditable: isEditable };
+  });
 
   return `Target application: "${appName}" on platform ${platform} (${p.note}).
 Driver class: ${p.driver} (import ${p.driverImport}).
 Public test class name: ${className}. Page class name: ${className.replace("Test", "Page")}.
-Launch step — use EXACTLY this statement for the ProcessBuilder launch in setUp() (copy verbatim, do not alter or substitute a path):
+Launch step — use EXACTLY this statement for the ProcessBuilder launch in setUp() (copy verbatim):
   ${launchLine}
-Window title for root-session XPath lookup in setUp: "${windowTitle}" (use as-is — may be non-English; do NOT translate or replace with the English app name)
 
-${locatorRule}
+Root-session window XPath — COPY THIS EXACTLY, DO NOT TRANSLATE OR MODIFY:
+  ${windowXPath}
+
+LOCATOR RULE: Every event carries a "_locator" field — use that Java locator expression VERBATIM.
+Do NOT rename, anglicize, or replace ANY part of the locator (especially @Name values).
+The @Name values are the REAL UIA attribute strings from the OS; they may be non-English numerals or Korean words — use them as-is.
+
+TYPE EVENT RULE: An event with action=="type" also carries "_isEditable" (true/false).
+- _isEditable == true  → call typeWithEnter(element, value) on the located element.
+- _isEditable == false → SKIP this event entirely. Do NOT call sendKeys on a read-only display element.
 
 Recorded user session (in order). Convert EVERY event into a page-object action + a test step:
-- click / doubleClick / rightClick -> ALL map to element.click(). WinAppDriver does not support mouse Actions; NEVER emit Actions.doubleClick() or Actions.contextClick(). A double-click or right-click in the recording becomes a single element.click().
-  If element.locatorFallback == "coordinate": use new Actions(driver).moveToLocation(x, y).click().build().perform() instead.
-- type -> locate the SAME element recorded for THIS event (using the locator strategy and its fallbacks defined above) and send the keys to it. NEVER invent or assume a separate input field such as By.className("Edit"). CRITICAL — newlines: WinAppDriver does NOT convert a literal "\\n" in a string into the Enter key (it gets swallowed → all text lands on one line). So do NOT call sendKeys("text\\n"). Instead split the value on "\\n" and send Keys.ENTER (org.openqa.selenium.Keys) between segments. Use a helper method like:
-      private void typeWithEnter(WebElement el, String value) {
-          String[] lines = value.split("\\n", -1);
-          for (int i = 0; i < lines.length; i++) {
-              if (!lines[i].isEmpty()) el.sendKeys(lines[i]);
-              if (i < lines.length - 1) el.sendKeys(Keys.ENTER);
-          }
-      }
-  Do NOT call clear() before typing — recorded type events are sequential/appended text, and clear() is unreliable on rich-text controls.
-- scroll -> use java.awt.Robot to scroll (WinAppDriver 1.x does not support W3C wheel actions):
-    java.awt.Robot robot = new java.awt.Robot();
-    robot.mouseMove({x}, {y});
-    robot.mouseWheel({delta});
-  No additional import needed (java.awt.Robot is in the JDK). Use the event's x, y, and delta fields.
-  Do NOT use Actions.scrollByAmount — it is not supported by WinAppDriver 1.x.
+- click / doubleClick / rightClick → ALL map to element.click().
+  If _locator is null (coordinate fallback): new Actions(driver).moveToLocation(x, y).click().build().perform().
+- type → see TYPE EVENT RULE above.
+- scroll → java.awt.Robot: robot.mouseMove(x,y); robot.mouseWheel(delta);
 
-${JSON.stringify(eventList, null, 2)}
+Helper method (include once in the Page class when any type event has _isEditable==true):
+    private void typeWithEnter(WebElement el, String value) {
+        String[] lines = value.split("\\n", -1);
+        for (int i = 0; i < lines.length; i++) {
+            if (!lines[i].isEmpty()) el.sendKeys(lines[i]);
+            if (i < lines.length - 1) el.sendKeys(Keys.ENTER);
+        }
+    }
 
-Output ONLY the Java source code of the single .java file. Start directly with "package com.qaforge.tests;".`;
+${JSON.stringify(annotated, null, 2)}
+
+Output ONLY the Java source code. Start directly with "package com.qaforge.tests;".`;
 }
 
 
@@ -509,47 +540,92 @@ function groqGenerate(apiKey, strategy, appName, platform, eventList, exePath) {
   });
 }
 
+function _wdioSelector(el) {
+  if (!el) return null;
+  if (el.locatorFallback === 'coordinate') return null;
+  if (el.automationId) return `'~${el.automationId}'`;
+  if (el.name) return `'//*[@Name="${el.name}"]'`;
+  if (el.className) return `'//*[@ClassName="${el.className}"]'`;
+  return null;
+}
+
 function buildWdioPrompt(strategy, appName, platform, eventList, exePath) {
+  const sessionMeta = eventList.find(e => e.action === 'session_meta');
+  const initWin = sessionMeta?.initialWindow;
+  const winRestoreCode = initWin
+    ? `  await driver.setWindowRect(${initWin.left}, ${initWin.top}, ${initWin.width}, ${initWin.height});`
+    : '';
+  const filteredEvents = eventList.filter(e => e.action !== 'session_meta');
+
   const raw = appName.replace(/[^A-Za-z0-9]/g, '') || 'MyApp';
   const base = raw.charAt(0).toUpperCase() + raw.slice(1);
   const className = `${base}Test${strategy === 'id' ? 'ById' : 'ByClass'}`;
-  const windowTitle = eventList[0]?.element?.windowTitle || appName;
+  const windowTitle = filteredEvents[0]?.element?.windowTitle || appName;
   const isUwp = (exePath || '').includes('!');
   const launchLine = isUwp
     ? `await exec('explorer.exe "shell:AppsFolder\\\\${exePath}"');`
     : `await exec(${JSON.stringify(exePath)});`;
-  const locatorRule = strategy === 'id'
-    ? `Locator strategy: prefer driver.$('~automationId') (accessibility id, ~ prefix). Fall back to driver.$('//*[@Name="name"]') then driver.$('//*[@ClassName="className"]').`
-    : `Locator strategy: always use XPath — driver.$('//*[@ClassName="cls" and @Name="name"]'). If Name empty: driver.$('//*[@ClassName="cls"]'). If ClassName empty: driver.$('//*[@Name="name"]'). If both empty: driver.$('~automationId'). NEVER fabricate a locator.`;
 
-  const screenIds = [...new Set(eventList.map(e => e.screenId).filter(Boolean))];
+  // Pre-build window XPath to prevent LLM from anglicizing the title.
+  const windowXPath = `'//Window[contains(@Name,"${windowTitle}")]'`;
+
+  const screenIds = [...new Set(filteredEvents.map(e => e.screenId).filter(Boolean))];
   const multiScreen = screenIds.length > 1
-    ? `\nMultiple screens detected: ${JSON.stringify(screenIds)}. Create one Page class per screenId as instructed in the system prompt.`
+    ? `\nMultiple screens: ${JSON.stringify(screenIds)}. Create one Page class per screenId.`
     : '';
-  const hasPopup = eventList.some(e => e.isPopup);
-  const popupNote = hasPopup
-    ? `\nSession contains popup events (isPopup:true). Apply switchToWindow() pattern from system prompt.`
-    : '';
+  const hasPopup = filteredEvents.some(e => e.isPopup);
+  const popupNote = hasPopup ? `\nSession has popup events (isPopup:true). Apply switchToWindow() pattern.` : '';
+
+  // Annotate events with pre-computed selectors, editability, and coordinate flags.
+  const annotated = filteredEvents.map(e => {
+    const sel = strategy === 'id'
+      ? (e.element?.automationId ? `'~${e.element.automationId}'` : _wdioSelector(e.element))
+      : (e.element?.className && e.element?.name
+          ? `'//*[@ClassName="${e.element.className}" and @Name="${e.element.name}"]'`
+          : _wdioSelector(e.element));
+    const isEditable = EDITABLE_CONTROL_TYPES.has(e.element?.controlType);
+    const isElectron = e.isElectron === true;
+    const hasCoord = e.relX !== undefined && e.relY !== undefined;
+    const useCoord = isElectron || !sel;
+    return { ...e, _selector: sel, _isEditable: isEditable, _useCoord: useCoord };
+  });
 
   return `Application: "${appName}", platform: ${platform}.
 Describe block title: "${className}".
 Page class name: ${base}Page${strategy === 'id' ? 'ById' : 'ByClass'}.
-Launch statement for beforeAll() Step 1 — copy verbatim:
+Launch statement for beforeAll() — copy verbatim:
   ${launchLine}
-Window title for root session XPath in beforeAll(): "${windowTitle}"
-(Use as-is — may be non-English; do NOT translate or anglicize.)
 
-${locatorRule}${multiScreen}${popupNote}
+Root session window XPath — COPY THIS EXACTLY, DO NOT TRANSLATE OR MODIFY:
+  const appWindow = await rootDriver.$(${windowXPath});
 
-Recorded session — convert EVERY event into a Page method + it() step:
-- click / doubleClick / rightClick → all map to element.click() (WinAppDriver limitation)
-- type → element.setValue(value). Split on '\\n' and send Enter between segments if needed.
-- scroll → driver.action('wheel').move({...}).scroll({...}).perform()
-- coordinate fallback (locatorFallback == "coordinate") → driver.action('pointer').move({x,y}).down().up().perform()
+SELECTOR RULE: Every event has a "_selector" field — use it VERBATIM in driver.$(...).
+Do NOT rename, anglicize, or change @Name or @ClassName values. They are real UIA strings.
 
-${JSON.stringify(eventList, null, 2)}
+TYPE EVENT RULE:
+- _isEditable == true  → await element.waitForDisplayed({timeout:15000}); await element.setValue(value);
+- _isEditable == false → SKIP this event. Do NOT call setValue on a read-only display element.
+${multiScreen}${popupNote}
 
-Output ONLY the JavaScript source. Start directly with: import { remote } from 'webdriverio';`;
+${winRestoreCode ? `Window restore in beforeAll (add after driver init):\n  ${winRestoreCode}\n` : ''}
+ACTION GENERATION RULES — for each event check _useCoord:
+
+COORDINATE ACTIONS (when _useCoord is true — Electron or no selector):
+  click:       await driver.action('pointer').move({x: EVENT.relX, y: EVENT.relY, origin: 'viewport'}).down().up().perform();
+  doubleClick: await driver.action('pointer').move({x: EVENT.relX, y: EVENT.relY, origin: 'viewport'}).down().up().down().up().perform();
+  rightClick:  await driver.action('pointer').move({x: EVENT.relX, y: EVENT.relY, origin: 'viewport'}).down({button: 2}).up({button: 2}).perform();
+  scroll:      await driver.action('wheel').move({x: EVENT.relX, y: EVENT.relY, origin: 'viewport'}).scroll({deltaX: 0, deltaY: EVENT.delta}).perform();
+
+SELECTOR ACTIONS (when _useCoord is false — Win32/WPF with stable locator):
+  click:       await driver.$(EVENT._selector).click();
+  rightClick:  await driver.$(EVENT._selector).click({ button: 'right' });
+  scroll:      (use coordinate form above even if selector exists)
+  type:        if _isEditable true  → await driver.$(EVENT._selector).setValue(EVENT.value);
+               if _isEditable false → SKIP (read-only display element)
+
+${JSON.stringify(annotated, null, 2)}
+
+Output ONLY the JavaScript source. Start with: import { remote } from 'webdriverio';`;
 }
 
 function groqGenerateWdio(apiKey, strategy, appName, platform, eventList, exePath) {
@@ -583,6 +659,13 @@ app.post("/api/generate", async (req, res) => {
     screenId: e.screenId,        // NEW
     isPopup: e.isPopup,
     popupTitle: e.popupTitle,
+    relX: e.relX,
+    relY: e.relY,
+    winLeft: e.winLeft,
+    winTop: e.winTop,
+    winWidth: e.winWidth,
+    winHeight: e.winHeight,
+    isElectron: e.isElectron,
     element: {
       name: e.element?.name,
       automationId: e.element?.automationId,
