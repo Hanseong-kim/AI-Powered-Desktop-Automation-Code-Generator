@@ -691,6 +691,16 @@ class Recorder:
             pass
         return None
 
+    def _is_electron(self, hwnd):
+        """True if the top-level window is an Electron (Chromium) app."""
+        try:
+            if hwnd:
+                cls = win32gui.GetClassName(hwnd)
+                return 'Chrome_WidgetWin' in cls
+        except Exception:
+            pass
+        return False
+
     def _emit_session_meta(self):
         """Emit a session_meta event with initial window geometry."""
         hwnd = next(iter(self.target_hwnds), 0)
@@ -701,6 +711,8 @@ class Recorder:
             "platform": self.session.get("platform", "Windows"),
             "timestamp": time.time(),
         }
+        if hwnd:
+            meta["isElectron"] = self._is_electron(hwnd)
         if rect is not None:
             win_left, win_top, win_w, win_h = rect
             meta["initialWindow"] = {
@@ -742,6 +754,13 @@ class Recorder:
             except Exception:
                 popup_title = elem.get("windowTitle", "")
 
+        # Electron detection: force coordinate locator for Electron apps
+        is_electron = self._is_electron(root_hwnd)
+        if is_electron:
+            elem = dict(elem)  # don't mutate the passed-in dict
+            elem["locatorFallback"] = "coordinate"
+            elem["locatorStrategy"] = "coordinate"
+
         event = {
             "action": action,
             "element": {
@@ -764,6 +783,9 @@ class Recorder:
         if is_popup:
             event["isPopup"] = True
             event["popupTitle"] = popup_title
+        # Electron annotation
+        if is_electron:
+            event["isElectron"] = True
         raw_root = elem.get("rootHwnd", 0)
         if raw_root:
             event["rootHwndHex"] = format(raw_root, 'X')   # bare uppercase hex, no 0x prefix
