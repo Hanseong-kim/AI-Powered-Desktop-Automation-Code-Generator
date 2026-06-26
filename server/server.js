@@ -412,8 +412,13 @@ CRITICAL — action mapping:
   scroll     → await driver.action('wheel').move({ x, y, origin: 'viewport' }).scroll({ deltaX: 0, deltaY: delta }).perform();
 
 POPUP WINDOWS: When an event carries "isPopup": true, "popupTitle": "<title>", and "rootHwndHex": "<hex>":
+  WinAppDriver window handles are bare uppercase hex strings (e.g. "1A2B" not "0x1A2B").
   Store the main handle before any popup: const mainHandle = (await driver.getWindowHandles())[0];
-  Switch to popup: await driver.switchToWindow('<rootHwndHex>');
+  Find and switch to the popup window:
+    await driver.waitUntil(async () => (await driver.getWindowHandles()).length > 1, { timeout: 15000, interval: 500 });
+    const allHandles = await driver.getWindowHandles();
+    const popupHandle = allHandles.find(h => h.toUpperCase() === '<rootHwndHex>') || allHandles[allHandles.length - 1];
+    await driver.switchToWindow(popupHandle);
   Return to main window after popup: await driver.switchToWindow(mainHandle);
   Do NOT close the popup unless a recorded dismiss action (click X/Cancel/OK) exists in the session.
 
@@ -551,7 +556,7 @@ function groqGenerateWdio(apiKey, strategy, appName, platform, eventList, exePat
   return groqChat(apiKey, {
     system: WDIO_SYSTEM_PROMPT,
     user: buildWdioPrompt(strategy, appName, platform, eventList, exePath),
-    maxTokens: 4000,
+    maxTokens: 6000,
   });
 }
 

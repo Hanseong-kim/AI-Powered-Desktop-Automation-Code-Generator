@@ -295,6 +295,7 @@ class Recorder:
         self.session = {}            # appName, exePath, platform
         self.proc = None
         self.target_hwnds = set()    # top-level window handles owned by the target
+        self._popup_hwnds = set()    # windows discovered by watcher (always treated as popups)
         self._pre_hwnds = set()      # visible top-levels snapshotted before launch
 
         self._mouse_listener = None
@@ -474,13 +475,11 @@ class Recorder:
         process PIDs and auto-add them to target_hwnds. Fixes the bug where
         popup/child windows opened after recording started were silently
         filtered by _point_is_target()."""
-        if not self.proc:
-            return
-        launch_pid = self.proc.pid
+        launch_pid = self.proc.pid if self.proc else None
 
         while not self._stop_flag.is_set():
             try:
-                target_pids = {launch_pid}
+                target_pids = {launch_pid} if launch_pid else set()
                 for hwnd in list(self.target_hwnds):
                     p = pid_of_hwnd(hwnd)
                     if p:
@@ -490,6 +489,7 @@ class Recorder:
                         continue
                     if pid_of_hwnd(hwnd) in target_pids:
                         self.target_hwnds.add(hwnd)
+                        self._popup_hwnds.add(hwnd)
                         try:
                             title = win32gui.GetWindowText(hwnd)
                             log(f"[watcher] added hwnd={hwnd} title='{title}'")
@@ -699,8 +699,7 @@ class Recorder:
         root_hwnd = elem.get("rootHwnd", 0)
         is_popup = (
             bool(root_hwnd)
-            and bool(self.target_hwnds)
-            and root_hwnd not in self.target_hwnds
+            and root_hwnd in self._popup_hwnds
         )
         popup_title = ""
         if is_popup:
@@ -733,7 +732,7 @@ class Recorder:
             event["popupTitle"] = popup_title
         raw_root = elem.get("rootHwnd", 0)
         if raw_root:
-            event["rootHwndHex"] = "0x" + format(raw_root, 'X')
+            event["rootHwndHex"] = format(raw_root, 'X')   # bare uppercase hex, no 0x prefix
         if value is not None:
             event["value"] = value
         if delta is not None:

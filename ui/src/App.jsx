@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+﻿import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useStream } from './useStream';
 import { getConfig, getStatus, startRecording, stopRecording, clearEvents, generate, deleteEvent } from './api';
 import ControlPanel from './components/ControlPanel';
@@ -156,6 +156,8 @@ export default function App() {
         if (res.savedPaths?.length) {
           const dest = res.framework === 'playwright'
             ? 'generated-playwright/'
+            : res.framework === 'wdio'
+            ? 'generated-wdio/'
             : 'test-runner/…/tests/';
           addToast('info', `Files saved to ${dest}`);
         }
