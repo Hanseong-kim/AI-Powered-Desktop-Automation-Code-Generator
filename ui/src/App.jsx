@@ -11,7 +11,7 @@ const DEFAULT_FORM = {
   appName: 'Calculator',
   exePath: 'C:\\Windows\\System32\\calc.exe',
   platform: 'Windows',
-  framework: 'appium',
+  framework: 'wdio',
   apiKey: '',
 };
 
@@ -149,7 +149,7 @@ export default function App() {
         apiKey: form.apiKey,
         appName: form.appName || undefined,
         platform: form.platform || undefined,
-        framework: form.framework || 'appium',
+        framework: form.framework || 'wdio',
       });
       if (res.ok) {
         setGenState({ generating: false, files: res.files, error: null });
