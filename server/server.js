@@ -45,6 +45,7 @@ const GROQ_MODEL = "llama-3.3-70b-versatile";
 
 const TESTRUNNER_JAVA_DIR = path.join(__dirname, "..", "test-runner", "src", "test", "java", "com", "qaforge", "tests");
 const PLAYWRIGHT_OUT_DIR = path.join(__dirname, "..", "generated-playwright");
+const WDIO_OUT_DIR = path.join(__dirname, "..", "generated-wdio");
 
 const app = express();
 app.use(cors());
@@ -347,23 +348,83 @@ Hard rules:
 - End with an expect() assertion verifying visible state
 - The file must pass: python -c "compile(open('file.py').read(), 'file.py', 'exec')"`;
 
-const WDIO_SYSTEM_PROMPT = `You are an expert QA automation engineer. Generate COMPLETE, RUNNABLE WebdriverIO v8 JavaScript test code for Windows Desktop apps via WinAppDriver. Output ONLY raw JavaScript — no markdown fences, no explanations, no TODO comments.
+const WDIO_SYSTEM_PROMPT = `You are an expert QA automation engineer. You generate COMPLETE, RUNNABLE WebdriverIO v9 JavaScript test code for Windows Desktop applications via WinAppDriver (Appium 2.x). Output ONLY raw JavaScript source — no markdown fences, no explanations, no TODO comments, no placeholders.
 
-Hard rules:
-- Use ESM-style async/await: import { remote } from 'webdriverio';
-- One file exports: a default describe() block with beforeAll, afterAll, and it() test cases.
-- beforeAll: connect to WinAppDriver at http://127.0.0.1:4723 using remote({ capabilities: { platformName: 'Windows', 'appium:app': 'Root' } }). After connecting, find the app window and re-attach with appTopLevelWindow capability.
-- afterAll: await driver.deleteSession()
-- Every action awaited: await $(selector).click(), await $(selector).setValue(value)
-- Locators:
-    AutomationId: await $('~automationId')   // accessibility id prefix ~
-    ClassName:    await $('ClassName')
-    XPath:        await $('//*[@AutomationId="id"]')
-- NEVER use browser global — always use the local driver variable from remote().
-- Scroll: await driver.action('wheel').move({ x, y }).scroll({ deltaX: 0, deltaY: delta }).perform()
-- For coordinate fallback (locatorFallback == "coordinate"): await driver.action('pointer').move({ x, y }).down().up().perform()
-- Print step logs: console.log('[STEP n] ...')
-- End with an expect assertion using expect(await $(selector).isDisplayed()).toBe(true)`;
+Hard rules for every file you produce:
+- Page Object Model: one Page class (locators + action methods) and one describe() test block — BOTH in the SAME file. Page class defined above describe().
+- Every interaction preceded by an explicit wait: await element.waitForDisplayed({ timeout: 15000 }) before every click, setValue, or getAttribute. NEVER use driver.pause() anywhere except the one-time startup wait in beforeAll.
+- Before each action in it(), print: console.log('[STEP n] ...').
+- End it() with: expect(await element.isDisplayed()).toBe(true). The asserted element MUST reuse a locator already in the recorded session — NEVER introduce a new locator for the assertion.
+- afterAll: null-safe cleanup — try { await driver.deleteSession(); } catch (_) {} — no assertions.
+- Method and field names must be descriptive camelCase derived from element names.
+
+CRITICAL — driver initialisation (two-step; supports Win32 AND UWP):
+  Use this exact pattern in beforeAll(), substituting <launchStatement> and <windowTitle> from the user prompt:
+
+  import { remote } from 'webdriverio';
+  import { promisify } from 'node:util';
+  import { exec as _exec } from 'node:child_process';
+  const exec = promisify(_exec);
+
+  let driver;
+  beforeAll(async () => {
+    // 1. Launch (use the EXACT statement from the user prompt)
+    <launchStatement>;
+    await new Promise(r => setTimeout(r, 2000)); // one-time startup wait — only permitted pause
+
+    // 2. Root session — wait for window, capture native handle
+    const rootDriver = await remote({
+      hostname: '127.0.0.1', port: 4723,
+      capabilities: { platformName: 'Windows', 'appium:app': 'Root' },
+    });
+    const appWindow = await rootDriver.$('//Window[contains(@Name,"<windowTitle>")]');
+    await appWindow.waitForDisplayed({ timeout: 15000 });
+    const nativeHandle = await appWindow.getAttribute('NativeWindowHandle');
+    const hexHandle = '0x' + parseInt(nativeHandle, 10).toString(16).toUpperCase();
+    await rootDriver.deleteSession();
+
+    // 3. Attach via appTopLevelWindow
+    driver = await remote({
+      hostname: '127.0.0.1', port: 4723,
+      capabilities: { platformName: 'Windows', 'appium:appTopLevelWindow': hexHandle },
+    });
+  });
+
+  NEVER use 'appium:app' with an exe path as the sole init — fails for UWP.
+  NEVER translate <windowTitle> — use the exact string as given (may be non-English, e.g. "계산기").
+
+CRITICAL — locators: each event carries locatorStrategy and locatorValue — use them directly, never guess:
+  locatorStrategy == "automationId" → await driver.$('~' + locatorValue)
+  locatorStrategy == "name"         → await driver.$('//*[@Name="locatorValue"]')
+  locatorStrategy == "className"    → await driver.$('//*[@ClassName="locatorValue"]')
+  locatorStrategy == "xpath"        → await driver.$(locatorValue)
+  locatorStrategy == "coordinate"   → await driver.action('pointer').move({ x, y, origin: 'viewport' }).down().up().perform()
+  Never fabricate a locator not derived from locatorStrategy/locatorValue.
+
+CRITICAL — action mapping:
+  click      → await element.waitForDisplayed({ timeout: 15000 }); await element.click();
+  doubleClick → await element.waitForDisplayed({ timeout: 15000 }); await element.click();
+    (WinAppDriver does not support native double-click — map to single click)
+  rightClick → await element.waitForDisplayed({ timeout: 15000 }); await element.click();
+    (WinAppDriver does not support native right-click — map to single click)
+  type       → await element.waitForDisplayed({ timeout: 15000 }); await element.setValue(value);
+    If value contains '\\n': split on '\\n', call setValue for each segment, then await driver.keys(['Enter']) between segments.
+  scroll     → await driver.action('wheel').move({ x, y, origin: 'viewport' }).scroll({ deltaX: 0, deltaY: delta }).perform();
+
+POPUP WINDOWS: When an event carries "isPopup": true, "popupTitle": "<title>", and "rootHwndHex": "<hex>":
+  Store the main handle before any popup: const mainHandle = (await driver.getWindowHandles())[0];
+  Switch to popup: await driver.switchToWindow('<rootHwndHex>');
+  Return to main window after popup: await driver.switchToWindow(mainHandle);
+  Do NOT close the popup unless a recorded dismiss action (click X/Cancel/OK) exists in the session.
+
+MULTI-SCREEN PAGE OBJECTS: Events carry a "screenId" field (sanitized window title).
+  When two or more distinct screenIds appear in the session:
+  - Create one Page class per screenId. Class name: PascalCase(screenId) + "Page".
+    Example: screenId "add_new_download" → AddNewDownloadPage.
+  - The main/first screenId maps to the primary Page class (named {App}Page).
+  - Each secondary Page class receives driver in its constructor; never create a new driver session.
+  - In it(), call methods in recorded order. When screenId changes: // --- switch to <screenId> ---
+  If all events share one screenId, use a single Page class.`;
 
 function buildPlaywrightPrompt(appName, platform, eventList) {
   const safeName = (appName || "myapp").replace(/[^a-z0-9]/gi, "_").toLowerCase();
@@ -453,20 +514,37 @@ function buildWdioPrompt(strategy, appName, platform, eventList, exePath) {
     ? `await exec('explorer.exe "shell:AppsFolder\\\\${exePath}"');`
     : `await exec(${JSON.stringify(exePath)});`;
   const locatorRule = strategy === 'id'
-    ? `Locator strategy: prefer $('~automationId') (accessibility id). Fall back to $('[name="${'name'}"]') then $('ClassName').`
-    : `Locator strategy: locate by XPath $('//*[@ClassName="cls" and @Name="name"]'). If Name empty: $('ClassName'). If ClassName empty: $('//*[@Name="name"]').`;
+    ? `Locator strategy: prefer driver.$('~automationId') (accessibility id, ~ prefix). Fall back to driver.$('//*[@Name="name"]') then driver.$('//*[@ClassName="className"]').`
+    : `Locator strategy: always use XPath — driver.$('//*[@ClassName="cls" and @Name="name"]'). If Name empty: driver.$('//*[@ClassName="cls"]'). If ClassName empty: driver.$('//*[@Name="name"]'). If both empty: driver.$('~automationId'). NEVER fabricate a locator.`;
+
+  const screenIds = [...new Set(eventList.map(e => e.screenId).filter(Boolean))];
+  const multiScreen = screenIds.length > 1
+    ? `\nMultiple screens detected: ${JSON.stringify(screenIds)}. Create one Page class per screenId as instructed in the system prompt.`
+    : '';
+  const hasPopup = eventList.some(e => e.isPopup);
+  const popupNote = hasPopup
+    ? `\nSession contains popup events (isPopup:true). Apply switchToWindow() pattern from system prompt.`
+    : '';
 
   return `Application: "${appName}", platform: ${platform}.
-Describe block name: "${className}".
-Launch: ${launchLine}
-Window title for root attach: "${windowTitle}"
-${locatorRule}
+Describe block title: "${className}".
+Page class name: ${base}Page${strategy === 'id' ? 'ById' : 'ByClass'}.
+Launch statement for beforeAll() Step 1 — copy verbatim:
+  ${launchLine}
+Window title for root session XPath in beforeAll(): "${windowTitle}"
+(Use as-is — may be non-English; do NOT translate or anglicize.)
 
-For each event, emit: console.log('[STEP n]...') then the wdio action.
-Recorded session:
+${locatorRule}${multiScreen}${popupNote}
+
+Recorded session — convert EVERY event into a Page method + it() step:
+- click / doubleClick / rightClick → all map to element.click() (WinAppDriver limitation)
+- type → element.setValue(value). Split on '\\n' and send Enter between segments if needed.
+- scroll → driver.action('wheel').move({...}).scroll({...}).perform()
+- coordinate fallback (locatorFallback == "coordinate") → driver.action('pointer').move({x,y}).down().up().perform()
+
 ${JSON.stringify(eventList, null, 2)}
 
-Output ONLY the JavaScript source. Start with: import { remote } from 'webdriverio';`;
+Output ONLY the JavaScript source. Start directly with: import { remote } from 'webdriverio';`;
 }
 
 function groqGenerateWdio(apiKey, strategy, appName, platform, eventList, exePath) {
@@ -478,7 +556,7 @@ function groqGenerateWdio(apiKey, strategy, appName, platform, eventList, exePat
 }
 
 app.post("/api/generate", async (req, res) => {
-  const { appName, platform, framework = "appium" } = req.body;
+  const { appName, platform, framework = "wdio" } = req.body;
   const name = appName || sessionInfo.appName || "MyApp";
   const plat = platform || sessionInfo.platform || "Windows";
   const exe = req.body.exePath || sessionInfo.exePath || "";
@@ -538,8 +616,7 @@ app.post("/api/generate", async (req, res) => {
           { filename: `${base}TestByClass.js`, content: byClass },
         ],
       };
-      const wdioOutDir = path.join(__dirname, '..', 'generated-wdio');
-      const { savedPaths, saveError } = saveFiles(payload.files, wdioOutDir);
+      const { savedPaths, saveError } = saveFiles(payload.files, WDIO_OUT_DIR);
       payload.savedPaths = savedPaths;
       if (saveError) payload.saveError = saveError;
     } else {
