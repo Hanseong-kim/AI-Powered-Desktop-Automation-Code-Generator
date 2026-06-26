@@ -317,6 +317,7 @@ class Recorder:
         self.session = {"appName": app_name, "exePath": exe_path, "platform": platform}
         self.event_count = 0
         self.target_hwnds = set()
+        self._popup_hwnds = set()
 
         # Snapshot visible top-level windows BEFORE launching, so discovery can
         # diff to find the new window(s) the target opens (locale-independent).
