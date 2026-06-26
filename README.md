@@ -238,3 +238,35 @@ Both `.java` files conform to:
 Toolbar/button clicks in Paint work, but **freehand canvas drawing (mouse drag) cannot be
 replayed** — it requires W3C mouse Actions, which WinAppDriver rejects. Use **Notepad** or
 **Calculator** for end-to-end demos; treat Paint as click-only.
+
+---
+
+## App Support Tiers
+
+The automation engine uses a three-tier strategy based on how much the app exposes via Windows UI Automation (UIA):
+
+| Tier | App Types | Detection | Locator Strategy |
+|------|-----------|-----------|------------------|
+| 1 — Win32/WPF | Calculator, Notepad, Registry Editor, IDM | UIA tree fully available | automationId → name → className → coordinate fallback |
+| 2 — Qt | Many Qt-based desktop apps | Partial UIA tree | Mixed: selector when available, coordinate fallback |
+| 3 — Electron | VSCode, Claude Desktop, FDM, GitHub Desktop | Window class `Chrome_WidgetWin*` | Coordinate-only (relX/relY relative to window origin) |
+
+### Coordinate replay
+
+All pointer events carry `relX`/`relY` (window-relative coordinates) so tests can replay even when element selectors are unavailable. The generated WDIO code uses:
+
+```javascript
+await driver.action('pointer')
+  .move({ x: relX, y: relY, origin: 'viewport' })
+  .down().up()
+  .perform();
+```
+
+For Tier 1/2 apps, selector-based clicks are generated when a stable locator exists. Tier 3 always uses coordinates.
+
+### Known limitations
+
+- Window must be at the same position/size as during capture for coordinate replay to be accurate.
+  The generated `beforeAll` restores the window rect automatically when `session_meta` captures it.
+- Multi-monitor setups: coordinates are always relative to the window origin (not the screen), so
+  moving the window between monitors between capture and replay will break coordinate tests.
