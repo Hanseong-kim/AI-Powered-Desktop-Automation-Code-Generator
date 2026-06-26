@@ -301,6 +301,7 @@ class Recorder:
         self._kb_listener = None
         self._worker = None
         self._stop_flag = threading.Event()
+        self._watcher = None          # background window-discovery thread
 
         # worker-side state
         self._last_left_click = None  # timing/pos of previous left click (dbl-click)
@@ -340,6 +341,8 @@ class Recorder:
 
         self._worker = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker.start()
+        self._watcher = threading.Thread(target=self._watch_windows, daemon=True)
+        self._watcher.start()
 
         # Hooks: callbacks ONLY enqueue raw data and return immediately,
         # so the OS input pipeline is never blocked.
@@ -366,6 +369,8 @@ class Recorder:
                 pass
         if self._worker:
             self._worker.join(timeout=5)
+        if self._watcher:
+            self._watcher.join(timeout=2)
         log("Recording stopped")
         return True, "Recording stopped"
 
@@ -463,6 +468,36 @@ class Recorder:
                 f"title='{win32gui.GetWindowText(fg)}'")
         else:
             log("[target] discovery failed — filtering disabled (accept all)")
+
+    def _watch_windows(self):
+        """Background thread: poll for new top-level windows owned by target
+        process PIDs and auto-add them to target_hwnds. Fixes the bug where
+        popup/child windows opened after recording started were silently
+        filtered by _point_is_target()."""
+        if not self.proc:
+            return
+        launch_pid = self.proc.pid
+
+        while not self._stop_flag.is_set():
+            try:
+                target_pids = {launch_pid}
+                for hwnd in list(self.target_hwnds):
+                    p = pid_of_hwnd(hwnd)
+                    if p:
+                        target_pids.add(p)
+                for hwnd in visible_toplevel_windows():
+                    if hwnd in self.target_hwnds:
+                        continue
+                    if pid_of_hwnd(hwnd) in target_pids:
+                        self.target_hwnds.add(hwnd)
+                        try:
+                            title = win32gui.GetWindowText(hwnd)
+                            log(f"[watcher] added hwnd={hwnd} title='{title}'")
+                        except Exception:
+                            log(f"[watcher] added hwnd={hwnd}")
+            except Exception:
+                pass
+            time.sleep(0.5)
 
     # ---------------- worker (UIA lookups + emission happen here) ----------
     def _worker_loop(self):
@@ -696,6 +731,9 @@ class Recorder:
         if is_popup:
             event["isPopup"] = True
             event["popupTitle"] = popup_title
+        raw_root = elem.get("rootHwnd", 0)
+        if raw_root:
+            event["rootHwndHex"] = "0x" + format(raw_root, 'X')
         if value is not None:
             event["value"] = value
         if delta is not None:
