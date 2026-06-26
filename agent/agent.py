@@ -680,6 +680,16 @@ class Recorder:
         self._emit(action, self._inspect(ins, x, y), x=x, y=y)
 
     # ---------------- emission ----------------
+    def _get_win_rect(self, hwnd):
+        """Return (left, top, width, height) for hwnd, or None on failure."""
+        try:
+            if hwnd:
+                left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+                return left, top, right - left, bottom - top
+        except Exception:
+            pass
+        return None
+
     def _emit(self, action, elem, x=None, y=None, value=None, delta=None):
         elem = elem or {}
         # Application filtering by top-level window handle.
@@ -740,6 +750,23 @@ class Recorder:
             event["delta"] = delta
         if x is not None:
             event["x"], event["y"] = int(x), int(y)
+            root_hwnd_for_rect = elem.get("rootHwnd", 0)
+            if not root_hwnd_for_rect and self.target_hwnds:
+                root_hwnd_for_rect = next(iter(self.target_hwnds))
+            rect = self._get_win_rect(root_hwnd_for_rect)
+            if rect is not None:
+                win_left, win_top, win_w, win_h = rect
+                rel_x = max(0, int(x) - win_left)
+                rel_y = max(0, int(y) - win_top)
+                if int(x) < win_left or int(y) < win_top:
+                    log(f"[coords] clamped negative rel coords for {action} "
+                        f"abs=({int(x)},{int(y)}) win=({win_left},{win_top})")
+                event["relX"] = rel_x
+                event["relY"] = rel_y
+                event["winLeft"] = win_left
+                event["winTop"] = win_top
+                event["winWidth"] = win_w
+                event["winHeight"] = win_h
 
         # screenId: sanitized window title — groups events by UI context
         raw_title = event["element"].get("windowTitle", "") or self.session.get("appName", "")
