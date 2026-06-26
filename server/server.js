@@ -306,6 +306,7 @@ function _javaLocClass(el) {
 }
 
 function buildUserPrompt(strategy, appName, platform, eventList, exePath = "") {
+  eventList = eventList.filter(e => e.action !== 'session_meta');
   const p = PLATFORM_MAP[platform] || PLATFORM_MAP.Windows;
   const raw = appName.replace(/[^A-Za-z0-9]/g, "") || "MyApp";
   const className = `${raw.charAt(0).toUpperCase() + raw.slice(1)}Test${strategy === "id" ? "ById" : "ByClass"}`;
@@ -463,6 +464,7 @@ MULTI-SCREEN PAGE OBJECTS: Events carry a "screenId" field (sanitized window tit
   If all events share one screenId, use a single Page class.`;
 
 function buildPlaywrightPrompt(appName, platform, eventList) {
+  eventList = eventList.filter(e => e.action !== 'session_meta');
   const safeName = (appName || "myapp").replace(/[^a-z0-9]/gi, "_").toLowerCase();
   return `Application: "${appName}" on ${platform}.
 Test function name: test_${safeName}_flow
@@ -585,7 +587,6 @@ function buildWdioPrompt(strategy, appName, platform, eventList, exePath) {
           : _wdioSelector(e.element));
     const isEditable = EDITABLE_CONTROL_TYPES.has(e.element?.controlType);
     const isElectron = e.isElectron === true;
-    const hasCoord = e.relX !== undefined && e.relY !== undefined;
     const useCoord = isElectron || !sel;
     return { ...e, _selector: sel, _isEditable: isEditable, _useCoord: useCoord };
   });
