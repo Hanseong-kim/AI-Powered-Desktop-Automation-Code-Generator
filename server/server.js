@@ -648,11 +648,10 @@ app.post("/api/generate", async (req, res) => {
       payload.savedPaths = savedPaths;
       if (saveError) payload.saveError = saveError;
     } else if (framework !== 'wdio') {
-      const subdir = buildJavaSubdir(name, slim);
-      const javaOutDir = path.join(TESTRUNNER_JAVA_DIR, subdir);
-      const { savedPaths, saveError } = saveFiles(payload.files, javaOutDir);
+      // Save directly to TESTRUNNER_JAVA_DIR — no subdir — so package com.qaforge.tests
+      // matches the directory path. Subdirs break the Java compiler (package mismatch).
+      const { savedPaths, saveError } = saveFiles(payload.files, TESTRUNNER_JAVA_DIR);
       payload.savedPaths = savedPaths;
-      payload.subdir = subdir;
       if (saveError) payload.saveError = saveError;
     }
     broadcast("generation", { status: "success", files: payload.files.map(f => f.filename) });
