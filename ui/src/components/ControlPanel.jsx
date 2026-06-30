@@ -3,11 +3,10 @@ import React from 'react';
 const PLATFORMS = ['Windows', 'Android', 'iOS'];
 const FRAMEWORKS = [
   { value: 'wdio', label: 'WebdriverIO JavaScript (v9)' },
-  { value: 'appium', label: 'Appium Java (TestNG)' },
   { value: 'playwright', label: 'Playwright Python' },
 ];
 const PRESETS = [
-  { label: 'Calculator',       appName: 'Calculator',       exePath: 'C:\\Windows\\System32\\calc.exe' },
+  { label: 'Calculator',       appName: 'Calculator',       exePath: 'Microsoft.WindowsCalculator_8wekyb3d8bbwe!App' },
   { label: 'Notepad',          appName: 'Notepad',          exePath: 'C:\\Windows\\System32\\notepad.exe' },
   // UWP app: launch by AUMID (Get-StartApps AppID), not a versioned WindowsApps
   // exe path. The agent + generated code detect the "!" and launch via

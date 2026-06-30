@@ -743,6 +743,17 @@ class Recorder:
 
         # Popup detection: element belongs to a top-level window that is NOT the main app window
         root_hwnd = elem.get("rootHwnd", 0)
+        # Electron fallback: only when rootHwnd=0 AND the event's pointer is over a
+        # known target window. This prevents native dialogs (e.g. "폴더 열기") whose
+        # some elements return hwnd=0 from being misclassified as Electron.
+        if root_hwnd == 0 and x is not None:
+            top_at_point = top_window_at(x, y)
+            if top_at_point in self.target_hwnds:
+                root_hwnd_for_class = top_at_point
+            else:
+                root_hwnd_for_class = 0   # unknown window — don't force Electron
+        else:
+            root_hwnd_for_class = root_hwnd
         is_popup = (
             bool(root_hwnd)
             and root_hwnd in self._popup_hwnds
@@ -754,12 +765,11 @@ class Recorder:
             except Exception:
                 popup_title = elem.get("windowTitle", "")
 
-        # Electron detection: force coordinate locator for Electron apps
-        is_electron = self._is_electron(root_hwnd)
-        if is_electron:
-            elem = dict(elem)  # don't mutate the passed-in dict
-            elem["locatorFallback"] = "coordinate"
-            elem["locatorStrategy"] = "coordinate"
+        # Electron detection: annotate only — do NOT override UIA locator.
+        # UIA properties (automationId, name, xpath) remain primary.
+        # The captured (x, y) / (relX, relY) serve as fallback_coordinates in
+        # generated code (try el.click() first → coordinate touch action on failure).
+        is_electron = self._is_electron(root_hwnd_for_class)
 
         event = {
             "action": action,
