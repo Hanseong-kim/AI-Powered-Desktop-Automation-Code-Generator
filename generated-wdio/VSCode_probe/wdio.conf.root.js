@@ -1,0 +1,22 @@
+export const config = {
+  runner: 'local',
+  specs: ['./probe_root_session.js'],
+  exclude: [],
+  maxInstances: 1,
+  capabilities: [{
+    platformName: 'Windows',
+    'appium:automationName': 'Windows',
+    'appium:app': 'Root',
+    'appium:newCommandTimeout': 60000,
+    'appium:connectHardwareKeyboard': false,
+  }],
+  hostname: '127.0.0.1',
+  port: 4723,
+  path: '/',
+  framework: 'jasmine',
+  jasmineOpts: { defaultTimeoutInterval: 120000 },
+  reporters: ['spec'],
+  services: ['appium'],
+  appium: { command: 'appium', args: ['--allow-insecure', 'winappdriver'] },
+  injectGlobals: true,
+};

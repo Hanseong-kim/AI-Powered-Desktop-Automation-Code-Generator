@@ -18,16 +18,13 @@ cd agent; python agent.py
 # Terminal 3 — React UI
 cd ui; npm start                                   # http://localhost:3000
 
-# Run generated tests (WinAppDriver must be running at 4723 first)
-cd test-runner
-$env:JAVA_HOME = "C:\Program Files\Eclipse Adoptium\jdk-11.0.31.11-hotspot"
-mvn test
+# Run generated tests (Appium auto-starts, WinAppDriver at 4723 not needed separately)
+cd generated-wdio
+npx wdio run Calculator/wdio.conf.js               # 폴더 이름 = PascalCase 앱 이름
+npx wdio run Notepad/wdio.conf.js
 
 # Regression (no agent needed, server must be running)
 python agent/mock_events.py                        # expect 35/35 non-Groq checks
-
-# Compile loop (3 consecutive BUILD SUCCESS target, needs .env GROQ_API_KEY)
-python agent/compile_loop.py
 ```
 
 `.env` at repo root (gitignored): `GROQ_API_KEY=gsk_...`
@@ -43,15 +40,13 @@ React UI (3000) --HTTP--> Express (3002) --HTTP--> Python Agent (4444)
 ```
 
 Key files:
-- `server/server.js` — SYSTEM_PROMPT, `/api/generate` (sequential ById→ByClass, 4s gap)
+- `server/server.js` — `/api/generate` (template-based, no LLM); saves to `generated-wdio/<AppName>/`
 - `agent/agent.py` — pynput hooks → raw_queue → worker thread (UIA/COM)
 - `ui/src/components/ControlPanel.jsx` — presets: Calculator/Notepad/Paint/Registry Editor/Custom
+- `generated-wdio/<AppName>/wdio.conf.js` — generated per app (run with `npx wdio run <AppName>/wdio.conf.js`)
 
 Agent two-thread rule: pynput callbacks enqueue raw dicts only (never UIA).
 All UIA/COM runs on the worker thread after `CoInitialize`.
-
-SYSTEM_PROMPT driver init: ProcessBuilder launch → Root session → `By.name(windowTitle)`
-→ `NativeWindowHandle` → `appTopLevelWindow` hex string. Covers Win32 + UWP.
 
 ---
 
@@ -60,33 +55,36 @@ SYSTEM_PROMPT driver init: ProcessBuilder launch → Root session → `By.name(w
 - **Groq model**: `llama-3.3-70b-versatile` always. 8b is banned (code quality = 25% grade).
 - **API key**: never hardcode/print. UI uses `req.body.apiKey`; `.env` is script-only fallback.
 - **pynput callbacks**: enqueue + return immediately. No UIA/COM inside hooks.
-- **Java files**: `package com.qaforge.tests`, TestNG `@BeforeClass/@Test/@AfterClass`,
-  Page Object Model, `WebDriverWait(15s)`, no `Thread.sleep`, no TODOs, `System.out.println` steps.
-- **File naming**: public class name == filename (PascalCase). Server enforces this.
-- **Regression gates**: mock_events 35/35 non-Groq checks, compile_loop 3× BUILD SUCCESS.
+- **File naming**: PascalCase app name → subfolder name. Server enforces this.
+- **No Java**: test-runner 삭제됨. Java/TestNG 코드 생성 없음. WdIO + Playwright only.
+- **Regression gates**: mock_events 35/35 non-Groq checks.
 - **Documentation honesty**: never write GUI-unverified work as "DONE" in docs.
 
 ---
 
 ## 4. Current Status  *(update every session)*
 
-**Verified (GUI + mvn test):**
-- Notepad end-to-end: type capture → Generate → `mvn test` → BUILD SUCCESS (Tests run: 2)
-- All 6 grading criteria implemented
+**Verified (GUI + npx wdio) — session 13:**
 
-**Code-complete, GUI not yet re-verified:**
-- Calc click fix (session 11): `_is_target_pid` exe stem matching — "calc" ⊂ "calculatorapp"
-  → language-independent UWP process identification. `_emit` now logs `[skip]` when filtering.
-- Enter newline (session 10): `\n` appended to type buffer before flush.
-- TreeWalker fallback (session 10): deepens element resolution when automationId empty.
-- Non-input key filter (session 10): Button/etc. keystrokes ignored — prevents UWP synthetic keys.
-- Presets: WordPad removed (Win11 24H2), Registry Editor added.
+| App | Test | Result | Elapsed |
+|-----|------|--------|---------|
+| Calculator | `npx wdio run Calculator/wdio.conf.js` | **2 passed** | 46s (36s test) |
+| VSCode (mock) | `npx wdio run VSCode/wdio.conf.js` | **1 passed** | 288s* |
+
+*VSCode 288s is mock-only: native dialog not open → Root scan × 4 = ~240s timeout overhead.
+In real use (dialog open), Root scan finds hwnd in one query (~5-30s), then cached for remaining steps.
+
+**Architecture change (session 13):**
+- `needsSessionSwitching(events)`: single-window non-Electron → `appium:app: exePath` (simple); multi-window or Electron → `appium:app: 'Root'` + `getWindowSession` + `getCenter` + `osClick`
+- `afterAll()` (not `after()`) — Jasmine does not define `after()`, caused SKIPPED (0 its registered)
+- Electron events bypass `getWindowSession` — use captured `osClick(x,y)` directly (hwnd=0 for web content)
+- test-runner 폴더 삭제 (Java/TestNG 완전 제거)
+- Calculator preset exePath → AUMID로 수정
 
 **Next actions:**
-1. Restart agent (Admin) → click Calculator button → verify `#N click id='num2Button'` in log.
-2. Test notepad "line1[Enter]line2" → verify two lines captured.
-3. Confirm no `[skip]` log entries for target app events.
-4. Check `INPUT_CONTROL_TYPES` if typing in new apps is silently dropped
+1. Run VSCode full flow with VSCode + 폴더 열기 dialog actually open → measure real timing.
+2. Notepad regression: regenerate + `npx wdio run Notepad/wdio.conf.js`.
+3. Check `INPUT_CONTROL_TYPES` if typing in new apps is silently dropped
    (current set: `{"Edit", "Document", "ComboBox"}`).
 
 **Risk:** If a text area's `controlType` is not in `INPUT_CONTROL_TYPES`, typing is filtered.

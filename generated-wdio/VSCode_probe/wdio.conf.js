@@ -1,0 +1,22 @@
+export const config = {
+  runner: 'local',
+  specs: ['./probe_*.js'],
+  exclude: [],
+  maxInstances: 1,
+  capabilities: [{
+    platformName: 'Windows',
+    'appium:automationName': 'Windows',
+    'appium:app': 'C:\\Users\\user\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe',
+    'appium:newCommandTimeout': 60000,
+    'appium:connectHardwareKeyboard': false,
+  }],
+  hostname: '127.0.0.1',
+  port: 4723,
+  path: '/',
+  framework: 'jasmine',
+  jasmineOpts: { defaultTimeoutInterval: 30000 },
+  reporters: ['spec'],
+  services: ['appium'],
+  appium: { command: 'appium', args: ['--allow-insecure', 'winappdriver'] },
+  injectGlobals: true,
+};
