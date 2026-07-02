@@ -8,6 +8,8 @@
     "test:byclass": "wdio run wdio.conf.js --spec ./*TestByClass.js"
   },
   "dependencies": {
+    "@playwright/test": "^1.61.1",
+    "robotjs": "^0.7.1",
     "webdriverio": "^9.0.0"
   },
   "devDependencies": {
@@ -18,5 +20,10 @@
     "@wdio/spec-reporter": "^9.0.0",
     "appium": "^3.5.2",
     "appium-windows-driver": "^6.0.3"
-  }
+  },
+  "description": "",
+  "main": "wdio.conf.js",
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
 }

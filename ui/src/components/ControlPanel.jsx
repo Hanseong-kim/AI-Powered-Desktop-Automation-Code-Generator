@@ -18,9 +18,8 @@ const PRESETS = [
   // If your Windows profile is not "user", select "Custom..." and enter the correct path.
   { label: 'VSCode',           appName: 'VSCode',           exePath: 'C:\\Users\\user\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe' },
   { label: 'GitHub Desktop',  appName: 'GitHubDesktop',    exePath: 'C:\\Users\\user\\AppData\\Local\\GitHubDesktop\\GitHubDesktop.exe' },
-  { label: 'Free Download Manager', appName: 'FreeDM',       exePath: 'C:\\Program Files\\Free Download Manager\\fdm.exe' },
-  // NOTE: username hardcoded to "user" — same limitation as VSCode preset
-  { label: 'Claude Desktop',        appName: 'ClaudeDesktop', exePath: 'C:\\Users\\user\\AppData\\Local\\AnthropicClaude\\claude.exe' },
+  { label: 'Free Download Manager', appName: 'FreeDM',       exePath: 'C:\\Program Files\\Softdeluxe\\Free Download Manager\\fdm.exe' },
+  { label: 'Claude Desktop',        appName: 'ClaudeDesktop', exePath: 'Claude_pzs8sxrjxfjjc!Claude' },
   { label: 'Custom...',        appName: '',                 exePath: '' },
 ];
 

@@ -105,7 +105,22 @@ class UIAInspector:
         elem = self._uia.ElementFromPoint(pt)
         if elem is not None:
             try:
-                if not elem.CurrentAutomationId:
+                needs_deepen = not elem.CurrentAutomationId
+                if not needs_deepen:
+                    # QML은 컨테이너에도 AutomationId를 채우므로 ID 존재만으로는
+                    # leaf 요소라고 보장 못 함 — bounding rect가 크거나
+                    # ControlType이 컨테이너 계열이면 ID가 있어도 계속 파고든다.
+                    try:
+                        rect = elem.CurrentBoundingRectangle
+                        w = rect.right - rect.left
+                        h = rect.bottom - rect.top
+                        ct = elem.CurrentControlType
+                        container_types = {50021, 50033, 50026, 50008}  # ToolBar, Pane, Group, List
+                        if ct in container_types or w > 80 or h > 80:
+                            needs_deepen = True
+                    except Exception:
+                        pass
+                if needs_deepen:
                     deeper = self._deepen(elem, int(x), int(y))
                     if deeper is not None:
                         try:
@@ -118,8 +133,15 @@ class UIAInspector:
         return elem
 
     def _deepen(self, elem, x, y, depth=0):
-        """Walk ControlView tree to find the deepest child containing (x, y)."""
-        if depth >= 5:
+        """Walk ControlView tree to find the deepest child containing (x, y).
+        Depth cap was 5, tuned for WPF/UWP trees. Chromium/Electron a11y trees
+        nest list rows much deeper (row wrapper > flex container > icon/text
+        spans, ...), so a click on dynamic content (chat history rows, header
+        icons) hit the cap before reaching the actual leaf and fell back to
+        reporting the whole scroll container ("사이드바") as the clicked
+        element — static top-level buttons (shallower trees) were unaffected,
+        which is why only some clicks showed the wrong element."""
+        if depth >= 15:
             return None
         try:
             walker = self._uia.ControlViewWalker
@@ -158,6 +180,11 @@ class UIAInspector:
             "rootHwnd": 0,
             "locatorStrategy": "",   # NEW
             "locatorValue": "",      # NEW
+            "rect": None,            # DIAGNOSTIC: (left, top, right, bottom) of the
+                                      # matched element — lets [click] log lines show
+                                      # whether the click point actually falls inside
+                                      # the returned element's bounds (UIA hit-test
+                                      # bug) or not (coordinate-capture bug).
         }
         if elem is None:
             return info
@@ -180,6 +207,14 @@ class UIAInspector:
             info["hwnd"] = elem.CurrentNativeWindowHandle or 0
         except Exception:
             pass
+        try:
+            r = elem.CurrentBoundingRectangle
+            info["rect"] = (r.left, r.top, r.right, r.bottom)
+        except Exception as e:
+            # DIAGNOSTIC: keep the reason instead of silently swallowing it —
+            # rect coming back None every single time (as opposed to
+            # occasionally) means this is failing structurally, not per-element.
+            info["rect"] = f"ERR:{type(e).__name__}:{e}"
 
         # Window title: walk up to the top-level window
         hwnd = info["hwnd"]
@@ -297,6 +332,13 @@ class Recorder:
         self.target_hwnds = set()    # top-level window handles owned by the target
         self._popup_hwnds = set()    # windows discovered by watcher (always treated as popups)
         self._pre_hwnds = set()      # visible top-levels snapshotted before launch
+        # Wall-clock time _discover_target_windows() finished resolving
+        # target_hwnds (real match or fallback). Mouse/keyboard hooks are live
+        # from recording=True, i.e. BEFORE this resolves — any raw event
+        # captured earlier (item["ts"] < this) was captured against a
+        # not-yet-final target_hwnds (the app window may not even exist yet)
+        # and is dropped in _emit(), regardless of when it's later processed.
+        self._discovery_done_ts = 0.0
 
         self._mouse_listener = None
         self._kb_listener = None
@@ -383,13 +425,23 @@ class Recorder:
     def _on_click(self, x, y, button, pressed, injected=False):
         if not self.recording or not pressed or injected:
             return
+        # DIAGNOSTIC (A vs B investigation): GetCursorPos() read right here,
+        # alongside pynput's own (x, y), to see if the two coordinate spaces
+        # ever disagree at capture time.
+        cursor_pt = wintypes.POINT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(cursor_pt))
         self.raw_queue.put({"kind": "click", "x": x, "y": y,
+                            "cursor_x": cursor_pt.x, "cursor_y": cursor_pt.y,
                             "button": button.name, "ts": time.time()})
 
     def _on_scroll(self, x, y, dx, dy, injected=False):
+        log(f"[scroll-raw] x={x} y={y} dy={dy} injected={injected} recording={self.recording}")
         if not self.recording or injected:
             return
+        cursor_pt = wintypes.POINT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(cursor_pt))
         self.raw_queue.put({"kind": "scroll", "x": x, "y": y,
+                            "cursor_x": cursor_pt.x, "cursor_y": cursor_pt.y,
                             "dy": dy, "ts": time.time()})
 
     def _on_key(self, key, injected=False):
@@ -413,11 +465,11 @@ class Recorder:
         # whose hwnd->pid->exe chain doesn't match the launch pid. Accept and cache
         # the hwnd if the window title contains the app name (stripped to alnum).
         app_key = re.sub(r'[^a-z0-9]', '', self.session.get("appName", "").lower())
-        if app_key:
+        if app_key and top:
             try:
                 raw_title = win32gui.GetWindowText(top)
                 title_key = re.sub(r'[^a-z0-9]', '', raw_title.lower())
-                if app_key in title_key or title_key in app_key:
+                if title_key and (app_key in title_key or title_key in app_key):
                     self.target_hwnds.add(top)
                     log(f"[target] title-match hwnd={top} title='{raw_title}' accepted")
                     return True
@@ -436,21 +488,38 @@ class Recorder:
         the pre-launch snapshot). Also accept windows owned by the launch pid
         (classic Win32). Fallback: the current foreground top-level window."""
         launch_pid = self.proc.pid if self.proc else 0
+        # Same fuzzy title match used by _point_is_target()'s title-match
+        # fallback. A "newly-appeared titled window" alone is NOT a reliable
+        # signal for AUMID/UWP launches — transient system UI (Alt+Tab task
+        # switcher, UAC prompt) also satisfies it and can steal target_hwnds
+        # before the real app window appears, silently dropping every real
+        # click afterward. Windows we can positively tie to the launched
+        # process (pid match) are trusted regardless of title; windows we
+        # only know are "new" must also title-match appName.
+        app_key = re.sub(r'[^a-z0-9]', '', self.session.get("appName", "").lower())
         deadline = time.time() + DISCOVER_TIMEOUT
         while time.time() < deadline and not self._stop_flag.is_set():
             current = visible_toplevel_windows()
             found = set()
             for hwnd in current:
-                # newly-appeared, titled top-level window (UWP + most apps)
-                if hwnd not in self._pre_hwnds:
-                    try:
-                        if win32gui.GetWindowText(hwnd).strip():
-                            found.add(hwnd)
-                    except Exception:
-                        pass
-                # window owned by the launched process (classic Win32)
+                # window owned by the launched process (classic Win32) — trusted as-is
                 if launch_pid and pid_of_hwnd(hwnd) == launch_pid:
                     found.add(hwnd)
+                    continue
+                # newly-appeared, titled top-level window (UWP + most apps) —
+                # only trust it if the title actually relates to the target app.
+                if hwnd not in self._pre_hwnds:
+                    try:
+                        raw_title = win32gui.GetWindowText(hwnd).strip()
+                        if not raw_title:
+                            continue
+                        title_key = re.sub(r'[^a-z0-9]', '', raw_title.lower())
+                        if app_key and title_key and (app_key in title_key or title_key in app_key):
+                            found.add(hwnd)
+                        else:
+                            log(f"[target] ignoring unrelated new window hwnd={hwnd} title='{raw_title}'")
+                    except Exception:
+                        pass
             if found:
                 self.target_hwnds |= found
                 titles = []
@@ -460,6 +529,7 @@ class Recorder:
                     except Exception:
                         titles.append("")
                 log(f"[target] hwnds={self.target_hwnds} titles={titles}")
+                self._discovery_done_ts = time.time()
                 return
             time.sleep(0.2)
 
@@ -470,6 +540,7 @@ class Recorder:
                 f"title='{win32gui.GetWindowText(fg)}'")
         else:
             log("[target] discovery failed — filtering disabled (accept all)")
+        self._discovery_done_ts = time.time()
 
     def _watch_windows(self):
         """Background thread: poll for new top-level windows owned by target
@@ -548,36 +619,53 @@ class Recorder:
             self._flush_pending_scroll()
 
             x, y, btn, ts = item["x"], item["y"], item["button"], item["ts"]
+            # Position unified on GetCursorPos() (virtualized) coordinates,
+            # not pynput's (physical) x,y — this process stays DPI-unaware,
+            # so virtualized is what GetWindowRect() and every other
+            # non-hook Win32 API on this process already agree on; pynput's
+            # low-level hook was the odd one out. Inspect AND emit (stored/
+            # replayed x,y) now both use the same (cx, cy) — no more split.
+            cx = item.get("cursor_x", x)
+            cy = item.get("cursor_y", y)
 
             if btn == "right":
                 self._flush_pending_click()
-                self._emit_pointer_event("rightClick", x, y, ins)
+                self._emit_pointer_event("rightClick", cx, cy, ins, ts)
                 return
 
             # Every left click is recorded individually (preserves repeated
             # presses like "9999" -> num9Button x4). A genuine fast double-click
             # is recognised IN ADDITION, never by merging/dropping the clicks.
-            elem = self._inspect(ins, x, y)
-            self._emit("click", elem, x=x, y=y)
+            elem = self._inspect(ins, cx, cy)
+            # DIAGNOSTIC (kept for verification) — pynput_pt vs cursor_pt and
+            # the resolved element name, so a re-recording can be eyeballed.
+            gap = time.time() - ts
+            delta = (x - cx, y - cy)
+            log(f"[diag-click] pynput_pt=({x},{y}) cursor_pt=({cx},{cy}) "
+                f"delta={delta} gap={gap:.4f}s "
+                f"elem_name='{elem.get('name', '')}' elem_rect={elem.get('rect')}")
+            self._emit("click", elem, x=cx, y=cy, ts=ts)
 
             ll = self._last_left_click
             if (ll and ts - ll["ts"] <= DOUBLE_CLICK_INTERVAL
-                    and abs(x - ll["x"]) <= DOUBLE_CLICK_RADIUS
-                    and abs(y - ll["y"]) <= DOUBLE_CLICK_RADIUS):
-                self._emit("doubleClick", elem, x=x, y=y)
+                    and abs(cx - ll["x"]) <= DOUBLE_CLICK_RADIUS
+                    and abs(cy - ll["y"]) <= DOUBLE_CLICK_RADIUS):
+                self._emit("doubleClick", elem, x=cx, y=cy, ts=ts)
                 self._last_left_click = None  # consume; avoid chaining triples
             else:
-                self._last_left_click = {"x": x, "y": y, "ts": ts}
+                self._last_left_click = {"x": cx, "y": cy, "ts": ts}
             return
 
         if kind == "scroll":
             self._flush_type_buffer()
             self._flush_pending_click()
             x, y, ts = item["x"], item["y"], item["ts"]
+            cx = item.get("cursor_x", x)
+            cy = item.get("cursor_y", y)
             if self._pending_scroll is None:
-                self._pending_scroll = {"x": x, "y": y, "ts": ts,
+                self._pending_scroll = {"x": cx, "y": cy, "ts": ts,
                                         "amount": item["dy"],
-                                        "elem": self._inspect(ins, x, y)}
+                                        "elem": self._inspect(ins, cx, cy)}
             else:
                 self._pending_scroll["amount"] += item["dy"]
                 self._pending_scroll["ts"] = ts
@@ -669,7 +757,7 @@ class Recorder:
         ps, self._pending_scroll = self._pending_scroll, None
         if ps:
             self._emit("scroll", ps["elem"], x=ps["x"], y=ps["y"],
-                       value=str(ps["amount"]), delta=ps["amount"])
+                       value=str(ps["amount"]), delta=ps["amount"], ts=ps["ts"])
 
     def _flush_type_buffer(self):
         text, self._type_buffer = self._type_buffer, ""
@@ -677,8 +765,8 @@ class Recorder:
         if text:
             self._emit("type", elem or {}, value=text)
 
-    def _emit_pointer_event(self, action, x, y, ins):
-        self._emit(action, self._inspect(ins, x, y), x=x, y=y)
+    def _emit_pointer_event(self, action, x, y, ins, ts=None):
+        self._emit(action, self._inspect(ins, x, y), x=x, y=y, ts=ts)
 
     # ---------------- emission ----------------
     def _get_win_rect(self, hwnd):
@@ -725,13 +813,42 @@ class Recorder:
         except Exception as e:
             log(f"WARN: could not POST session_meta: {e}")
 
-    def _emit(self, action, elem, x=None, y=None, value=None, delta=None):
+    def _emit(self, action, elem, x=None, y=None, value=None, delta=None, ts=None):
         elem = elem or {}
+        # Drop events captured before _discover_target_windows() resolved
+        # target_hwnds. Mouse/keyboard hooks go live at recording=True, before
+        # discovery finishes (up to DISCOVER_TIMEOUT later) — a click in that
+        # gap (e.g. the launched app hasn't rendered its window yet) is only
+        # ever *processed* after discovery completes (single worker thread),
+        # so target_hwnds at processing time looks "resolved" even though it
+        # was meaningless at the moment this event was actually captured.
+        # Comparing the event's own capture timestamp (not "am I being
+        # processed after discovery" — that's always true) is what actually
+        # detects the gap.
+        if action != "type" and ts is not None and ts < self._discovery_done_ts:
+            log(f"[skip] {action} pre-discovery ts={ts:.3f} "
+                f"discovery_done={self._discovery_done_ts:.3f}")
+            return
         # Application filtering by top-level window handle.
         # Pointer events carry (x, y) — filter by the window under the point.
         # `type` events have no point; they were already gated on the
         # foreground window being the target at capture time.
         if action != "type" and x is not None:
+            top = top_window_at(x, y)
+            # The pointer is over a window we can positively identify as NOT
+            # the target and NOT a popup of it (e.g. desktop "Program Manager",
+            # taskbar tray). Skip immediately — do not let the foreground
+            # fallback below wave this through just because the target
+            # happens to still be the foreground window.
+            # top==0 (UWP CoreWindow, GA_ROOT mismatch) stays unknown here,
+            # so it still falls through to the foreground fallback.
+            is_known_other_window = (
+                top != 0 and top not in self.target_hwnds and top not in self._popup_hwnds
+            )
+            if is_known_other_window:
+                log(f"[skip] {action} known-other-window top={top} "
+                    f"title='{win32gui.GetWindowText(top)}' x={x} y={y}")
+                return
             # Accept if the point is over a target window OR the target app is
             # foreground. The OR covers UWP (CoreWindow GA_ROOT != tracked
             # ApplicationFrameWindow, so point matching alone fails) and the
@@ -784,6 +901,7 @@ class Recorder:
                 "locatorFallback": elem.get("locatorFallback", ""),   # NEW
                 "locatorStrategy": elem.get("locatorStrategy", ""),
                 "locatorValue": elem.get("locatorValue", ""),
+                "rect": elem.get("rect"),   # DIAGNOSTIC — see UIAInspector.describe()
             },
             "timestamp": time.time(),
             "app": self.session.get("appName", ""),
@@ -806,8 +924,10 @@ class Recorder:
         if x is not None:
             event["x"], event["y"] = int(x), int(y)
             root_hwnd_for_rect = elem.get("rootHwnd", 0)
+            if not root_hwnd_for_rect and x is not None:
+                root_hwnd_for_rect = top_window_at(int(x), int(y))   # 포인터 아래 실제 창 — 결정적
             if not root_hwnd_for_rect and self.target_hwnds:
-                root_hwnd_for_rect = next(iter(self.target_hwnds))
+                root_hwnd_for_rect = next(iter(self.target_hwnds))    # 최후 폴백
             rect = self._get_win_rect(root_hwnd_for_rect)
             if rect is not None:
                 win_left, win_top, win_w, win_h = rect
@@ -830,9 +950,11 @@ class Recorder:
 
         self.event_count += 1
         event["index"] = self.event_count
+        pt = f" pt=({int(x)},{int(y)})" if x is not None else ""
         log(f"#{self.event_count} {action:11s} "
             f"id='{event['element']['automationId']}' "
             f"name='{event['element']['name'][:30]}'"
+            f" rect={event['element'].get('rect')}{pt}"
             + (f" value='{value}'" if value else ""))
         try:
             requests.post(EXPRESS_EVENTS_URL, json=event, timeout=3)
@@ -897,6 +1019,14 @@ def main():
     log(f"Administrator rights: {'YES' if is_admin else 'NO  <-- element properties will be EMPTY!'}")
     if not is_admin:
         log("Re-run from an Administrator PowerShell for full element inspection.")
+    # DIAGNOSTIC (A vs B investigation): 0=unaware 1=system-aware 2=per-monitor-aware.
+    # Measurement only — no SetProcessDpiAwareness call here.
+    try:
+        awareness = ctypes.c_int()
+        ctypes.windll.shcore.GetProcessDpiAwareness(0, ctypes.byref(awareness))
+        log(f"[diag-dpi] process DPI awareness={awareness.value} (0=unaware 1=system 2=per-monitor)")
+    except Exception as e:
+        log(f"[diag-dpi] GetProcessDpiAwareness failed: {e}")
     ThreadingHTTPServer(("127.0.0.1", AGENT_PORT), Handler).serve_forever()
 
 

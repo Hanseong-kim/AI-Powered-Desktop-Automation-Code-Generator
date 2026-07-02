@@ -221,9 +221,19 @@ function normalizeWindow(frag, left, top, width, height) {
 // directly instead of re-matching by (possibly ambiguous) title.
 async function launchApp(exePath, args, titleFrag, rect) {
     if (!exePath) return;
+    // agent.py is_aumid()와 동일 판정, 대칭 유지 — "PackageFamilyName!AppId"는
+    // 파일 경로가 아니라 explorer shell:AppsFolder로 활성화해야 한다.
+    // spawn(exePath,...)로 직접 넘기면 파일 경로로 오인해 비동기 ENOENT로
+    // 실패하는데, 이 실패는 이 catch 밖(다음 tick)에서 터져 try/catch에
+    // 잡히지 않고 _failures에도 안 찍힌 채 20초 타임아웃만 나는 문제가 있었다.
+    const isAumid = /!/.test(exePath) && !/[\/]/.test(exePath);
     const baseline = new Set(_listWindowHwnds(titleFrag));
     try {
-        spawn(exePath, args, { detached: true, stdio: 'ignore' }).unref();
+        if (isAumid) {
+            spawn('explorer.exe', ['shell:AppsFolder\\' + exePath], { detached: true, stdio: 'ignore' }).unref();
+        } else {
+            spawn(exePath, args, { detached: true, stdio: 'ignore' }).unref();
+        }
     } catch (e) {
         _failures.push('launch');
         console.warn('[launch] failed:', String(e.message || e).substring(0, 100));
@@ -238,7 +248,14 @@ async function launchApp(exePath, args, titleFrag, rect) {
                 console.log(`[launch] tracking new window hwnd=${fresh}`);
             }
         }
-        if (_resolveWinRect(titleFrag)) {
+        // A matched window with width/height 0 is a not-yet-rendered
+        // placeholder (Electron/UWP frame created before content loads,
+        // same hwnd, resized later) — treat it as "not found yet" and keep
+        // polling instead of normalizing/replaying against a window that
+        // isn't really there, which sent every later osClick to whatever
+        // was actually on screen underneath (e.g. the desktop).
+        const liveRect = _resolveWinRect(titleFrag);
+        if (liveRect && liveRect.width > 0 && liveRect.height > 0) {
             if (rect) {
                 normalizeWindow(titleFrag, rect.left, rect.top, rect.width, rect.height);
                 const normalized = _resolveWinRect(titleFrag);
@@ -277,109 +294,42 @@ function osType(text) {
     }
 }
 
-class VSCodePageByClass {
+class ClaudeDesktopPageById {
     async click1() {
-        let s = await getWindowSession('Visual Studio Code');
-        let c = await getCenter(s.sid, s.rootElId, '//*[@ClassName="#32769" and @Name="데스크톱 1"]');
-        if (!c) {
-            delete _sessionIds['Visual Studio Code'];
-            s = await getWindowSession('Visual Studio Code');
-            c = await getCenter(s.sid, s.rootElId, '//*[@ClassName="#32769" and @Name="데스크톱 1"]');
-        }
-        c = c ?? { x: 1615, y: 67 };
-        osClick(c.x, c.y);
+        osClickRel('Claude', 97, 121, 90, 114);
     }
 
     async click2() {
-        osClickRel('시작 - Visual Studio Code', 89, 40, 82, 33);
+        osClickRel('Claude', 662, 408, 655, 401);
     }
 
-    async click3() {
-        osClickRel('시작 - Visual Studio Code', 130, 224, 123, 217);
+    async type3(value) {
+        osType(value);
     }
 
-    async scroll4() {
-        osScrollRel('폴더 열기', 108, 313, 108, 313, -4200);
+    async click4() {
+        osClickRel('Claude', 1094, 464, 1087, 457);
     }
 
     async click5() {
-        let s = await getWindowSession('폴더 열기');
-        let c = await getCenter(s.sid, s.rootElId, '//*[@ClassName="SysTreeView32" and @Name="탐색 창"]');
-        if (!c) {
-            delete _sessionIds['폴더 열기'];
-            s = await getWindowSession('폴더 열기');
-            c = await getCenter(s.sid, s.rootElId, '//*[@ClassName="SysTreeView32" and @Name="탐색 창"]');
-        }
-        c = c ?? { x: 106, y: 357 };
-        osClick(c.x, c.y);
+        osClickRel('Claude', 948, 666, 941, 659);
     }
 
     async click6() {
-        let s = await getWindowSession('폴더 열기');
-        let c = await getCenter(s.sid, s.rootElId, '//*[@ClassName="UIProperty" and @Name="이름"]');
-        if (!c) {
-            delete _sessionIds['폴더 열기'];
-            s = await getWindowSession('폴더 열기');
-            c = await getCenter(s.sid, s.rootElId, '//*[@ClassName="UIProperty" and @Name="이름"]');
-        }
-        c = c ?? { x: 327, y: 192 };
-        osClick(c.x, c.y);
+        osClickRel('Claude', 1233, 473, 1226, 466);
     }
 
     async click7() {
-        osClickRel('폴더 열기', 327, 192, 327, 192);
-    }
-
-    async click8() {
-        osClickRel('폴더 열기', 327, 192, 327, 192, 'left', 2);
-    }
-
-    async click9() {
-        let s = await getWindowSession('폴더 열기');
-        let c = await getCenter(s.sid, s.rootElId, '//*[@ClassName="UIItemsView" and @Name="항목 보기"]');
-        if (!c) {
-            delete _sessionIds['폴더 열기'];
-            s = await getWindowSession('폴더 열기');
-            c = await getCenter(s.sid, s.rootElId, '//*[@ClassName="UIItemsView" and @Name="항목 보기"]');
-        }
-        c = c ?? { x: 302, y: 269 };
-        osClick(c.x, c.y);
-    }
-
-    async click10() {
-        osClickRel('폴더 열기', 302, 269, 302, 269);
-    }
-
-    async click11() {
-        osClickRel('폴더 열기', 302, 269, 302, 269, 'left', 2);
-    }
-
-    async scroll12() {
-        osScrollRel('폴더 열기', 348, 299, 348, 299, -5160);
-    }
-
-    async click13() {
-        let s = await getWindowSession('폴더 열기');
-        let c = await getCenter(s.sid, s.rootElId, '//*[@Name="위치"]');
-        if (!c) {
-            delete _sessionIds['폴더 열기'];
-            s = await getWindowSession('폴더 열기');
-            c = await getCenter(s.sid, s.rootElId, '//*[@Name="위치"]');
-        }
-        c = c ?? { x: 316, y: 369 };
-        osClick(c.x, c.y);
-    }
-
-    async click14() {
-        osClickRel('폴더 열기', 710, 558, 703, 551);
+        osClickRel('Claude', 983, 705, 976, 698);
     }
 }
 
-describe('VSCodeTestByClass', () => {
+describe('ClaudeDesktopTestById', () => {
     beforeAll(async () => {
         const { hostname, port } = browser.options;
         _APPIUM = `http://${hostname || '127.0.0.1'}:${port || 4723}`;
         console.log(`[session] Appium endpoint resolved to ${_APPIUM}`);
+        await launchApp("Claude_pzs8sxrjxfjjc!Claude", [], "Claude", {"left":-7,"top":-7,"width":1550,"height":830});
     });
 
     afterAll(async () => {
@@ -390,36 +340,22 @@ describe('VSCodeTestByClass', () => {
     });
 
     it('should replay recorded flow', async () => {
-        const page = new VSCodePageByClass();
+        const page = new ClaudeDesktopPageById();
 
-            console.log('[STEP 1] click: 데스크톱 1');
+            console.log('[STEP 1] click: 새 채팅');
             await page.click1();
-            console.log('[STEP 2] click: 파일');
+            console.log('[STEP 2] click: 오늘 어떤 도움을 드릴까요?');
             await page.click2();
-            console.log('[STEP 3] click: 편집기를 사용하여 작업 속도를 향상하는 방법에 관한 개요입니다.');
-            await page.click3();
-            console.log('[STEP 4] scroll: delta=-4200');
-            await page.scroll4();
-            console.log('[STEP 5] click: 탐색 창');
+            console.log('[STEP 3] type: hello im doing test\n');
+            await page.type3('hello im doing test\n');
+            console.log('[STEP 4] click: 모델: Opus 4.8 높음');
+            await page.click4();
+            console.log('[STEP 5] click: 기본 창');
             await page.click5();
-            console.log('[STEP 6] click: 이름');
+            console.log('[STEP 6] click: 메시지 보내기');
             await page.click6();
             console.log('[STEP 7] click: ');
             await page.click7();
-            console.log('[STEP 8] click: ');
-            await page.click8();
-            console.log('[STEP 9] click: 항목 보기');
-            await page.click9();
-            console.log('[STEP 10] click: ');
-            await page.click10();
-            console.log('[STEP 11] click: ');
-            await page.click11();
-            console.log('[STEP 12] scroll: delta=-5160');
-            await page.scroll12();
-            console.log('[STEP 13] click: 위치');
-            await page.click13();
-            console.log('[STEP 14] click: ');
-            await page.click14();
 
             expect(_failures).toEqual([]);
     });

@@ -76,11 +76,12 @@ export default function App() {
     onCapture: useCallback((ev) => {
       setEvents((prev) => [...prev, ev]);
     }, []),
-    onGeneration: useCallback(({ status: s, files, message }) => {
+    onGeneration: useCallback(({ status: s, files, message, warning }) => {
       if (s === 'started') {
         setGenState({ generating: true, files: null, error: null });
       } else if (s === 'success') {
         setGenState((prev) => ({ ...prev, generating: false }));
+        if (warning) addToast('warn', warning);
       } else if (s === 'error') {
         setGenState({ generating: false, files: null, error: message });
         addToast('error', `Generation failed: ${message}`);
@@ -148,6 +149,7 @@ export default function App() {
       const res = await generate({
         apiKey: form.apiKey,
         appName: form.appName || undefined,
+        exePath: form.exePath || undefined,
         platform: form.platform || undefined,
         framework: form.framework || 'wdio',
       });
