@@ -182,10 +182,17 @@ const EDITABLE_CONTROL_TYPES = new Set(['Edit', 'Document', 'RichEdit', 'RichEdi
 // Verified in probe: works for Electron deep menus where WinAppDriver el.click()
 // and W3C touch Actions are both rejected or silently ignored.
 const OS_CLICK_PS1 = `param([int]$x, [int]$y, [string]$button = 'left', [int]$clicks = 1)
+Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
 $sig = '[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y); [DllImport("user32.dll")] public static extern void mouse_event(int f, int dx, int dy, int d, int e);'
 Add-Type -MemberDefinition $sig -Name WinMouse -Namespace U -ErrorAction SilentlyContinue
 [U.WinMouse]::SetCursorPos($x, $y) | Out-Null
 Start-Sleep -Milliseconds 150
+# DIAGNOSTIC: requested vs landed cursor position — reveals DPI-scaling drift
+# when DPI-aware getRect() coordinates get fed into DPI-unaware SetCursorPos.
+# Write-Output (not Write-Host) so the Node caller's execSync stdout actually
+# captures it.
+$landed = [System.Windows.Forms.Cursor]::Position
+Write-Output "[osClick-diag] requested=($x,$y) landed=($($landed.X),$($landed.Y))"
 $down = if ($button -eq 'right') { 8 } else { 2 }
 $up   = if ($button -eq 'right') { 16 } else { 4 }
 for ($i = 0; $i -lt $clicks; $i++) {
@@ -376,6 +383,64 @@ foreach ($ch in $text.ToCharArray()) {
 }
 `;
 
+// PowerShell helper — bring a window whose title contains $titleLike to the
+// foreground. Simple-mode (single-window, non-session) tests never call
+// launchApp's normalizeWindow/foreground step, so a freshly launched app can
+// stay behind other windows or the OS may place it wherever it wants (not
+// necessarily where it was during recording) — every subsequent osClick then
+// misses because it's still aimed at the click's LIVE-resolved coordinates,
+// which are correct, but the window with focus/foreground may not be the one
+// receiving OS-level input. Restore-then-foreground before the first click.
+// SetForegroundWindow alone is blocked by Windows' foreground-lock unless the
+// calling thread shares input state with the current foreground thread —
+// AttachThreadInput before the call (detached after) plus a topmost toggle
+// forces it through regardless of which process currently owns focus.
+const OS_ACTIVATE_PS1 = `param([string]$titleLike, [string]$hwnd)
+Add-Type @"
+using System;
+using System.Text;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public class WinActivate {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc p, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr h);
+  [DllImport("user32.dll", CharSet=CharSet.Auto)] public static extern int GetWindowText(IntPtr h, StringBuilder sb, int m);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr pid);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool f);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+  public static List<IntPtr> Find(string t) {
+    var f = new List<IntPtr>();
+    EnumWindows((h,l) => { if(!IsWindowVisible(h)) return true; int n=GetWindowTextLength(h); if(n==0) return true;
+      var sb=new StringBuilder(n+1); GetWindowText(h,sb,sb.Capacity); if(sb.ToString().Contains(t)) f.Add(h); return true; }, IntPtr.Zero);
+    return f;
+  }
+  public static void Force(IntPtr h) {
+    ShowWindow(h, 9); // SW_RESTORE
+    uint fg = GetWindowThreadProcessId(GetForegroundWindow(), IntPtr.Zero);
+    uint me = GetCurrentThreadId();
+    if (fg != me) AttachThreadInput(me, fg, true);
+    BringWindowToTop(h); SetForegroundWindow(h);
+    SetWindowPos(h, (IntPtr)(-1), 0,0,0,0, 0x0003); // TOPMOST, NOMOVE|NOSIZE
+    SetWindowPos(h, (IntPtr)(-2), 0,0,0,0, 0x0003); // NOTOPMOST
+    if (fg != me) AttachThreadInput(me, fg, false);
+  }
+}
+"@ -ErrorAction SilentlyContinue
+if ($hwnd) {
+  [WinActivate]::Force([IntPtr]([int64]$hwnd)); Start-Sleep -Milliseconds 250
+} else {
+  $m = [WinActivate]::Find($titleLike)
+  if ($m.Count -gt 0) { [WinActivate]::Force($m[0]); Start-Sleep -Milliseconds 250 }
+}
+`;
+
 /** 앱 이름 → PascalCase 클래스명 접두어 */
 function toPascal(appName) {
   const raw = (appName || 'MyApp').replace(/[^A-Za-z0-9]/g, '');
@@ -406,6 +471,31 @@ function filterEvents(eventList) {
 }
 
 // ── WdIO locator 결정 ────────────────────────────────────────────────────────
+
+/** Qt/QML control (className like "BaseTextField_QMLTYPE_31" or "QQuickPopupItem")
+ * — UIA Invoke frequently doesn't reach the real MouseArea/TapHandler, so these
+ * need a real OS click rather than el.click() (confirmed on FreeDM 2026-07-06). */
+function isQtControl(el) {
+  const cn = el?.className || '';
+  return /_QMLTYPE_|^QQuick/.test(cn);
+}
+
+// True only for a genuinely unique, short automationId — NOT a QML dotted
+// path. getCenterSimple's browser.$() resolves the FIRST XPath/accessibility-id
+// match in the whole window; a QML automationId chain (e.g.
+// "AppQApplication.ApplicationWindow_QMLTYPE_67...BaseLabel_QMLTYPE_11") is
+// built from generic, repeated node names, so "first match" is very often
+// the WRONG instance (confirmed 2026-07-06: 4 different FreeDM clicks all
+// silently resolved to the same node). A short, dot-free id assigned by the
+// app itself (e.g. "SearchBox") doesn't have that ambiguity. Live resolve is
+// only trusted in that narrow case; everything QML-shaped uses the recorded
+// rel-offset instead.
+function trustLiveSelector(sel, el) {
+  if (!sel || !sel.startsWith("'~")) return false;
+  if (isQtControl(el)) return false;
+  const id = el?.automationId || '';
+  return id.length > 0 && !id.includes('.');
+}
 
 /** className에 공백이 많거나 소문자 camelCase면 Electron/VSCode CSS 클래스 — coordinate fallback */
 function isStableClassName(cn) {
@@ -496,10 +586,12 @@ const _failures = [];
 // OS-level click fallback via PowerShell user32.dll.
 function osClick(x, y, button = 'left', clicks = 1) {
     try {
-        execSync(
+        const out = execSync(
             \`powershell -NoProfile -File "\${join(__dirname, 'osClick.ps1')}" -x \${x} -y \${y} -button \${button} -clicks \${clicks}\`,
             { stdio: 'pipe', timeout: 5000 }
         );
+        const diag = out.toString().trim();
+        if (diag) console.log(diag);
     } catch (e) {
         _failures.push('osClick');
         console.warn('[osClick] failed:', String(e.message || e).substring(0, 100));
@@ -519,16 +611,136 @@ function osScroll(x, y, delta) {
     }
 }
 
-// 실제 마우스 클릭(osClick)을 요소 중심 좌표에 쏘기 위해 wdio의 표준 getRect로
-// 현재 화면상 위치를 조회한다 — el.click()(UIA Invoke)은 SetCursorPos를 하지
-// 않아 호버 의존 UI(Qt/QML 케밥 버튼 등)가 렌더링되지 않는 문제가 있었다.
+// hwnd of the window this WinAppDriver session actually owns. Title-substring
+// matching is non-deterministic whenever a same-titled window already exists
+// (e.g. a FreeDM instance the user had open, alongside the fresh instance the
+// session just launched, on a different monitor) — confirmed 2026-07-06: the
+// session window landed on monitor 1 while the pre-existing user window sat
+// on monitor 2, and title match grabbed whichever one it happened to find
+// first, so clicks that were otherwise correctly computed missed entirely.
+// getWindowHandle() returns the session's own NativeWindowHandle — unique,
+// no title ambiguity — so every OS-level lookup below prefers it once known.
+let _appHwnd = 0;
+
+async function initAppHwnd() {
+    try {
+        const h = await browser.getWindowHandle();   // e.g. "0x00061D2C"
+        _appHwnd = parseInt(h, 16);
+        console.log(\`[hwnd] session window hwnd=\${_appHwnd} (0x\${_appHwnd.toString(16)})\`);
+    } catch (e) {
+        console.warn('[hwnd] getWindowHandle failed — falling back to title match:', String(e.message || e).substring(0, 100));
+    }
+}
+
+// OS-level window activation via PowerShell user32.dll. Simple-mode tests
+// never run launchApp's foreground/normalize step, so a freshly launched app
+// can be spawned behind other windows or off-position — bring it forward
+// before the first click so OS-level input actually reaches it.
+function osActivate(titleLike) {
+    try {
+        const args = _appHwnd ? \`-hwnd \${_appHwnd}\` : \`-titleLike "\${titleLike}"\`;
+        execSync(
+            \`powershell -NoProfile -File "\${join(__dirname, 'osActivate.ps1')}" \${args}\`,
+            { stdio: 'pipe', timeout: 5000 }
+        );
+    } catch (e) {
+        console.warn('[osActivate] failed:', String(e.message || e).substring(0, 100));
+    }
+}
+
+// Qt/QML controls only: UIA Invoke (el.click()) reaches the accessibility
+// tree but often isn't wired to the control's real MouseArea/TapHandler, so
+// the click succeeds with no error yet the app never reacts (confirmed
+// 2026-07-06 — FreeDM toolbar click "succeeded" but never opened its dialog).
+// Resolve the element's LIVE center via XPath (still window-move-safe, no
+// hardcoded coordinates), then inject a real OS click there.
+// Uses getLocation()+getSize() rather than getRect(): WinAppDriver is a
+// JSONWP-era driver bridged into W3C by appium-windows-driver, and el.getRect()
+// (the newer W3C /rect endpoint) is unreliable there — confirmed 2026-07-06,
+// every FreeDM click silently fell back to its recorded literal coordinates
+// (production of a moved-window miss), which only happens if getRect() throws
+// on every single call. location/size are the older JSONWP endpoints and are
+// consistently supported.
 async function getCenterSimple(selector) {
     try {
         const el = await browser.$(selector);
         await el.waitForExist({ timeout: 8000 });
-        const rect = await el.getRect();
-        return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
-    } catch { return null; }
+        const loc = await el.getLocation();
+        const size = await el.getSize();
+        return { x: Math.round(loc.x + size.width / 2), y: Math.round(loc.y + size.height / 2) };
+    } catch (e) {
+        console.warn('[getCenterSimple] live resolve failed, using recorded fallback coords:', String(e.message || e).substring(0, 120));
+        return null;
+    }
+}
+
+// Reads the window's CURRENT rect — by hwnd when the session's own window is
+// known (deterministic), by title match otherwise — and replays a recorded
+// window-relative offset against it, so a moved/repositioned window still
+// gets clicked in the right spot. Falls back to the recorded absolute
+// coordinates only when the window can't be found at all.
+function _resolveWinRect(titleLike) {
+    try {
+        const args = _appHwnd ? \`-hwnd \${_appHwnd}\` : \`-titleLike "\${titleLike}"\`;
+        const out = execSync(
+            \`powershell -NoProfile -File "\${join(__dirname, 'osWindowRect.ps1')}" \${args}\`,
+            { stdio: 'pipe', timeout: 5000 }
+        ).toString().trim();
+        const m = out.match(/(-?\\d+)\\s+(-?\\d+)\\s+(-?\\d+)\\s+(-?\\d+)/);
+        if (m) return { left: +m[1], top: +m[2], width: +m[3], height: +m[4] };
+    } catch (e) {
+        console.warn('[winRect] failed:', String(e.message || e).substring(0, 100));
+    }
+    return null;
+}
+
+// Moves+resizes the session's window back to its recorded geometry. The
+// freshly launched window can appear on a different monitor or at a
+// different size than recording, which both skews DPI-scaling behavior and
+// makes the recorded relX/relY (window-relative UI offsets) point at the
+// wrong spot after the resulting UI reflow.
+function normalizeWindowSimple(rect) {
+    if (!_appHwnd || !rect) return;
+    try {
+        execSync(
+            \`powershell -NoProfile -File "\${join(__dirname, 'osMoveWindow.ps1')}" -hwnd \${_appHwnd} -left \${rect.left} -top \${rect.top} -width \${rect.width} -height \${rect.height}\`,
+            { stdio: 'pipe', timeout: 8000 }
+        );
+        const after = _resolveWinRect('');
+        console.log('[normalize] window moved to', after);
+    } catch (e) {
+        _failures.push('normalize');
+        console.warn('[normalize] failed:', String(e.message || e).substring(0, 100));
+    }
+}
+
+function osClickRel(titleLike, relX, relY, absX, absY, button = 'left', clicks = 1) {
+    const r = _resolveWinRect(titleLike);
+    if (r) osClick(r.left + relX, r.top + relY, button, clicks);
+    else   osClick(absX, absY, button, clicks);   // window not found — absolute fallback only
+}
+function osScrollRel(titleLike, relX, relY, absX, absY, delta) {
+    const r = _resolveWinRect(titleLike);
+    if (r) osScroll(r.left + relX, r.top + relY, delta);
+    else   osScroll(absX, absY, delta);
+}
+
+// Qt/QML controls only: el.setValue() (UIA ValuePattern) crashes WinAppDriver
+// with an unhandled "unknown error" on custom text inputs (confirmed
+// 2026-07-06 — FreeDM's BaseTextField_QMLTYPE_31 threw mid-suite and aborted
+// the whole test). OS-level keystrokes after a real click sidestep the
+// unsupported UIA pattern entirely.
+function osType(text) {
+    try {
+        const b64 = Buffer.from(text, 'utf8').toString('base64');
+        execSync(
+            \`powershell -NoProfile -File "\${join(__dirname, 'osType.ps1')}" -b64 "\${b64}"\`,
+            { stdio: 'pipe', timeout: 8000 }
+        );
+    } catch (e) {
+        _failures.push('osType');
+        console.warn('[osType] failed:', String(e.message || e).substring(0, 100));
+    }
 }
 
 `;
@@ -546,10 +758,12 @@ const _failures = [];
 // OS-level click via PowerShell user32.dll — verified for Electron menus, native dialogs.
 function osClick(x, y, button = 'left', clicks = 1) {
     try {
-        execSync(
+        const out = execSync(
             \`powershell -NoProfile -File "\${join(__dirname, 'osClick.ps1')}" -x \${x} -y \${y} -button \${button} -clicks \${clicks}\`,
             { stdio: 'pipe', timeout: 5000 }
         );
+        const diag = out.toString().trim();
+        if (diag) console.log(diag);
     } catch (e) {
         _failures.push('osClick');
         console.warn('[osClick] failed:', String(e.message || e).substring(0, 100));
@@ -654,11 +868,17 @@ async function getCenter(sid, rootElId, selector) {
         const el = await _appiumPost(path, { using, value });
         if (!el) return null;
         const elId = el.ELEMENT || el['element-6066-11e4-a52e-4f735466cecf'];
-        const r = await (await fetch(\`\${_APPIUM}/session/\${sid}/element/\${elId}/rect\`)).json();
-        const rect = r.value;
-        if (!rect) return null;
-        return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
-    } catch { return null; }
+        // location+size (JSONWP) rather than /rect (W3C) — see getCenterSimple
+        // for why WinAppDriver's /rect support can't be relied on.
+        const locR = await (await fetch(\`\${_APPIUM}/session/\${sid}/element/\${elId}/location\`)).json();
+        const sizeR = await (await fetch(\`\${_APPIUM}/session/\${sid}/element/\${elId}/size\`)).json();
+        const loc = locR.value, size = sizeR.value;
+        if (!loc || !size) return null;
+        return { x: Math.round(loc.x + size.width / 2), y: Math.round(loc.y + size.height / 2) };
+    } catch (e) {
+        console.warn('[getCenter] live resolve failed:', String(e.message || e).substring(0, 120));
+        return null;
+    }
 }
 
 async function _typeScoped(sid, rootElId, selector, text) {
@@ -776,9 +996,12 @@ async function launchApp(exePath, args, titleFrag, rect) {
         return;
     }
     const deadline = Date.now() + 20000;
+    let poll = 0;
     while (Date.now() < deadline) {
+        poll++;
+        const matched = _listWindowHwnds(titleFrag);
         if (titleFrag && !_hwndCache[titleFrag]) {
-            const fresh = _listWindowHwnds(titleFrag).find(h => !baseline.has(h));
+            const fresh = matched.find(h => !baseline.has(h));
             if (fresh) {
                 _hwndCache[titleFrag] = fresh;
                 console.log(\`[launch] tracking new window hwnd=\${fresh}\`);
@@ -791,6 +1014,9 @@ async function launchApp(exePath, args, titleFrag, rect) {
         // isn't really there, which sent every later osClick to whatever
         // was actually on screen underneath (e.g. the desktop).
         const liveRect = _resolveWinRect(titleFrag);
+        // DIAGNOSTIC (temporary): trace why [launch] window-detection times
+        // out — remove once root cause of the Claude Desktop timeout is found.
+        console.log(\`[launch-diag] poll=\${poll} titleFrag=\${JSON.stringify(titleFrag)} baseline=[\${[...baseline]}] matched=[\${matched}] hwndCache=\${_hwndCache[titleFrag] ?? 'none'} liveRect=\${JSON.stringify(liveRect)}\`);
         if (liveRect && liveRect.width > 0 && liveRect.height > 0) {
             if (rect) {
                 normalizeWindow(titleFrag, rect.left, rect.top, rect.width, rect.height);
@@ -886,7 +1112,7 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       // OS-level mouse_event(MOUSEEVENTF_WHEEL). WHEEL_DELTA=120 per notch;
       // e.delta is the summed notch count captured by the agent.
       const wheelDelta = (e.delta ?? 0) * 120;
-      if (useSession && hasRel && relTitle) {
+      if (hasRel && relTitle) {
         const relFrag = electronCtx ? winFrag : relTitle;
         pageMethods.push(
 `    async scroll${stepNum}() {
@@ -923,13 +1149,64 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
         await _typeScoped(s.sid, s.rootElId, ${elSel}, value);
     }`
         );
+      } else if (sel && isQtControl(e.element) && !useSession && trustLiveSelector(sel, e.element)) {
+        // A genuinely short, unique automationId (not a QML dotted path) —
+        // safe to trust getCenterSimple's live resolve first, recorded
+        // rel-offset as fallback. Activate first: SendKeys goes to whatever
+        // has OS focus, not the WebDriver session's window, and a click
+        // alone doesn't guarantee it.
+        const fallbackClick = hasRel && relTitle
+          ? `osClickRel(${JSON.stringify(relTitle)}, ${e.relX ?? 0}, ${e.relY ?? 0}, ${x}, ${y})`
+          : `osClick(${x}, ${y})`;
+        pageMethods.push(
+`    async type${stepNum}(value) {
+        osActivate(${JSON.stringify(relTitle || '')});
+        const c = await getCenterSimple(${sel});
+        if (c) osClick(c.x, c.y);
+        else ${fallbackClick};
+        osType(value);
+    }`
+        );
+      } else if (sel && isQtControl(e.element) && !useSession) {
+        // className-only (non-unique) selector: getCenterSimple's browser.$()
+        // only ever returns the FIRST match, which silently focuses the wrong
+        // field. Recorded rel-offset is unique per step, so use it directly
+        // and skip getCenterSimple entirely. If no rel data exists (older
+        // capture), don't click at all — a corner-click fallback like
+        // osClick(0, 0) steals focus from the target window and sends the
+        // keystrokes somewhere else entirely (confirmed 2026-07-06).
+        const clickStep = (hasRel && relTitle)
+          ? `osClickRel(${JSON.stringify(relTitle)}, ${e.relX}, ${e.relY}, ${x}, ${y});`
+          : `// no recorded coords — rely on osActivate focus, do NOT click (0,0)`;
+        pageMethods.push(
+`    async type${stepNum}(value) {
+        osActivate(${JSON.stringify(relTitle || '')});
+        ${clickStep}
+        osType(value);
+    }`
+        );
+      } else if (sel && isQtControl(e.element)) {
+        // useSession path — no osActivate/osClickRel available there.
+        pageMethods.push(
+`    async type${stepNum}(value) {
+        const c = await getCenterSimple(${sel});
+        if (c) osClick(c.x, c.y);
+        else osClick(${x}, ${y});
+        osType(value);
+    }`
+        );
       } else {
         const elSel = sel || `'//*[@Name="${escapeAttr(e.element?.name)}"]'`;
         pageMethods.push(
 `    async type${stepNum}(value) {
-        const el = await browser.$(${elSel});
-        await el.waitForExist({ timeout: 8000 });
-        await el.setValue(value);
+        try {
+            const el = await browser.$(${elSel});
+            await el.waitForExist({ timeout: 8000 });
+            await el.setValue(value);
+        } catch (e) {
+            _failures.push('type');
+            console.warn('[type${stepNum}] setValue failed:', String(e.message || e).substring(0, 100));
+        }
     }`
         );
       }
@@ -983,10 +1260,35 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
     }`
           );
         }
-      } else if (sel) {
-        // Simple mode: resolve element's live center via getCenterSimple, then
-        // click through actual mouse injection (osClick) — el.click() (UIA
-        // Invoke) never moves the cursor, so hover-dependent UI never renders.
+      } else if (!useSession && hasRel && relTitle && trustLiveSelector(sel, e.element)) {
+        // A genuinely short, unique automationId (not a QML dotted path) —
+        // safe to trust getCenterSimple's live resolve first, with the
+        // recorded rel-offset (unique per step, window-move-safe) as fallback.
+        pageMethods.push(
+`    async click${stepNum}() {
+        const c = await getCenterSimple(${sel});
+        if (c) osClick(c.x, c.y${btnArg});
+        else osClickRel(${JSON.stringify(relTitle)}, ${e.relX ?? 0}, ${e.relY ?? 0}, ${x}, ${y}${btnArg});
+    }`
+        );
+      } else if (!useSession && hasRel && relTitle) {
+        // Qt/QML className-only (or any non-automationId) selectors are NOT
+        // unique within the window — getCenterSimple's browser.$() only ever
+        // returns the FIRST match, which silently clicks the wrong instance
+        // whenever the same class/xpath appears more than once (confirmed
+        // 2026-07-06: 4 different FreeDM clicks all resolved to the same
+        // BaseLabel_QMLTYPE_11 node). The recorded rel-offset is unique per
+        // step and shares osClick's coordinate space, so skip getCenterSimple
+        // entirely and use it as the PRIMARY path here, not a fallback.
+        pageMethods.push(
+`    async click${stepNum}() {
+        osClickRel(${JSON.stringify(relTitle)}, ${e.relX}, ${e.relY}, ${x}, ${y}${btnArg});
+    }`
+        );
+      } else if (sel && isQtControl(e.element)) {
+        // No recorded rel offset available (older capture) — fall back to
+        // live XPath resolve. NOTE: unsafe for non-unique selectors (see
+        // above), but there's no rel data to prefer instead.
         pageMethods.push(
 `    async click${stepNum}() {
         const c = await getCenterSimple(${sel});
@@ -994,10 +1296,50 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
         else osClick(${x}, ${y}${btnArg});
     }`
         );
+      } else if (sel) {
+        // Simple mode: pure XPath click, no coordinates. getRect() (DPI-aware)
+        // fed into SetCursorPos (DPI-unaware) was producing off-target clicks
+        // whenever the window had moved since recording — dropping coordinates
+        // for a stable XPath selector removes that scaling error entirely.
+        // NOTE: no moveTo() before click() — WinAppDriver's Actions endpoint
+        // rejects mouse pointerMove ("only pen and touch pointer input source
+        // types are supported"), confirmed live 2026-07-06: every click paid a
+        // 3x-retry penalty then fell back to osClick anyway, silently
+        // defeating the XPath-only goal. el.click() (UIA Invoke) works fine
+        // for standard Win32/UWP controls (verified on Calculator); Qt/QML
+        // controls are routed to the branch above instead.
+        // If the xpath lookup or click() fails for any reason (stale
+        // selector), fall back to the recorded absolute coordinates and say
+        // so loudly.
+        const clickCall = e.action === 'rightClick'
+          ? `await el.click({ button: 'right' });`
+          : e.action === 'doubleClick'
+            ? `await el.click();\n            await el.click();`
+            : `await el.click();`;
+        {
+          const fallbackClick = !useSession && hasRel && relTitle
+            ? `osClickRel(${JSON.stringify(relTitle)}, ${e.relX ?? 0}, ${e.relY ?? 0}, ${x}, ${y}${btnArg})`
+            : `osClick(${x}, ${y}${btnArg})`;
+          pageMethods.push(
+`    async click${stepNum}() {
+        try {
+            const el = await browser.$(${sel});
+            await el.waitForExist({ timeout: 8000 });
+            ${clickCall}
+        } catch (e) {
+            console.warn('[click${stepNum}] xpath click failed, falling back:', String(e.message || e).substring(0, 100));
+            ${fallbackClick};
+        }
+    }`
+          );
+        }
       } else {
+        const fallbackClick = !useSession && hasRel && relTitle
+          ? `osClickRel(${JSON.stringify(relTitle)}, ${e.relX ?? 0}, ${e.relY ?? 0}, ${x}, ${y}${btnArg})`
+          : `osClick(${x}, ${y}${btnArg})`;
         pageMethods.push(
 `    async click${stepNum}() {
-        osClick(${x}, ${y}${btnArg});
+        ${fallbackClick};
     }`
         );
       }
@@ -1016,6 +1358,16 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
   const launchCall = (useSession && exePath && winFragOk)
     ? `        await launchApp(${JSON.stringify(exePath)}, ${JSON.stringify(newWindowArgsFor(exePath))}, ${JSON.stringify(winFrag)}, ${JSON.stringify(recordedRect)});\n`
     : '';
+
+  // Simple mode has no launchApp/foreground step of its own — the freshly
+  // launched window can end up behind other windows, so bring it forward
+  // before the first click (see osActivate in SIMPLE_HEADER).
+  const simpleWinTitle = !useSession
+    ? (filtered.find(e => e.element?.windowTitle)?.element?.windowTitle || '')
+    : '';
+  const activateStep = simpleWinTitle
+    ? `            osActivate(${JSON.stringify(simpleWinTitle)});\n`
+    : '';
   const beforeHook = useSession ? `
     beforeAll(async () => {
         const { hostname, port } = browser.options;
@@ -1033,15 +1385,26 @@ ${launchCall}    });
     });
 ` : '';
 
+  // Identify the session's own window by hwnd (deterministic — title match
+  // can grab a pre-existing same-titled window instead, see osActivate in
+  // SIMPLE_HEADER) and normalize it back to the recorded position/size
+  // before the first step.
+  const simpleBeforeHook = !useSession ? `
+    beforeAll(async () => {
+        await initAppHwnd();
+        normalizeWindowSimple(${JSON.stringify(recordedRect)});
+    });
+` : '';
+
   return header + `class ${pageName} {
 ${pageMethods.join('\n\n')}
 }
 
-describe('${testName}', () => {${beforeHook}${afterHook}
+describe('${testName}', () => {${beforeHook}${afterHook}${simpleBeforeHook}
     it('should replay recorded flow', async () => {
         const page = new ${pageName}();
 
-${testSteps.join('\n')}
+${activateStep}${testSteps.join('\n')}
 
 ${assertLine}
     });
@@ -1050,6 +1413,27 @@ ${assertLine}
 }
 
 // ── WdIO conf 생성 ───────────────────────────────────────────────────────────
+
+// Windows ships some classic exe names as thin redirector stubs that launch,
+// hand off to a packaged (MSIX) app hosted by a DIFFERENT process, and exit —
+// e.g. calc.exe on this build. appium:app-by-path session creation looks for
+// a window owned by the PID it launched, never finds one owned by the real
+// host process, and fails with "Failed to locate opened application window"
+// (reproduced 2026-07-06). Route known stubs to their real AUMID instead —
+// this is the same fix already applied to the Calculator preset in
+// ControlPanel.jsx, just also applied to whatever exePath was actually
+// recorded with (including a manually-typed calc.exe path).
+const KNOWN_UWP_STUB_AUMID = {
+  'calc.exe': 'Microsoft.WindowsCalculator_8wekyb3d8bbwe!App',
+};
+
+function resolveAppCap(exePath) {
+  const isUwp = (exePath || '').includes('!');
+  if (isUwp) return exePath;
+  const base = path.basename(exePath || '').toLowerCase();
+  if (KNOWN_UWP_STUB_AUMID[base]) return KNOWN_UWP_STUB_AUMID[base];
+  return (exePath || '').replace(/\\/g, '\\\\');
+}
 
 function buildWdioConf(exePath, specFiles, useSession) {
   const specsArr = (specFiles && specFiles.length)
@@ -1083,8 +1467,7 @@ function buildWdioConf(exePath, specFiles, useSession) {
   }
 
   // Single-window Win32/UWP: direct app launch, classic browser.$() style.
-  const isUwp  = (exePath || '').includes('!');
-  const appCap = isUwp ? exePath : exePath.replace(/\\/g, '\\\\');
+  const appCap = resolveAppCap(exePath);
   return `export const config = {
   runner: 'local',
   specs: [${specsArr}],
@@ -1176,8 +1559,9 @@ app.post('/api/generate', (req, res) => {
     const winRectPs1File = { filename: 'osWindowRect.ps1', content: OS_WINRECT_PS1 };
     const moveWinPs1File = { filename: 'osMoveWindow.ps1', content: OS_MOVEWINDOW_PS1 };
     const typePs1File    = { filename: 'osType.ps1',       content: OS_TYPE_PS1 };
+    const activatePs1File = { filename: 'osActivate.ps1',  content: OS_ACTIVATE_PS1 };
     const { savedPaths: wdioPaths, saveError: wdioErr } = saveFiles(
-      [...wdioFiles, confFile, ps1File, scrollPs1File, winRectPs1File, moveWinPs1File, typePs1File], wdioOutDir
+      [...wdioFiles, confFile, ps1File, scrollPs1File, winRectPs1File, moveWinPs1File, typePs1File, activatePs1File], wdioOutDir
     );
 
     const warnings = !exe ? ['exePath missing — launchApp will be skipped'] : [];

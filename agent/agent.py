@@ -278,6 +278,119 @@ def pid_of_hwnd(hwnd):
         return 0
 
 
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+
+def image_path_of_pid(pid):
+    """Full exe path backing `pid`. Unlike window titles this is never
+    localized, so it survives non-English Windows UI languages."""
+    if not pid:
+        return ""
+    h = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        return ""
+    try:
+        size = wintypes.DWORD(260)
+        buf = ctypes.create_unicode_buffer(260)
+        ok = ctypes.windll.kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
+        return buf.value if ok else ""
+    except Exception:
+        return ""
+    finally:
+        ctypes.windll.kernel32.CloseHandle(h)
+
+
+def match_keys_for_launch(exe_path, app_name):
+    """Locale-independent keywords to look for in a window's owning-process
+    image path. Window titles are localized (e.g. Korean '계산기'); package
+    names and file paths are not, so this is the reliable signal for UWP
+    launches where explorer.exe (not the tracked launch pid) actually spawns
+    the real host process."""
+    keys = set()
+    if exe_path:
+        if is_aumid(exe_path):
+            # "PackageFamilyName_publisherHash!AppId" -> "PackageFamilyName"
+            family = exe_path.split("!", 1)[0].split("_", 1)[0]
+            k = re.sub(r'[^a-z0-9]', '', family.lower())
+        else:
+            base = re.sub(r'\.[^.]+$', '', os.path.basename(exe_path))
+            k = re.sub(r'[^a-z0-9]', '', base.lower())
+        if k:
+            keys.add(k)
+    if app_name:
+        k = re.sub(r'[^a-z0-9]', '', app_name.lower())
+        if k:
+            keys.add(k)
+    return keys
+
+
+GW_OWNER = 4
+
+
+def frame_owning_corewindow(core_hwnd, candidates):
+    """Find the top-level window (from `candidates`) that has `core_hwnd` as
+    an EnumChildWindows descendant.
+
+    Probed and confirmed (2026-07-06 session): a UWP CoreWindow's parent,
+    owner, AND GetAncestor(GA_ROOT) are all itself — there is NO upward
+    Win32 link from CoreWindow to the ApplicationFrameWindow that actually
+    receives clicks/keyboard input. The only real link is downward:
+    EnumChildWindows(ApplicationFrameWindow) enumerates the CoreWindow as a
+    child. So the CoreWindow must be found by scanning candidates, not by
+    walking up from it."""
+    for cand in candidates:
+        if cand == core_hwnd:
+            continue
+        hit = [False]
+
+        def _enum(child, _):
+            if child == core_hwnd:
+                hit[0] = True
+                return False
+            return True
+
+        try:
+            win32gui.EnumChildWindows(cand, _enum, None)
+        except Exception:
+            pass
+        if hit[0]:
+            return cand
+    return 0
+
+
+def probe_window(tag, hwnd):
+    """One-shot diagnostic dump: class/pid/image/parent/owner/root/rect for
+    `hwnd` and its immediate children. Used to establish the *actual* Win32
+    relationship between the hwnd discovery locks onto and the hwnd real
+    clicks route to, instead of guessing at WS_CHILD/GW_OWNER/GA_ROOT."""
+    try:
+        pid = pid_of_hwnd(hwnd)
+        log(f"[probe:{tag}] hwnd={hwnd} cls='{win32gui.GetClassName(hwnd)}' "
+            f"pid={pid} img='{image_path_of_pid(pid)}' "
+            f"parent={win32gui.GetParent(hwnd)} "
+            f"owner={win32gui.GetWindow(hwnd, GW_OWNER)} "
+            f"root={ctypes.windll.user32.GetAncestor(hwnd, GA_ROOT)} "
+            f"visible={win32gui.IsWindowVisible(hwnd)} "
+            f"rect={win32gui.GetWindowRect(hwnd)}")
+    except Exception as e:
+        log(f"[probe:{tag}] hwnd={hwnd} FAILED: {e}")
+        return
+
+    def _e(child, _):
+        try:
+            p = pid_of_hwnd(child)
+            log(f"[probe:{tag}]   child={child} cls='{win32gui.GetClassName(child)}' "
+                f"pid={p} img='{image_path_of_pid(p)}'")
+        except Exception:
+            pass
+        return True
+
+    try:
+        win32gui.EnumChildWindows(hwnd, _e, None)
+    except Exception:
+        pass
+
+
 def top_window_at(x, y):
     """Top-level window under a screen point.
     For UWP this is the ApplicationFrameWindow (GA_ROOT of the CoreWindow)."""
@@ -339,6 +452,7 @@ class Recorder:
         # not-yet-final target_hwnds (the app window may not even exist yet)
         # and is dropped in _emit(), regardless of when it's later processed.
         self._discovery_done_ts = 0.0
+        self._probed_skip = False    # one-shot diagnostic probe on first mismatched-window click
 
         self._mouse_listener = None
         self._kb_listener = None
@@ -348,6 +462,12 @@ class Recorder:
 
         # worker-side state
         self._last_left_click = None  # timing/pos of previous left click (dbl-click)
+        # (x, y) of the most recent left click, independent of the
+        # double-click window above — _flush_pending_click() nulls
+        # _last_left_click on every keystroke (including the first one of a
+        # type burst), so it can't be used to recover coords in
+        # _flush_type_buffer. This one persists until overwritten by the next click.
+        self._last_click_xy = None
         self._pending_scroll = None
         self._type_buffer = ""
         self._type_elem = None       # element info captured at first keystroke
@@ -360,6 +480,7 @@ class Recorder:
         self.event_count = 0
         self.target_hwnds = set()
         self._popup_hwnds = set()
+        self._probed_skip = False
 
         # Snapshot visible top-level windows BEFORE launching, so discovery can
         # diff to find the new window(s) the target opens (locale-independent).
@@ -488,15 +609,19 @@ class Recorder:
         the pre-launch snapshot). Also accept windows owned by the launch pid
         (classic Win32). Fallback: the current foreground top-level window."""
         launch_pid = self.proc.pid if self.proc else 0
-        # Same fuzzy title match used by _point_is_target()'s title-match
-        # fallback. A "newly-appeared titled window" alone is NOT a reliable
-        # signal for AUMID/UWP launches — transient system UI (Alt+Tab task
-        # switcher, UAC prompt) also satisfies it and can steal target_hwnds
-        # before the real app window appears, silently dropping every real
-        # click afterward. Windows we can positively tie to the launched
-        # process (pid match) are trusted regardless of title; windows we
-        # only know are "new" must also title-match appName.
-        app_key = re.sub(r'[^a-z0-9]', '', self.session.get("appName", "").lower())
+        exe_path = self.session.get("exePath", "")
+        app_name = self.session.get("appName", "")
+        # UWP launches (AUMID, or classic exe names that Windows redirects to a
+        # packaged app, e.g. calc.exe/notepad.exe) are actually spawned by
+        # explorer.exe / a broker process, so launch_pid never matches the
+        # real host window's owning pid. The window's TITLE is localized
+        # (e.g. Korean '계산기'), so fuzzy-matching it against the English
+        # appName silently fails on non-English Windows. The owning
+        # process's image PATH is never localized, so match on that first.
+        path_keys = match_keys_for_launch(exe_path, app_name)
+        # Title fuzzy match — kept as a secondary fallback for windows whose
+        # title happens to be in the same script as appName (English Windows).
+        app_key = re.sub(r'[^a-z0-9]', '', app_name.lower())
         deadline = time.time() + DISCOVER_TIMEOUT
         while time.time() < deadline and not self._stop_flag.is_set():
             current = visible_toplevel_windows()
@@ -506,20 +631,56 @@ class Recorder:
                 if launch_pid and pid_of_hwnd(hwnd) == launch_pid:
                     found.add(hwnd)
                     continue
-                # newly-appeared, titled top-level window (UWP + most apps) —
-                # only trust it if the title actually relates to the target app.
-                if hwnd not in self._pre_hwnds:
-                    try:
-                        raw_title = win32gui.GetWindowText(hwnd).strip()
-                        if not raw_title:
-                            continue
-                        title_key = re.sub(r'[^a-z0-9]', '', raw_title.lower())
-                        if app_key and title_key and (app_key in title_key or title_key in app_key):
-                            found.add(hwnd)
-                        else:
-                            log(f"[target] ignoring unrelated new window hwnd={hwnd} title='{raw_title}'")
-                    except Exception:
-                        pass
+                # Path match applies to ANY visible window, pre-existing or
+                # new: a single-instance app (e.g. Claude Desktop) that was
+                # already running before this launch doesn't spawn a new
+                # top-level window at all — AUMID activation just focuses the
+                # existing one — so gating this on "not in _pre_hwnds" (as
+                # the title fallback below still does) meant such apps could
+                # never be discovered (confirmed 2026-07-06: zero candidates
+                # considered, straight to foreground fallback). Path is
+                # specific enough that pre-existing windows are safe to check.
+                img_path = image_path_of_pid(pid_of_hwnd(hwnd))
+                path_key = re.sub(r'[^a-z0-9]', '', img_path.lower())
+                if path_keys and path_key and any(k in path_key for k in path_keys):
+                    found.add(hwnd)
+                    continue
+                if hwnd in self._pre_hwnds:
+                    continue
+                # Fallback: fuzzy title match against appName. Restricted to
+                # newly-appeared windows — loose text matching against a
+                # pre-existing window (e.g. some unrelated app whose title
+                # happens to contain the app name) is exactly the false-positive
+                # risk _pre_hwnds was added to prevent.
+                try:
+                    raw_title = win32gui.GetWindowText(hwnd).strip()
+                    if not raw_title:
+                        continue
+                    title_key = re.sub(r'[^a-z0-9]', '', raw_title.lower())
+                    if app_key and title_key and (app_key in title_key or title_key in app_key):
+                        found.add(hwnd)
+                    else:
+                        log(f"[target] ignoring unrelated new window hwnd={hwnd} title='{raw_title}' img='{img_path}'")
+                except Exception:
+                    pass
+            # UWP: mouse/keyboard route to the top-level ApplicationFrameWindow
+            # (GetAncestor(GA_ROOT) — owned by ApplicationFrameHost.exe, so it
+            # never matches an app-specific path/title keyword on its own).
+            # The CoreWindow matched above has no usable upward link to it
+            # (parent/owner/GA_ROOT are all itself — probed and confirmed);
+            # the only real link is downward, so scan visible top-levels for
+            # whichever one has this CoreWindow as an EnumChildWindows child.
+            for hwnd in list(found):
+                try:
+                    is_corewindow = win32gui.GetClassName(hwnd) == 'Windows.UI.Core.CoreWindow'
+                except Exception:
+                    is_corewindow = False
+                if not is_corewindow:
+                    continue
+                frame = frame_owning_corewindow(hwnd, current)
+                if frame and frame not in found:
+                    found.add(frame)
+                    log(f"[target] frame {frame} owns CoreWindow {hwnd} — added")
             if found:
                 self.target_hwnds |= found
                 titles = []
@@ -529,6 +690,8 @@ class Recorder:
                     except Exception:
                         titles.append("")
                 log(f"[target] hwnds={self.target_hwnds} titles={titles}")
+                for h in found:
+                    probe_window("appwin", h)
                 self._discovery_done_ts = time.time()
                 return
             time.sleep(0.2)
@@ -645,6 +808,7 @@ class Recorder:
                 f"delta={delta} gap={gap:.4f}s "
                 f"elem_name='{elem.get('name', '')}' elem_rect={elem.get('rect')}")
             self._emit("click", elem, x=cx, y=cy, ts=ts)
+            self._last_click_xy = (cx, cy)
 
             ll = self._last_left_click
             if (ll and ts - ll["ts"] <= DOUBLE_CLICK_INTERVAL
@@ -763,7 +927,17 @@ class Recorder:
         text, self._type_buffer = self._type_buffer, ""
         elem, self._type_elem = self._type_elem, None
         if text:
-            self._emit("type", elem or {}, value=text)
+            cx = cy = None
+            rect = (elem or {}).get("rect")
+            # rect = (left, top, right, bottom) — filled in by describe()
+            if isinstance(rect, (tuple, list)) and len(rect) == 4 and all(isinstance(v, int) for v in rect):
+                cx = int((rect[0] + rect[2]) / 2)
+                cy = int((rect[1] + rect[3]) / 2)
+            else:
+                log(f"[type-coord] focused rect unusable: {rect!r} — inheriting last click")
+                if self._last_click_xy:
+                    cx, cy = self._last_click_xy
+            self._emit("type", elem or {}, x=cx, y=cy, value=text)
 
     def _emit_pointer_event(self, action, x, y, ins, ts=None):
         self._emit(action, self._inspect(ins, x, y), x=x, y=y, ts=ts)
@@ -789,9 +963,45 @@ class Recorder:
             pass
         return False
 
+    def _pick_frame_hwnd(self):
+        """Pick a target hwnd for rect/geometry purposes, preferring one that
+        isn't a UWP CoreWindow. Probed and confirmed (2026-07-06 session): a
+        CoreWindow's GetWindowRect is a ghost rect pinned at the screen
+        origin, not where the app is actually drawn/clicked — the
+        ApplicationFrameWindow (its EnumChildWindows parent) has the real
+        rect. target_hwnds is a set, so picking arbitrarily can silently
+        select the CoreWindow and produce a bogus initialWindow/relX/relY."""
+        for hwnd in self.target_hwnds:
+            try:
+                if win32gui.GetClassName(hwnd) != 'Windows.UI.Core.CoreWindow':
+                    return hwnd
+            except Exception:
+                continue
+        return next(iter(self.target_hwnds), 0)
+
+    def _window_contains_child(self, parent_hwnd, target_child):
+        """True if `target_child` is an EnumChildWindows descendant of
+        `parent_hwnd`. UWP CoreWindow's parent/owner/GA_ROOT are all itself
+        (probed 2026-07-06) — no upward link exists — so the frame that
+        actually hosts a given CoreWindow can only be found by checking
+        this direction, from candidate frame down to the known CoreWindow."""
+        found = [False]
+
+        def _enum(child, _):
+            if child == target_child:
+                found[0] = True
+                return False
+            return True
+
+        try:
+            win32gui.EnumChildWindows(parent_hwnd, _enum, None)
+        except Exception:
+            pass
+        return found[0]
+
     def _emit_session_meta(self):
         """Emit a session_meta event with initial window geometry."""
-        hwnd = next(iter(self.target_hwnds), 0)
+        hwnd = self._pick_frame_hwnd()
         rect = self._get_win_rect(hwnd)
         meta = {
             "action": "session_meta",
@@ -835,6 +1045,27 @@ class Recorder:
         # foreground window being the target at capture time.
         if action != "type" and x is not None:
             top = top_window_at(x, y)
+
+            # UWP lazy frame adoption: the ApplicationFrameWindow that input
+            # actually routes to is owned by ApplicationFrameHost.exe (a
+            # different process), so path/pid matching in
+            # _discover_target_windows can't identify it, and the only real
+            # link to a target CoreWindow — EnumChildWindows(frame) —
+            # sometimes isn't established yet at discovery time (probed
+            # 2026-07-06). Re-check right now, at the moment a real click
+            # tells us which window `top` is; cache the result once found.
+            if top and top not in self.target_hwnds and top not in self._popup_hwnds:
+                for core in list(self.target_hwnds):
+                    if self._window_contains_child(top, core):
+                        # target_hwnds alone is enough to flip
+                        # is_known_other_window to False below — NOT
+                        # _popup_hwnds, which also drives is_popup
+                        # annotation (line ~1079) and would mislabel the
+                        # main app frame as a popup dialog in codegen.
+                        self.target_hwnds.add(top)
+                        log(f"[target] lazy frame {top} hosts CoreWindow {core} — added")
+                        break
+
             # The pointer is over a window we can positively identify as NOT
             # the target and NOT a popup of it (e.g. desktop "Program Manager",
             # taskbar tray). Skip immediately — do not let the foreground
@@ -848,6 +1079,9 @@ class Recorder:
             if is_known_other_window:
                 log(f"[skip] {action} known-other-window top={top} "
                     f"title='{win32gui.GetWindowText(top)}' x={x} y={y}")
+                if not self._probed_skip:
+                    self._probed_skip = True
+                    probe_window("clickwin", top)
                 return
             # Accept if the point is over a target window OR the target app is
             # foreground. The OR covers UWP (CoreWindow GA_ROOT != tracked
@@ -927,7 +1161,7 @@ class Recorder:
             if not root_hwnd_for_rect and x is not None:
                 root_hwnd_for_rect = top_window_at(int(x), int(y))   # 포인터 아래 실제 창 — 결정적
             if not root_hwnd_for_rect and self.target_hwnds:
-                root_hwnd_for_rect = next(iter(self.target_hwnds))    # 최후 폴백
+                root_hwnd_for_rect = self._pick_frame_hwnd()    # 최후 폴백
             rect = self._get_win_rect(root_hwnd_for_rect)
             if rect is not None:
                 win_left, win_top, win_w, win_h = rect

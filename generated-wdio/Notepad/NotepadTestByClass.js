@@ -308,54 +308,40 @@ function osType(text) {
     }
 }
 
-class ClaudeDesktopPageByClass {
+class NotepadPageByClass {
     async click1() {
-        osClickRel('Claude', 106, 117, 133, 169);
+        let s = await getWindowSession('제목 없음 - 메모장');
+        let c = await getCenter(s.sid, s.rootElId, '//*[@ClassName="RichEditD2DPT" and @Name="텍스트 편집기"]');
+        if (!c) {
+            delete _sessionIds['제목 없음 - 메모장'];
+            s = await getWindowSession('제목 없음 - 메모장');
+            c = await getCenter(s.sid, s.rootElId, '//*[@ClassName="RichEditD2DPT" and @Name="텍스트 편집기"]');
+        }
+        c = c ?? { x: 426, y: 404 };
+        osClick(c.x, c.y);
     }
 
-    async click2() {
-        osClickRel('Claude', 100, 138, 127, 190);
+    async type2(value) {
+        const s = await getWindowSession('*h - 메모장');
+        await _typeScoped(s.sid, s.rootElId, '//*[@ClassName="RichEditD2DPT" and @Name="텍스트 편집기"]', value);
     }
 
-    async click3() {
-        osClickRel('Claude', 97, 169, 124, 221);
+    async type3(value) {
+        const s = await getWindowSession('*hi my name is hansung - 메모장');
+        await _typeScoped(s.sid, s.rootElId, '//*[@ClassName="RichEditD2DPT" and @Name="텍스트 편집기"]', value);
     }
 
-    async click4() {
-        osClickRel('Claude', 91, 195, 118, 247);
-    }
-
-    async click5() {
-        osClickRel('Claude', 97, 220, 124, 272);
-    }
-
-    async click6() {
-        osClickRel('Claude', 99, 240, 126, 292);
-    }
-
-    async type7(value) {
-        osType(value);
-    }
-
-    async click8() {
-        osClickRel('Claude', 1062, 74, 1089, 126);
-    }
-
-    async click9() {
-        osClickRel('Claude', 143, 321, 170, 373);
-    }
-
-    async click10() {
-        osClickRel('Claude', 153, 345, 180, 397);
+    async type4(value) {
+        const s = await getWindowSession('*hi my name is hansung - 메모장');
+        await _typeScoped(s.sid, s.rootElId, '//*[@ClassName="RichEditD2DPT" and @Name="텍스트 편집기"]', value);
     }
 }
 
-describe('ClaudeDesktopTestByClass', () => {
+describe('NotepadTestByClass', () => {
     beforeAll(async () => {
         const { hostname, port } = browser.options;
         _APPIUM = `http://${hostname || '127.0.0.1'}:${port || 4723}`;
         console.log(`[session] Appium endpoint resolved to ${_APPIUM}`);
-        await launchApp("Claude_pzs8sxrjxfjjc!Claude", [], "Claude", {"left":27,"top":52,"width":1218,"height":810});
     });
 
     afterAll(async () => {
@@ -366,28 +352,16 @@ describe('ClaudeDesktopTestByClass', () => {
     });
 
     it('should replay recorded flow', async () => {
-        const page = new ClaudeDesktopPageByClass();
+        const page = new NotepadPageByClass();
 
-            console.log('[STEP 1] click: 새 채팅');
+            console.log('[STEP 1] click: 텍스트 편집기');
             await page.click1();
-            console.log('[STEP 2] click: 프로젝트');
-            await page.click2();
-            console.log('[STEP 3] click: 아티팩트');
-            await page.click3();
-            console.log('[STEP 4] click: 예정됨');
-            await page.click4();
-            console.log('[STEP 5] click: 발송 베타');
-            await page.click5();
-            console.log('[STEP 6] click: 사용자 지정');
-            await page.click6();
-            console.log('[STEP 7] type: wlrma anjgo?');
-            await page.type7('wlrma anjgo?');
-            console.log('[STEP 8] click: ');
-            await page.click8();
-            console.log('[STEP 9] click: 태블릿 자동화 파이프라인 앱 삭제 스크립트');
-            await page.click9();
-            console.log('[STEP 10] click: code-generator');
-            await page.click10();
+            console.log('[STEP 2] type: hi my name is hansung\n');
+            await page.type2('hi my name is hansung\n');
+            console.log('[STEP 3] type: what u doing rn?\n');
+            await page.type3('what u doing rn?\n');
+            console.log('[STEP 4] type: see u\n');
+            await page.type4('see u\n');
 
             expect(_failures).toEqual([]);
     });

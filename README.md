@@ -1,30 +1,35 @@
 # AI-Powered Desktop Automation Code Generator
 
-Records user interactions with any Windows desktop application and generates
-runnable test code (Appium Java TestNG or Playwright Python) via Groq AI.
+Records user interactions with any Windows desktop application (Win32, WPF,
+UWP, Qt, or Electron) and generates runnable **WebdriverIO (JavaScript)** or
+**Playwright (Python)** test code.
 
 ## Architecture
 
 ```
 React UI (3000) --HTTP--> Express (3002) --HTTP--> Python Agent (4444)
       ^                       |
-      +---- SSE live feed ----+--> Groq API (llama-3.3-70b-versatile)
+      +---- SSE live feed ----+
 ```
 
 Three cooperating processes. The Python agent captures mouse/keyboard input and
-Windows UI Automation element data; the Express bridge stores events and calls
-the AI; the React dashboard provides live monitoring and triggers code generation.
+Windows UI Automation element data; the Express bridge stores events, decides
+the replay architecture (see [App Support Tiers](#app-support-tiers) below),
+and generates the test code directly from the recorded events (template-based,
+no LLM call); the React dashboard provides live monitoring and triggers code
+generation.
 
 ## Prerequisites
 
 | Tool | Version | Notes |
 |---|---|---|
 | Python | 3.9+ | Must run agent from **Administrator** terminal |
-| Node.js | 18+ | For Express bridge and React UI |
-| Java | 11+ | For running generated Appium tests |
-| Maven | 3.8+ | `mvn -version` to verify |
-| WinAppDriver | 1.2.1 | Required for Appium Java test execution |
-| Groq API key | — | Free at console.groq.com. Enter in the UI, **or** put `GROQ_API_KEY=gsk_...` in repo-root `.env` (server-side fallback) |
+| Node.js | 18+ | For Express bridge, React UI, and generated WebdriverIO tests |
+| WinAppDriver | 1.2.1 | Install + enable Developer Mode (Settings → Privacy & security → For developers). No manual startup needed — the generated test suite's `@wdio/appium-service` spawns Appium (which proxies to WinAppDriver) automatically. |
+
+> There is no Java/Maven dependency, and no external API key is required —
+> code generation is fully template-based (see the note in
+> [Recording a Session](#2-recording-a-session)).
 
 ---
 
@@ -49,7 +54,8 @@ python agent.py
 ```
 
 If it prints `NO`, close the terminal and reopen PowerShell using
-"Run as Administrator".
+"Run as Administrator" — without it, UIA element properties
+(`automationId`/`name`) come back empty for most applications.
 
 ### Terminal 3 — React UI (normal terminal)
 
@@ -64,127 +70,88 @@ npm run dev
 
 ## 2. Recording a Session
 
-1. Select a **Target App** from the preset dropdown (Calculator / Notepad / Paint (UWP) / Registry Editor / Custom…).
-   - Presets auto-fill **App Name** and **Exe Path**.
-   - Choose **Custom…** to enter a path manually.
+1. Select a **Target App** from the preset dropdown — Calculator, Notepad,
+   Paint (UWP), Registry Editor, IDM, VSCode, GitHub Desktop, Free Download
+   Manager, Claude Desktop, or **Custom…** (enter App Name + Exe Path
+   manually; UWP apps use an AUMID like `Package.Family.Name!App` instead of
+   a file path — the agent detects the `!` and launches via
+   `explorer shell:AppsFolder` automatically).
 2. Select **Platform** (Windows / Android / iOS).
-3. Select **Output Framework**: `Appium Java (TestNG)` or `Playwright Python`.
+3. Select **Output Framework**: `WebdriverIO JavaScript (v9)` or
+   `Playwright Python`.
 4. Click **Launch** — the target app opens and recording begins.
-5. Interact with the app (clicks, typing, scrolling). **English input only** — IME/CJK keystrokes are silently ignored.
+5. Interact with the app (clicks, typing, scrolling). **English input only** —
+   IME/CJK keystrokes are silently dropped. Avoid clicking the taskbar or
+   other windows right after Launch, and wait for the app window to fully
+   render before your first click (a click captured before the target window
+   is fully resolved gets dropped rather than mis-attributed).
 6. Click **Stop** when done.
-7. Each captured event row can be **deleted individually** by hovering over it and clicking the `×` button.
-8. Enter your **Groq API Key** and click **Generate Code**.
-   If the server has `GROQ_API_KEY` set in `.env`, you can **leave the key field blank** — the
-   server uses its own key (the key is never sent to the browser). A typed key takes precedence.
-   Generated files are **saved to disk automatically** (toast confirms the path).
+7. Each captured event row can be **deleted individually** by hovering over
+   it and clicking the `×` button.
+8. Click **Generate Code**. Generated files are **saved to disk
+   automatically** (toast confirms the path) under `generated-wdio/<AppName>/`
+   (PascalCase folder name) or `generated-playwright/`.
 
 ### Generated output
 
 | Framework | Files |
 |---|---|
-| Appium Java | `{App}TestById.java`, `{App}TestByClass.java` |
-| Playwright Python | `test_{app}_playwright.py` |
+| WebdriverIO | `generated-wdio/<AppName>/{App}TestById.js`, `{App}TestByClass.js`, `wdio.conf.js`, plus `osClick.ps1`/`osScroll.ps1`/`osType.ps1`/`osWindowRect.ps1`/`osMoveWindow.ps1` replay helpers |
+| Playwright Python | `generated-playwright/test_{app}_playwright.py` |
 
-> **Note on generation (Appium Java):** The two Java files (ById + ByClass) are generated
-> **in parallel** (`Promise.all`). Each Groq call retries automatically on HTTP 429 (honouring
-> the `Retry-After` header, with backoff), so concurrent requests stay safe under the rate limit.
-> Typical generation time is ~5–12 seconds.
->
-> **Groq free-tier limits** are account-wide: ~30 req/min (RPM), 12k tokens/min (TPM),
-> and **100k tokens/day (TPD)**. Each generation uses ~6k tokens (two files), so heavy
-> re-generation can exhaust the daily 100k. If you hit TPD, generation is blocked for
-> ~30 min to several hours — **don't re-generate to test; reuse the saved `.java` files and
-> just re-run `mvn test`** (running tests uses zero Groq tokens).
-
----
-
-## 3. Install & Run WinAppDriver
-
-WinAppDriver is Microsoft's WebDriver server for Windows desktop apps.
-Required only when **running** the generated Appium Java tests.
-
-### Installation
-
-1. Download **WinAppDriver 1.2.1** installer from GitHub releases:
-   `https://github.com/microsoft/WinAppDriver/releases/tag/v1.2.1`
-   File: `WindowsApplicationDriver.msi`
-
-2. Run the installer (default path:
-   `C:\Program Files (x86)\Windows Application Driver\`)
-
-3. Enable **Developer Mode** in Windows:
-   Settings → Privacy & security → For developers → Developer Mode → On
-
-### Running WinAppDriver
-
-Open a **new Administrator PowerShell** and run:
-
-```powershell
-& "C:\Program Files (x86)\Windows Application Driver\WinAppDriver.exe"
-```
-
-Expected output:
-
-```
-Windows Application Driver listening for requests at: http://127.0.0.1:4723/
-```
-
-Leave this terminal open during the test run.
-
-> **Alternative — Appium Server.** Instead of `WinAppDriver.exe` directly, you can run
-> Appium Server (with `appium-windows-driver`), which listens on `4723` and proxies to an
-> internal WinAppDriver. The generated code connects to `http://127.0.0.1:4723` either way:
-> ```powershell
-> appium    # Appium v3.x with the 'windows' driver installed
-> ```
+> **Generation is template-based, not an LLM call.** `/api/generate` in
+> `server/server.js` builds WebdriverIO/Playwright code directly from the
+> recorded event list — no external API, no rate limits, no key required.
+> The UI still has a "Groq API Key" field and the server still loads
+> `GROQ_API_KEY` from `.env` if present, but neither is currently read by
+> the generation endpoint — they're inert leftovers from an earlier
+> LLM-based version of the generator. The two WebdriverIO files (ById +
+> ByClass) are generated together and typically finish in well under a
+> second.
 
 ---
 
-## 4. Run Generated Appium Java Tests
-
-### Setup
+## 3. Run Generated WebdriverIO Tests
 
 ```powershell
-# Java 11 (Temurin)
-winget install EclipseAdoptium.Temurin.11.JDK
-
-# Maven (if winget doesn't find it, download manually from archive.apache.org)
-# Place in C:\tools\maven\apache-maven-3.9.6\
+cd generated-wdio
+npm install          # first time only — installs webdriverio, @wdio/appium-service, appium, etc.
+npx wdio run <AppName>/wdio.conf.js
+# e.g. npx wdio run Calculator/wdio.conf.js
 ```
 
-### Step-by-step
+Appium starts automatically (via `@wdio/appium-service`) on port `4723` and
+proxies to WinAppDriver — no separate WinAppDriver terminal needed.
 
-1. Generate test files using the UI — they are **automatically saved** to
-   `test-runner\src\test\java\com\qaforge\tests\` (old files from a previous
-   app are cleaned up first so Maven doesn't compile stale tests).
-2. Start WinAppDriver as Administrator (port 4723).
-3. Run:
-   ```powershell
-   cd test-runner
-   mvn test
-   ```
-
-Test reports: `test-runner\target\surefire-reports\`
-
-To run only one file:
+To run only one spec file:
 ```powershell
-mvn test -Dtest=CalculatorTestById
+npx wdio run <AppName>/wdio.conf.js --spec ./<AppName>/{App}TestById.js
+```
+
+### Run Generated Playwright Tests
+
+```powershell
+cd generated-playwright
+pip install playwright
+playwright install
+python test_{app}_playwright.py
 ```
 
 ---
 
-## 5. Regression Testing
+## 4. Regression Testing
 
 ```powershell
-# Requires only server running (no agent, no admin rights needed)
-cd server; node server.js  # Terminal 1
-python agent/mock_events.py  # Terminal 2
-# Expected: 35/35 checks passed
-
-# With Groq key (tests code generation + Playwright syntax):
-$env:GROQ_API_KEY="gsk_..."; python agent/mock_events.py
-# Expected: 48/48 checks passed
+# Requires only the server running (no agent, no admin rights needed)
+cd server; node server.js         # Terminal 1
+python agent/mock_events.py       # Terminal 2
+# Prints "N/N checks passed"
 ```
+
+`mock_events.py` also has a handful of checks that only run when
+`GROQ_API_KEY` is set in the environment (`$env:GROQ_API_KEY="gsk_..."; python
+agent/mock_events.py`) — these are legacy checks against the same inert code
+path described above and can be skipped safely.
 
 ---
 
@@ -194,79 +161,48 @@ $env:GROQ_API_KEY="gsk_..."; python agent/mock_events.py
 |---|---|---|
 | `Agent unreachable` from Express | Python agent not running | Start `python agent.py` in Admin terminal |
 | `Administrator rights: NO` | Agent not started as Administrator | Reopen PowerShell → Run as Administrator |
-| `Connection refused` on port 4723 | WinAppDriver not running | Start `WinAppDriver.exe` as Administrator |
-| `SessionNotCreatedException` | Wrong `.exe` path in capability | Verify path passed to Launch |
-| `NoSuchElementException` | Locator mismatch or timing | Try the ByClass file instead of ById |
-| `UnsupportedCommandException: only pen and touch...` | Generated code used `Actions`/`contextClick`/`doubleClick` | WinAppDriver has no W3C mouse Actions — regenerate (prompt now maps these to `element.click()`) |
-| Generation fails `429 ... tokens per day (TPD)` | Groq free-tier daily 100k tokens exhausted | Wait ~30 min–hours (rolling window); **reuse saved `.java` + re-run `mvn test`** instead of regenerating |
-| Generation fails `429 ... tokens per minute (TPM)` | Two requests momentarily exceeded 12k/min | Auto-retried by the server; if persistent, wait ~30s |
-| `Cannot find symbol: WindowsDriver` | Wrong java-client version | Confirm `pom.xml` uses `java-client 8.6.0` |
-| UIA properties empty | Not running as Admin | Restart agent terminal as Administrator |
+| UIA properties (`automationId`/`name`) empty | Not running as Admin | Restart agent terminal as Administrator |
+| `Connection refused` on port 4723 | Appium/WinAppDriver not started | Handled automatically by `@wdio/appium-service` when you run `npx wdio run ...`; check the console for `Appium started with ID: ...` |
+| `SessionNotCreatedException` | Wrong exe path / AUMID in preset | Verify the path/AUMID passed to Launch |
+| `NoSuchElementException` | Locator mismatch or timing | Try the `ByClass` file instead of `ById` |
+| A click in the generated test lands on the wrong element/coordinate | Electron app's dynamic content (chat lists, scroll position) differs between recording and replay | Coordinate-only replay (Tier 3, see below) is inherently sensitive to app state drift — re-record close to the replay environment |
+| Recorded events include clicks on unrelated windows (taskbar, IDE, task switcher) | Clicked outside the target window during/right after recording | Delete the stray event rows before generating, or re-record avoiding other windows for the first few seconds |
 | Toast "Server connection lost" loops | Express server crashed | Restart `node server.js`; toasts fire once per episode |
 | `UnicodeEncodeError cp949` | Windows terminal encoding | Use `chcp 65001` before running Python scripts |
-| winget can't find Apache.Maven | Package not in winget catalog | Download from `archive.apache.org/dist/maven` |
-
----
-
-## Generated Code Requirements (Appium Java)
-
-Both `.java` files conform to:
-
-- Package `com.qaforge.tests`
-- TestNG `@BeforeClass` / `@Test` / `@AfterClass`
-- Page Object Model (Page + Test class in one `.java` file)
-- `WindowsOptions` for W3C-compliant driver init (java-client 8.x compatible)
-- `AppiumBy.accessibilityId()` / `By.className()` / `By.name()` locators
-- `WebDriverWait(driver, Duration.ofSeconds(15))` for every interaction
-- `System.out.println("[STEP n] ...")` before each action
-- Final `Assert` that **reuses a recorded element's locator** (never an invented control)
-- No `Thread.sleep()`, no TODOs
-
-### WinAppDriver constraints baked into the prompt
-
-- **No W3C mouse `Actions`.** WinAppDriver supports only pen/touch pointer types. Recorded
-  right-click / double-click are mapped to a plain `element.click()`; `Actions`/`contextClick`/
-  `doubleClick` are never emitted.
-- **ByClass disambiguation.** Many controls share a ClassName (every calculator key is
-  `Button`), so a bare `By.className(...)` matches the wrong (first) element. The ByClass
-  strategy combines ClassName + Name as `By.xpath("//Button[@Name='9']")` whenever a Name exists.
-- **No invented input field.** `type` events `sendKeys` to the recorded element — the prompt
-  forbids fabricating a control like `By.className("Edit")` (absent in UWP apps).
-
-### Known limitation — Paint / canvas drawing
-
-Toolbar/button clicks in Paint work, but **freehand canvas drawing (mouse drag) cannot be
-replayed** — it requires W3C mouse Actions, which WinAppDriver rejects. Use **Notepad** or
-**Calculator** for end-to-end demos; treat Paint as click-only.
 
 ---
 
 ## App Support Tiers
 
-The automation engine uses a three-tier strategy based on how much the app exposes via Windows UI Automation (UIA):
+The automation engine uses a three-tier strategy based on how much the app
+exposes via Windows UI Automation (UIA), decided per-recording by
+`needsSessionSwitching()` in `server/server.js`:
 
-| Tier | App Types | Detection | Locator Strategy |
+| Tier | App Types | Detection | Replay Strategy |
 |------|-----------|-----------|------------------|
-| 1 — Win32/WPF | Calculator, Notepad, Registry Editor, IDM | UIA tree fully available | automationId → name → className → coordinate fallback |
-| 2 — Qt | Many Qt-based desktop apps | Partial UIA tree | Mixed: selector when available, coordinate fallback |
-| 3 — Electron | VSCode, Claude Desktop, FDM, GitHub Desktop | Window class `Chrome_WidgetWin*` | Coordinate-only (relX/relY relative to window origin) |
+| 1 — Win32/WPF/UWP | Calculator, Notepad, Registry Editor, IDM | Full UIA tree, single window | `browser.$(selector)` (automationId → name → className), falls back to `getCenterSimple()` (live `getRect()`) + OS-level `osClick.ps1` click if the selector fails |
+| 2 — Qt | Free Download Manager | Partial UIA tree; containers can swallow AutomationId (QML sets it on every node, not just leaves) | Same selector-first approach as Tier 1; `UIAInspector._deepen()` walks past over-matched containers using bounding-rect/ControlType heuristics |
+| 3 — Electron / multi-window | VSCode, Claude Desktop, GitHub Desktop | Window class `Chrome_WidgetWin*`, or any app that opens more than one top-level window | Session-switching architecture: `launchApp()` launches a fresh instance and waits for a real (non-zero-size) window; clicks replay via `osClickRel(titleFrag, relX, relY, ...)`, re-reading the live window rect each time so replay tracks a moved/resized window |
 
 ### Coordinate replay
 
-All pointer events carry `relX`/`relY` (window-relative coordinates) so tests can replay even when element selectors are unavailable. The generated WDIO code uses:
-
-```javascript
-await driver.action('pointer')
-  .move({ x: relX, y: relY, origin: 'viewport' })
-  .down().up()
-  .perform();
-```
-
-For Tier 1/2 apps, selector-based clicks are generated when a stable locator exists. Tier 3 always uses coordinates.
+Pointer events carry both `relX`/`relY` (window-relative) and absolute `x`/`y`
+as a fallback. Replay is **not** done via WebdriverIO/W3C pointer Actions
+(WinAppDriver doesn't support them) — it's done via direct OS-level mouse
+injection (`user32.dll` `SendInput`, wrapped in `osClick.ps1`/`osScroll.ps1`),
+so it also works against Electron web content where `NativeWindowHandle` is 0
+and no UIA-scoped session is possible.
 
 ### Known limitations
 
-- Window must be at the same position/size as during capture for coordinate replay to be accurate.
-  The generated `beforeAll` restores the window rect automatically when `session_meta` captures it.
-- Multi-monitor setups: coordinates are always relative to the window origin (not the screen), so
-  moving the window between monitors between capture and replay will break coordinate tests.
+- **Electron coordinate replay is state-sensitive.** If the app's dynamic
+  content (chat history, scroll position, item order) differs between
+  recording and replay, a recorded pixel offset can land on the wrong
+  element — there's no selector-based verification for Electron clicks today
+  (a Root-session UIA lookup is possible but costs 10–50s per click, so it's
+  intentionally not used for every step).
+- **Paint canvas drawing.** Toolbar/button clicks work, but freehand
+  mouse-drag drawing cannot be reliably replayed.
+- **Multi-monitor moves.** Coordinates are relative to the window origin, not
+  the screen — moving the window to a different monitor between capture and
+  replay can shift coordinates if the monitor's origin differs.

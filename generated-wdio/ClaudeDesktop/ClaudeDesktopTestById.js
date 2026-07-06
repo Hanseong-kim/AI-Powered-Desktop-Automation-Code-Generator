@@ -10,10 +10,12 @@ const _failures = [];
 // OS-level click via PowerShell user32.dll — verified for Electron menus, native dialogs.
 function osClick(x, y, button = 'left', clicks = 1) {
     try {
-        execSync(
+        const out = execSync(
             `powershell -NoProfile -File "${join(__dirname, 'osClick.ps1')}" -x ${x} -y ${y} -button ${button} -clicks ${clicks}`,
             { stdio: 'pipe', timeout: 5000 }
         );
+        const diag = out.toString().trim();
+        if (diag) console.log(diag);
     } catch (e) {
         _failures.push('osClick');
         console.warn('[osClick] failed:', String(e.message || e).substring(0, 100));
@@ -118,11 +120,17 @@ async function getCenter(sid, rootElId, selector) {
         const el = await _appiumPost(path, { using, value });
         if (!el) return null;
         const elId = el.ELEMENT || el['element-6066-11e4-a52e-4f735466cecf'];
-        const r = await (await fetch(`${_APPIUM}/session/${sid}/element/${elId}/rect`)).json();
-        const rect = r.value;
-        if (!rect) return null;
-        return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
-    } catch { return null; }
+        // location+size (JSONWP) rather than /rect (W3C) — see getCenterSimple
+        // for why WinAppDriver's /rect support can't be relied on.
+        const locR = await (await fetch(`${_APPIUM}/session/${sid}/element/${elId}/location`)).json();
+        const sizeR = await (await fetch(`${_APPIUM}/session/${sid}/element/${elId}/size`)).json();
+        const loc = locR.value, size = sizeR.value;
+        if (!loc || !size) return null;
+        return { x: Math.round(loc.x + size.width / 2), y: Math.round(loc.y + size.height / 2) };
+    } catch (e) {
+        console.warn('[getCenter] live resolve failed:', String(e.message || e).substring(0, 120));
+        return null;
+    }
 }
 
 async function _typeScoped(sid, rootElId, selector, text) {
@@ -240,9 +248,12 @@ async function launchApp(exePath, args, titleFrag, rect) {
         return;
     }
     const deadline = Date.now() + 20000;
+    let poll = 0;
     while (Date.now() < deadline) {
+        poll++;
+        const matched = _listWindowHwnds(titleFrag);
         if (titleFrag && !_hwndCache[titleFrag]) {
-            const fresh = _listWindowHwnds(titleFrag).find(h => !baseline.has(h));
+            const fresh = matched.find(h => !baseline.has(h));
             if (fresh) {
                 _hwndCache[titleFrag] = fresh;
                 console.log(`[launch] tracking new window hwnd=${fresh}`);
@@ -255,6 +266,9 @@ async function launchApp(exePath, args, titleFrag, rect) {
         // isn't really there, which sent every later osClick to whatever
         // was actually on screen underneath (e.g. the desktop).
         const liveRect = _resolveWinRect(titleFrag);
+        // DIAGNOSTIC (temporary): trace why [launch] window-detection times
+        // out — remove once root cause of the Claude Desktop timeout is found.
+        console.log(`[launch-diag] poll=${poll} titleFrag=${JSON.stringify(titleFrag)} baseline=[${[...baseline]}] matched=[${matched}] hwndCache=${_hwndCache[titleFrag] ?? 'none'} liveRect=${JSON.stringify(liveRect)}`);
         if (liveRect && liveRect.width > 0 && liveRect.height > 0) {
             if (rect) {
                 normalizeWindow(titleFrag, rect.left, rect.top, rect.width, rect.height);
@@ -296,31 +310,43 @@ function osType(text) {
 
 class ClaudeDesktopPageById {
     async click1() {
-        osClickRel('Claude', 97, 121, 90, 114);
+        osClickRel('Claude', 106, 117, 133, 169);
     }
 
     async click2() {
-        osClickRel('Claude', 662, 408, 655, 401);
+        osClickRel('Claude', 100, 138, 127, 190);
     }
 
-    async type3(value) {
-        osType(value);
+    async click3() {
+        osClickRel('Claude', 97, 169, 124, 221);
     }
 
     async click4() {
-        osClickRel('Claude', 1094, 464, 1087, 457);
+        osClickRel('Claude', 91, 195, 118, 247);
     }
 
     async click5() {
-        osClickRel('Claude', 948, 666, 941, 659);
+        osClickRel('Claude', 97, 220, 124, 272);
     }
 
     async click6() {
-        osClickRel('Claude', 1233, 473, 1226, 466);
+        osClickRel('Claude', 99, 240, 126, 292);
     }
 
-    async click7() {
-        osClickRel('Claude', 983, 705, 976, 698);
+    async type7(value) {
+        osType(value);
+    }
+
+    async click8() {
+        osClickRel('Claude', 1062, 74, 1089, 126);
+    }
+
+    async click9() {
+        osClickRel('Claude', 143, 321, 170, 373);
+    }
+
+    async click10() {
+        osClickRel('Claude', 153, 345, 180, 397);
     }
 }
 
@@ -329,7 +355,7 @@ describe('ClaudeDesktopTestById', () => {
         const { hostname, port } = browser.options;
         _APPIUM = `http://${hostname || '127.0.0.1'}:${port || 4723}`;
         console.log(`[session] Appium endpoint resolved to ${_APPIUM}`);
-        await launchApp("Claude_pzs8sxrjxfjjc!Claude", [], "Claude", {"left":-7,"top":-7,"width":1550,"height":830});
+        await launchApp("Claude_pzs8sxrjxfjjc!Claude", [], "Claude", {"left":27,"top":52,"width":1218,"height":810});
     });
 
     afterAll(async () => {
@@ -344,18 +370,24 @@ describe('ClaudeDesktopTestById', () => {
 
             console.log('[STEP 1] click: 새 채팅');
             await page.click1();
-            console.log('[STEP 2] click: 오늘 어떤 도움을 드릴까요?');
+            console.log('[STEP 2] click: 프로젝트');
             await page.click2();
-            console.log('[STEP 3] type: hello im doing test\n');
-            await page.type3('hello im doing test\n');
-            console.log('[STEP 4] click: 모델: Opus 4.8 높음');
+            console.log('[STEP 3] click: 아티팩트');
+            await page.click3();
+            console.log('[STEP 4] click: 예정됨');
             await page.click4();
-            console.log('[STEP 5] click: 기본 창');
+            console.log('[STEP 5] click: 발송 베타');
             await page.click5();
-            console.log('[STEP 6] click: 메시지 보내기');
+            console.log('[STEP 6] click: 사용자 지정');
             await page.click6();
-            console.log('[STEP 7] click: ');
-            await page.click7();
+            console.log('[STEP 7] type: wlrma anjgo?');
+            await page.type7('wlrma anjgo?');
+            console.log('[STEP 8] click: ');
+            await page.click8();
+            console.log('[STEP 9] click: 태블릿 자동화 파이프라인 앱 삭제 스크립트');
+            await page.click9();
+            console.log('[STEP 10] click: code-generator');
+            await page.click10();
 
             expect(_failures).toEqual([]);
     });

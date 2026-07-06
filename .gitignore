@@ -20,3 +20,14 @@ Claude code task v2.md
 
 ui/dist/
 docs/
+
+# server 폴더 안의 모든 .log 파일 제외
+server/*.log
+
+# 또는 특정 파일만 콕 집어서 제외하고 싶다면:
+server/_out.log
+server/_out2.log
+server/_out3.log
+server/_out4.log
+server/_out5.log
+server/_out6.log
