@@ -203,6 +203,36 @@ for ($i = 0; $i -lt $clicks; $i++) {
 }
 `;
 
+// PowerShell helper script — press-hold-move-release drag via user32.dll.
+// WinAppDriver/Appium's W3C Actions API rejects mouse pointerMove ("only pen
+// and touch pointer input source types are supported" — same limitation that
+// rules out Actions for clicks, see OS_CLICK_PS1 usage), so a text-selection
+// drag (press, hold, move, release) has no WebDriver-level primitive either.
+// Replays via the same SetCursorPos+mouse_event injection as OS_CLICK_PS1,
+// but interpolates the cursor between down and up instead of moving instantly
+// (an instant SetCursorPos jump between down/up drops the selection — the
+// target app never sees the intermediate positions it needs to extend a
+// selection/drag).
+const OS_DRAG_PS1 = `param([int]$x1, [int]$y1, [int]$x2, [int]$y2, [int]$steps = 15)
+Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+$sig = '[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y); [DllImport("user32.dll")] public static extern void mouse_event(int f, int dx, int dy, int d, int e);'
+Add-Type -MemberDefinition $sig -Name WinMouse -Namespace U -ErrorAction SilentlyContinue
+[U.WinMouse]::SetCursorPos($x1, $y1) | Out-Null
+Start-Sleep -Milliseconds 150
+$landed = [System.Windows.Forms.Cursor]::Position
+Write-Output "[osDrag-diag] requested=($x1,$y1)->($x2,$y2) landed=($($landed.X),$($landed.Y))"
+[U.WinMouse]::mouse_event(2, 0, 0, 0, 0)   # MOUSEEVENTF_LEFTDOWN
+Start-Sleep -Milliseconds 80
+for ($i = 1; $i -le $steps; $i++) {
+  $ix = [int]($x1 + ($x2 - $x1) * $i / $steps)
+  $iy = [int]($y1 + ($y2 - $y1) * $i / $steps)
+  [U.WinMouse]::SetCursorPos($ix, $iy) | Out-Null
+  Start-Sleep -Milliseconds 12
+}
+Start-Sleep -Milliseconds 80
+[U.WinMouse]::mouse_event(4, 0, 0, 0, 0)   # MOUSEEVENTF_LEFTUP
+`;
+
 // PowerShell helper script — mouse wheel via user32.dll MOUSEEVENTF_WHEEL (0x0800).
 // WinAppDriver/Appium's W3C Actions API has no wheel-scroll primitive, so scroll
 // events replay the same OS-level injection approach as OS_CLICK_PS1.
@@ -317,6 +347,7 @@ public class WinMove {
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
+  [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hWnd);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   public static List<IntPtr> Find(string titleLike) {
     var found = new List<IntPtr>();
@@ -347,6 +378,21 @@ if ($hwnd) {
   }
 }
 if ($hWnd -ne [IntPtr]::Zero) {
+  # Idempotency fast-path: if the window is already at the target geometry
+  # (and not maximized), skip ShowWindow(RESTORE)+MoveWindow entirely — avoids
+  # a visible restore-then-resize flicker when replay finds the window already
+  # in the recorded position (e.g. the "already maximized" case reported
+  # 2026-07-07: recorded flow assumes a maximize step is needed, but the
+  # window is already there).
+  $already = New-Object WinMove+RECT
+  [WinMove]::GetWindowRect($hWnd, [ref]$already) | Out-Null
+  $sameW = [math]::Abs(($already.Right - $already.Left) - $width) -le 2
+  $sameH = [math]::Abs(($already.Bottom - $already.Top) - $height) -le 2
+  $sameL = [math]::Abs($already.Left - $left) -le 2
+  $sameT = [math]::Abs($already.Top - $top) -le 2
+  if (-not [WinMove]::IsZoomed($hWnd) -and $sameW -and $sameH -and $sameL -and $sameT) {
+    exit
+  }
   [WinMove]::ShowWindow($hWnd, 9) | Out-Null
   Start-Sleep -Milliseconds 300
   $candW = $width
@@ -441,6 +487,125 @@ if ($hwnd) {
 }
 `;
 
+// PowerShell helper — Fail-and-Recover popup dismissal (v1). Only ever invoked
+// AFTER a step has already failed (see _step() in the headers below), so it
+// costs nothing on the happy path. Scans for candidate popup windows — dialog
+// class #32770, or any OTHER top-level window owned by the same process as
+// the known main-app window (owner-PID scoping prevents dismissing an
+// unrelated app's dialog) — and clicks the first button matching a
+// conservative preference order (no-side-effect buttons first). $hwnd (when
+// known) identifies the main app window deterministically, same rationale as
+// -hwnd elsewhere (see OS_WINRECT_PS1); $titleLike is the fallback.
+const OS_DISMISS_POPUP_PS1 = `param([string]$titleLike, [string]$hwnd)
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes -ErrorAction SilentlyContinue
+Add-Type @"
+using System;
+using System.Text;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public class PopupWin {
+  public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc proc, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
+  [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder sb, int max);
+  [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern int GetClassName(IntPtr hWnd, StringBuilder sb, int max);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+  [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+  public static List<IntPtr> AllTop() {
+    var f = new List<IntPtr>();
+    EnumWindows((h, l) => { if (IsWindowVisible(h)) f.Add(h); return true; }, IntPtr.Zero);
+    return f;
+  }
+  public static string ClassOf(IntPtr h) {
+    var sb = new StringBuilder(256);
+    GetClassName(h, sb, sb.Capacity);
+    return sb.ToString();
+  }
+  public static string TitleOf(IntPtr h) {
+    int len = GetWindowTextLength(h);
+    if (len == 0) return "";
+    var sb = new StringBuilder(len + 1);
+    GetWindowText(h, sb, sb.Capacity);
+    return sb.ToString();
+  }
+  public static uint PidOf(IntPtr h) {
+    uint pid; GetWindowThreadProcessId(h, out pid); return pid;
+  }
+}
+"@ -ErrorAction SilentlyContinue
+
+$mainHwnd = [IntPtr]::Zero
+if ($hwnd) { $mainHwnd = [IntPtr]([int64]$hwnd) }
+elseif ($titleLike) {
+  foreach ($h in [PopupWin]::AllTop()) {
+    if ([PopupWin]::TitleOf($h).Contains($titleLike)) { $mainHwnd = $h; break }
+  }
+}
+$targetPid = 0
+if ($mainHwnd -ne [IntPtr]::Zero) { $targetPid = [PopupWin]::PidOf($mainHwnd) }
+
+$candidates = New-Object System.Collections.Generic.List[IntPtr]
+foreach ($h in [PopupWin]::AllTop()) {
+  if ($h -eq $mainHwnd) { continue }
+  $cls = [PopupWin]::ClassOf($h)
+  $isDialogClass = ($cls -eq '#32770')
+  $isOwnedByTarget = ($targetPid -ne 0 -and [PopupWin]::PidOf($h) -eq $targetPid)
+  if ($isDialogClass -or $isOwnedByTarget) { $candidates.Add($h) }
+}
+
+# Conservative order: no-side-effect dismissal first (Cancel/No/Close), only
+# reach for an affirmative (OK/Yes) if nothing safer matched — a wrong click
+# here should never silently accept a destructive action.
+$preferred = @('취소', '아니요', '닫기', 'Cancel', 'No', 'Close', '확인', 'OK', '예', 'Yes')
+
+$dismissed = $false
+foreach ($h in $candidates) {
+  if ($dismissed) { break }
+  try {
+    $el = [System.Windows.Automation.AutomationElement]::FromHandle($h)
+    if (-not $el) { continue }
+    $cond = New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::Button)
+    $buttons = $el.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)
+    foreach ($btnName in $preferred) {
+      if ($dismissed) { break }
+      foreach ($b in $buttons) {
+        if ($b.Current.Name -ne $btnName) { continue }
+        $clicked = $false
+        try {
+          $inv = $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+          $inv.Invoke()
+          $clicked = $true
+        } catch {
+          try {
+            $legacy = $b.GetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern)
+            $legacy.DoDefaultAction()
+            $clicked = $true
+          } catch {
+            # Owner-drawn / non-standard control — last resort: BM_CLICK via SendMessage.
+            try {
+              $bh = [IntPtr]$b.Current.NativeWindowHandle
+              if ($bh -ne [IntPtr]::Zero) { [PopupWin]::SendMessage($bh, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null; $clicked = $true }
+            } catch {}
+          }
+        }
+        if ($clicked) {
+          $deadline = (Get-Date).AddSeconds(3)
+          while ((Get-Date) -lt $deadline -and [PopupWin]::IsWindow($h)) { Start-Sleep -Milliseconds 100 }
+          Write-Output "DISMISSED|$btnName|$([PopupWin]::TitleOf($h))"
+          $dismissed = $true
+        }
+        break
+      }
+    }
+  } catch {}
+}
+if (-not $dismissed) { Write-Output "NONE" }
+`;
+
 /** 앱 이름 → PascalCase 클래스명 접두어 */
 function toPascal(appName) {
   const raw = (appName || 'MyApp').replace(/[^A-Za-z0-9]/g, '');
@@ -533,10 +698,16 @@ function wdioSelectorById(el) {
 
 function wdioSelectorByClass(el) {
   if (!el) return null;
+  // controlType이 알려져 있으면 XPath 태그를 그걸로 제한 — WinAppDriver의 XML은
+  // 노드 태그명이 곧 ControlType이므로(예: Button, Edit, Pane), 와일드카드(*)보다
+  // 탐색 폭이 좁아지고 잘못된 노드(예: 컬럼 헤더)에 매칭될 여지가 줄어든다
+  // (confirmed 2026-07-07 — VSCode ByClass가 UIProperty/@Name="이름" 와일드카드로
+  // 엉뚱한 노드를 골라 osClick 타임아웃을 유발).
+  const tag = (el.controlType && /^[A-Za-z]+$/.test(el.controlType)) ? el.controlType : '*';
   if (el.className && isStableClassName(el.className) && el.name)
-    return `'//*[@ClassName="${escapeAttr(el.className)}" and @Name="${escapeAttr(el.name)}"]'`;
-  if (el.className && isStableClassName(el.className)) return `'//*[@ClassName="${escapeAttr(el.className)}"]'`;
-  if (el.name)         return `'//*[@Name="${escapeAttr(el.name)}"]'`;
+    return `'//${tag}[@ClassName="${escapeAttr(el.className)}" and @Name="${escapeAttr(el.name)}"]'`;
+  if (el.className && isStableClassName(el.className)) return `'//${tag}[@ClassName="${escapeAttr(el.className)}"]'`;
+  if (el.name)         return `'//${tag}[@Name="${escapeAttr(el.name)}"]'`;
   if (el.automationId) return `'~${escapeAttr(el.automationId)}'`;
   return null;
 }
@@ -582,19 +753,41 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // 주입/헬스 실패 수집 — 마지막에 실질 assert로 검증.
 const _failures = [];
+// 조용히 넘어갈 수 있는 성능/폴백 신호 — 실패는 아니지만 재생 품질 저하 가능성을 기록.
+const _warnings = [];
 
-// OS-level click fallback via PowerShell user32.dll.
-function osClick(x, y, button = 'left', clicks = 1) {
+// One-time PowerShell/.NET cold-start warm-up. execSync's per-call timeout
+// budget was getting eaten by PowerShell's own process-spawn + Add-Type JIT
+// cost on the FIRST call of a run (confirmed 2026-07-07 — VSCode multi-window
+// osClick timeouts under concurrent PowerShell spawns). Absorbing that cost
+// once in beforeAll keeps every real step's timeout budget for the actual work.
+function _warmupPowerShell() {
     try {
-        const out = execSync(
-            \`powershell -NoProfile -File "\${join(__dirname, 'osClick.ps1')}" -x \${x} -y \${y} -button \${button} -clicks \${clicks}\`,
-            { stdio: 'pipe', timeout: 5000 }
-        );
-        const diag = out.toString().trim();
-        if (diag) console.log(diag);
+        execSync('powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms"', { stdio: 'pipe', timeout: 30000 });
     } catch (e) {
-        _failures.push('osClick');
-        console.warn('[osClick] failed:', String(e.message || e).substring(0, 100));
+        console.warn('[warmup] powershell warm-up failed (non-fatal):', String(e.message || e).substring(0, 100));
+    }
+}
+
+// OS-level click fallback via PowerShell user32.dll. Retries once before
+// giving up — a single slow PowerShell cold-start under process-spawn
+// contention shouldn't fail the whole step (confirmed 2026-07-07).
+function osClick(x, y, button = 'left', clicks = 1) {
+    const cmd = \`powershell -NoProfile -File "\${join(__dirname, 'osClick.ps1')}" -x \${x} -y \${y} -button \${button} -clicks \${clicks}\`;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+            const out = execSync(cmd, { stdio: 'pipe', timeout: 15000 });
+            const diag = out.toString().trim();
+            if (diag) console.log(diag);
+            return;
+        } catch (e) {
+            if (attempt === 2) {
+                _failures.push('osClick');
+                console.warn('[osClick] failed after retry:', String(e.message || e).substring(0, 100));
+            } else {
+                console.warn('[osClick] attempt 1 failed, retrying:', String(e.message || e).substring(0, 100));
+            }
+        }
     }
 }
 
@@ -603,11 +796,33 @@ function osScroll(x, y, delta) {
     try {
         execSync(
             \`powershell -NoProfile -File "\${join(__dirname, 'osScroll.ps1')}" -x \${x} -y \${y} -delta \${delta}\`,
-            { stdio: 'pipe', timeout: 5000 }
+            { stdio: 'pipe', timeout: 15000 }
         );
     } catch (e) {
         _failures.push('osScroll');
         console.warn('[osScroll] failed:', String(e.message || e).substring(0, 100));
+    }
+}
+
+// OS-level press-hold-move-release drag via PowerShell user32.dll (text
+// selection etc.) — same execSync injection approach as osClick/osScroll,
+// retried once for the same PowerShell cold-start reason as osClick.
+function osDrag(x1, y1, x2, y2) {
+    const cmd = \`powershell -NoProfile -File "\${join(__dirname, 'osDrag.ps1')}" -x1 \${x1} -y1 \${y1} -x2 \${x2} -y2 \${y2}\`;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+            const out = execSync(cmd, { stdio: 'pipe', timeout: 15000 });
+            const diag = out.toString().trim();
+            if (diag) console.log(diag);
+            return;
+        } catch (e) {
+            if (attempt === 2) {
+                _failures.push('osDrag');
+                console.warn('[osDrag] failed after retry:', String(e.message || e).substring(0, 100));
+            } else {
+                console.warn('[osDrag] attempt 1 failed, retrying:', String(e.message || e).substring(0, 100));
+            }
+        }
     }
 }
 
@@ -641,7 +856,7 @@ function osActivate(titleLike) {
         const args = _appHwnd ? \`-hwnd \${_appHwnd}\` : \`-titleLike "\${titleLike}"\`;
         execSync(
             \`powershell -NoProfile -File "\${join(__dirname, 'osActivate.ps1')}" \${args}\`,
-            { stdio: 'pipe', timeout: 5000 }
+            { stdio: 'pipe', timeout: 15000 }
         );
     } catch (e) {
         console.warn('[osActivate] failed:', String(e.message || e).substring(0, 100));
@@ -684,7 +899,7 @@ function _resolveWinRect(titleLike) {
         const args = _appHwnd ? \`-hwnd \${_appHwnd}\` : \`-titleLike "\${titleLike}"\`;
         const out = execSync(
             \`powershell -NoProfile -File "\${join(__dirname, 'osWindowRect.ps1')}" \${args}\`,
-            { stdio: 'pipe', timeout: 5000 }
+            { stdio: 'pipe', timeout: 15000 }
         ).toString().trim();
         const m = out.match(/(-?\\d+)\\s+(-?\\d+)\\s+(-?\\d+)\\s+(-?\\d+)/);
         if (m) return { left: +m[1], top: +m[2], width: +m[3], height: +m[4] };
@@ -704,7 +919,7 @@ function normalizeWindowSimple(rect) {
     try {
         execSync(
             \`powershell -NoProfile -File "\${join(__dirname, 'osMoveWindow.ps1')}" -hwnd \${_appHwnd} -left \${rect.left} -top \${rect.top} -width \${rect.width} -height \${rect.height}\`,
-            { stdio: 'pipe', timeout: 8000 }
+            { stdio: 'pipe', timeout: 15000 }
         );
         const after = _resolveWinRect('');
         console.log('[normalize] window moved to', after);
@@ -716,13 +931,18 @@ function normalizeWindowSimple(rect) {
 
 function osClickRel(titleLike, relX, relY, absX, absY, button = 'left', clicks = 1) {
     const r = _resolveWinRect(titleLike);
-    if (r) osClick(r.left + relX, r.top + relY, button, clicks);
-    else   osClick(absX, absY, button, clicks);   // window not found — absolute fallback only
+    if (r) { osClick(r.left + relX, r.top + relY, button, clicks); }
+    else { _failures.push('absCoord-fallback'); osClick(absX, absY, button, clicks); }
 }
 function osScrollRel(titleLike, relX, relY, absX, absY, delta) {
     const r = _resolveWinRect(titleLike);
-    if (r) osScroll(r.left + relX, r.top + relY, delta);
-    else   osScroll(absX, absY, delta);
+    if (r) { osScroll(r.left + relX, r.top + relY, delta); }
+    else { _failures.push('absCoord-fallback'); osScroll(absX, absY, delta); }
+}
+function osDragRel(titleLike, relX1, relY1, relX2, relY2, absX1, absY1, absX2, absY2) {
+    const r = _resolveWinRect(titleLike);
+    if (r) { osDrag(r.left + relX1, r.top + relY1, r.left + relX2, r.top + relY2); }
+    else { _failures.push('absCoord-fallback'); osDrag(absX1, absY1, absX2, absY2); }
 }
 
 // Qt/QML controls only: el.setValue() (UIA ValuePattern) crashes WinAppDriver
@@ -735,12 +955,49 @@ function osType(text) {
         const b64 = Buffer.from(text, 'utf8').toString('base64');
         execSync(
             \`powershell -NoProfile -File "\${join(__dirname, 'osType.ps1')}" -b64 "\${b64}"\`,
-            { stdio: 'pipe', timeout: 8000 }
+            { stdio: 'pipe', timeout: 15000 }
         );
     } catch (e) {
         _failures.push('osType');
         console.warn('[osType] failed:', String(e.message || e).substring(0, 100));
     }
+}
+
+// Fail-and-Recover popup dismissal (v1) — only called from _step() below,
+// after a step has already failed, so the happy path pays zero cost.
+// _appHwnd (resolved by initAppHwnd() in beforeAll) identifies the main
+// app window deterministically for owner-PID scoping.
+function osDismissPopup() {
+    try {
+        const args = _appHwnd ? \`-hwnd \${_appHwnd}\` : '';
+        const out = execSync(
+            \`powershell -NoProfile -File "\${join(__dirname, 'osDismissPopup.ps1')}" \${args}\`,
+            { stdio: 'pipe', timeout: 15000 }
+        ).toString().trim();
+        if (out.startsWith('DISMISSED')) { console.log('[popup]', out); return true; }
+        return false;
+    } catch (e) {
+        console.warn('[osDismissPopup] failed:', String(e.message || e).substring(0, 100));
+        return false;
+    }
+}
+
+// Wraps a single replay step: on the happy path (no exception, no new
+// _failures entry) this costs nothing extra. On failure, scans for and
+// dismisses a known-shape popup that didn't exist at recording time (e.g.
+// FDM's "file already exists"), then retries the step ONCE. If no popup was
+// found, the original failure/exception stands untouched.
+async function _step(label, fn) {
+    console.log('[STEP] ' + label);
+    const before = _failures.length;
+    let err = null;
+    try { await fn(); } catch (e) { err = e; }
+    if (!err && _failures.length === before) return;
+    const dismissed = osDismissPopup();
+    if (!dismissed) { if (err) throw err; return; }
+    _warnings.push('popup-dismissed:' + label);
+    _failures.length = before;
+    await fn();
 }
 
 `;
@@ -754,19 +1011,41 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // 주입/헬스 실패 수집 — 마지막에 실질 assert로 검증.
 const _failures = [];
+// 조용히 넘어갈 수 있는 성능/폴백 신호 — 실패는 아니지만 재생 품질 저하 가능성을 기록.
+const _warnings = [];
+
+// One-time PowerShell/.NET cold-start warm-up. execSync's per-call timeout
+// budget was getting eaten by PowerShell's own process-spawn + Add-Type JIT
+// cost on the FIRST call of a run (confirmed 2026-07-07 — VSCode multi-window
+// osClick timeouts under concurrent PowerShell spawns). Absorbing that cost
+// once in beforeAll keeps every real step's timeout budget for the actual work.
+function _warmupPowerShell() {
+    try {
+        execSync('powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms"', { stdio: 'pipe', timeout: 30000 });
+    } catch (e) {
+        console.warn('[warmup] powershell warm-up failed (non-fatal):', String(e.message || e).substring(0, 100));
+    }
+}
 
 // OS-level click via PowerShell user32.dll — verified for Electron menus, native dialogs.
+// Retries once before giving up — a single slow PowerShell cold-start under
+// process-spawn contention shouldn't fail the whole step (confirmed 2026-07-07).
 function osClick(x, y, button = 'left', clicks = 1) {
-    try {
-        const out = execSync(
-            \`powershell -NoProfile -File "\${join(__dirname, 'osClick.ps1')}" -x \${x} -y \${y} -button \${button} -clicks \${clicks}\`,
-            { stdio: 'pipe', timeout: 5000 }
-        );
-        const diag = out.toString().trim();
-        if (diag) console.log(diag);
-    } catch (e) {
-        _failures.push('osClick');
-        console.warn('[osClick] failed:', String(e.message || e).substring(0, 100));
+    const cmd = \`powershell -NoProfile -File "\${join(__dirname, 'osClick.ps1')}" -x \${x} -y \${y} -button \${button} -clicks \${clicks}\`;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+            const out = execSync(cmd, { stdio: 'pipe', timeout: 15000 });
+            const diag = out.toString().trim();
+            if (diag) console.log(diag);
+            return;
+        } catch (e) {
+            if (attempt === 2) {
+                _failures.push('osClick');
+                console.warn('[osClick] failed after retry:', String(e.message || e).substring(0, 100));
+            } else {
+                console.warn('[osClick] attempt 1 failed, retrying:', String(e.message || e).substring(0, 100));
+            }
+        }
     }
 }
 
@@ -775,11 +1054,33 @@ function osScroll(x, y, delta) {
     try {
         execSync(
             \`powershell -NoProfile -File "\${join(__dirname, 'osScroll.ps1')}" -x \${x} -y \${y} -delta \${delta}\`,
-            { stdio: 'pipe', timeout: 5000 }
+            { stdio: 'pipe', timeout: 15000 }
         );
     } catch (e) {
         _failures.push('osScroll');
         console.warn('[osScroll] failed:', String(e.message || e).substring(0, 100));
+    }
+}
+
+// OS-level press-hold-move-release drag via PowerShell user32.dll (text
+// selection etc.) — same execSync injection approach as osClick/osScroll,
+// retried once for the same PowerShell cold-start reason as osClick.
+function osDrag(x1, y1, x2, y2) {
+    const cmd = \`powershell -NoProfile -File "\${join(__dirname, 'osDrag.ps1')}" -x1 \${x1} -y1 \${y1} -x2 \${x2} -y2 \${y2}\`;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+            const out = execSync(cmd, { stdio: 'pipe', timeout: 15000 });
+            const diag = out.toString().trim();
+            if (diag) console.log(diag);
+            return;
+        } catch (e) {
+            if (attempt === 2) {
+                _failures.push('osDrag');
+                console.warn('[osDrag] failed after retry:', String(e.message || e).substring(0, 100));
+            } else {
+                console.warn('[osDrag] attempt 1 failed, retrying:', String(e.message || e).substring(0, 100));
+            }
+        }
     }
 }
 
@@ -846,12 +1147,13 @@ async function getWindowSession(title) {
     }
     const app = hwnd || 'Root';
     if (hwnd) console.log(\`[session] hwnd=\${hwnd} → scoped session\`);
-    else console.warn(\`[session] Window "\${title}" not found — falling back to Root\`);
+    else { console.warn(\`[session] Window "\${title}" not found — falling back to Root\`); _warnings.push('session-fallback:' + title); }
     try {
         const sid = await _createSession(app);
         _sessionIds[title] = { sid, rootElId: null };
     } catch (e) {
         console.warn(\`[session] scoped session failed (\${e.message}) — reusing Root session for "\${title}"\`);
+        _warnings.push('session-fallback:' + title);
         _sessionIds[title] = { sid: browser.sessionId, rootElId: matchedEl ? matchedEl.elementId : null };
     }
     return _sessionIds[title];
@@ -913,12 +1215,17 @@ async function _typeScoped(sid, rootElId, selector, text) {
 // can land recorded titlebar clicks (including close) on the WRONG window.
 const _hwndCache = {};
 
+// Main app window title-fragment, set once in beforeAll (see generateWdio's
+// beforeHook) — lets osDismissPopup() identify the main window/PID for
+// owner-PID scoping without every call site having to pass it in.
+let _mainTitleFrag = '';
+
 function _listWindowHwnds(frag) {
     if (!frag) return [];
     try {
         const out = execSync(
             \`powershell -NoProfile -File "\${join(__dirname, 'osWindowRect.ps1')}" -titleLike "\${frag}" -listOnly\`,
-            { stdio: 'pipe', timeout: 5000 }
+            { stdio: 'pipe', timeout: 15000 }
         ).toString().trim();
         if (!out) return [];
         return out.split(/\\r?\\n/).map(s => s.trim()).filter(Boolean).map(Number);
@@ -934,7 +1241,7 @@ function _resolveWinRect(frag) {
         const args = hwnd ? \`-hwnd \${hwnd}\` : \`-titleLike "\${frag}"\`;
         const out = execSync(
             \`powershell -NoProfile -File "\${join(__dirname, 'osWindowRect.ps1')}" \${args}\`,
-            { stdio: 'pipe', timeout: 5000 }
+            { stdio: 'pipe', timeout: 15000 }
         ).toString().trim();
         const m = out.match(/(-?\\d+)\\s+(-?\\d+)\\s+(-?\\d+)\\s+(-?\\d+)/);
         if (m) return { left: +m[1], top: +m[2], width: +m[3], height: +m[4] };
@@ -958,7 +1265,7 @@ function normalizeWindow(frag, left, top, width, height) {
         const target = hwnd ? \`-hwnd \${hwnd}\` : \`-titleLike "\${frag}"\`;
         execSync(
             \`powershell -NoProfile -File "\${join(__dirname, 'osMoveWindow.ps1')}" \${target} -left \${left} -top \${top} -width \${width} -height \${height}\`,
-            { stdio: 'pipe', timeout: 8000 }
+            { stdio: 'pipe', timeout: 15000 }
         );
     } catch (e) {
         _failures.push('moveWindow');
@@ -1033,13 +1340,18 @@ async function launchApp(exePath, args, titleFrag, rect) {
 
 function osClickRel(frag, relX, relY, absX, absY, button = 'left', clicks = 1) {
     const r = _resolveWinRect(frag);
-    if (r) osClick(r.left + relX, r.top + relY, button, clicks);
-    else   osClick(absX, absY, button, clicks);      // 창 못 찾으면 녹화 절대좌표로 폴백
+    if (r) { osClick(r.left + relX, r.top + relY, button, clicks); }
+    else { _failures.push('absCoord-fallback'); osClick(absX, absY, button, clicks); }      // 창 못 찾으면 녹화 절대좌표로 폴백 — 실패로 기록
 }
 function osScrollRel(frag, relX, relY, absX, absY, delta) {
     const r = _resolveWinRect(frag);
-    if (r) osScroll(r.left + relX, r.top + relY, delta);
-    else   osScroll(absX, absY, delta);
+    if (r) { osScroll(r.left + relX, r.top + relY, delta); }
+    else { _failures.push('absCoord-fallback'); osScroll(absX, absY, delta); }
+}
+function osDragRel(frag, relX1, relY1, relX2, relY2, absX1, absY1, absX2, absY2) {
+    const r = _resolveWinRect(frag);
+    if (r) { osDrag(r.left + relX1, r.top + relY1, r.left + relX2, r.top + relY2); }
+    else { _failures.push('absCoord-fallback'); osDrag(absX1, absY1, absX2, absY2); }
 }
 
 // Electron 입력: 직전 osClick이 포커스를 잡아둔 상태 → OS 키 주입.
@@ -1048,12 +1360,51 @@ function osType(text) {
         const b64 = Buffer.from(text, 'utf8').toString('base64');
         execSync(
             \`powershell -NoProfile -File "\${join(__dirname, 'osType.ps1')}" -b64 "\${b64}"\`,
-            { stdio: 'pipe', timeout: 8000 }
+            { stdio: 'pipe', timeout: 15000 }
         );
     } catch (e) {
         _failures.push('osType');
         console.warn('[osType] failed:', String(e.message || e).substring(0, 100));
     }
+}
+
+// Fail-and-Recover popup dismissal (v1) — only called from _step() below,
+// after a step has already failed, so the happy path pays zero cost.
+// Prefers the tracked hwnd for the main app window (_hwndCache[_mainTitleFrag],
+// set by launchApp) for deterministic owner-PID scoping; falls back to a
+// title-substring match when no hwnd was tracked (e.g. app already running).
+function osDismissPopup() {
+    try {
+        const hwnd = _hwndCache[_mainTitleFrag];
+        const args = hwnd ? \`-hwnd \${hwnd}\` : (_mainTitleFrag ? \`-titleLike "\${_mainTitleFrag}"\` : '');
+        const out = execSync(
+            \`powershell -NoProfile -File "\${join(__dirname, 'osDismissPopup.ps1')}" \${args}\`,
+            { stdio: 'pipe', timeout: 15000 }
+        ).toString().trim();
+        if (out.startsWith('DISMISSED')) { console.log('[popup]', out); return true; }
+        return false;
+    } catch (e) {
+        console.warn('[osDismissPopup] failed:', String(e.message || e).substring(0, 100));
+        return false;
+    }
+}
+
+// Wraps a single replay step: on the happy path (no exception, no new
+// _failures entry) this costs nothing extra. On failure, scans for and
+// dismisses a known-shape popup that didn't exist at recording time (e.g.
+// FDM's "file already exists"), then retries the step ONCE. If no popup was
+// found, the original failure/exception stands untouched.
+async function _step(label, fn) {
+    console.log('[STEP] ' + label);
+    const before = _failures.length;
+    let err = null;
+    try { await fn(); } catch (e) { err = e; }
+    if (!err && _failures.length === before) return;
+    const dismissed = osDismissPopup();
+    if (!dismissed) { if (err) throw err; return; }
+    _warnings.push('popup-dismissed:' + label);
+    _failures.length = before;
+    await fn();
 }
 
 `;
@@ -1127,8 +1478,36 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
         );
       }
       testSteps.push(
-`            console.log('[STEP ${stepNum}] scroll: delta=${wheelDelta}');
-            await page.scroll${stepNum}();`
+`            await _step('${stepNum}:scroll delta=${wheelDelta}', () => page.scroll${stepNum}());`
+      );
+      return;
+    }
+
+    if (e.action === 'drag') {
+      // Press-hold-move-release (e.g. text selection). WinAppDriver/Appium's
+      // W3C Actions API has no pointer-move primitive (same limitation that
+      // rules out Actions for clicks), so this replays via OS-level injection
+      // like click/scroll. Same relFrag logic as click/scroll covers simple
+      // mode, session mode, and Electron windows uniformly.
+      const endX = e.endX ?? x;
+      const endY = e.endY ?? y;
+      const hasEndRel = Number.isInteger(e.endRelX) && Number.isInteger(e.endRelY);
+      if (hasRel && hasEndRel && relTitle) {
+        const relFrag = electronCtx ? winFrag : relTitle;
+        pageMethods.push(
+`    async drag${stepNum}() {
+        osDragRel('${escapeStr(relFrag)}', ${e.relX}, ${e.relY}, ${e.endRelX}, ${e.endRelY}, ${x}, ${y}, ${endX}, ${endY});
+    }`
+        );
+      } else {
+        pageMethods.push(
+`    async drag${stepNum}() {
+        osDrag(${x}, ${y}, ${endX}, ${endY});
+    }`
+        );
+      }
+      testSteps.push(
+`            await _step('${stepNum}:drag (${x},${y})->(${endX},${endY})', () => page.drag${stepNum}());`
       );
       return;
     }
@@ -1211,8 +1590,7 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
         );
       }
       testSteps.push(
-`            console.log('[STEP ${stepNum}] type: ${escapeStr(e.value)}');
-            await page.type${stepNum}('${escapeStr(e.value)}');`
+`            await _step('${stepNum}:type ${escapeStr(e.value)}', () => page.type${stepNum}('${escapeStr(e.value)}'));`
       );
     } else if (e.action === 'type') {
       testSteps.push(`            // [STEP ${stepNum}] skip type on non-editable element`);
@@ -1237,6 +1615,7 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
             s = await getWindowSession('${titleArg}');
             c = await getCenter(s.sid, s.rootElId, ${sel});
         }
+        if (!c) { _failures.push('click${stepNum}:coord-fallback'); }
         c = c ?? { x: ${x}, y: ${y} };
         osClick(c.x, c.y${btnArg});
     }`
@@ -1344,15 +1723,15 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
         );
       }
       testSteps.push(
-`            console.log('[STEP ${stepNum}] click: ${escapeStr(e.element?.name || '')}');
-            await page.click${stepNum}();`
+`            await _step('${stepNum}:${e.action} ${escapeStr(e.element?.name || '')}', () => page.click${stepNum}());`
       );
     }
   });
 
   // OS 주입(osClick/osScroll/type) 실패를 실제 assert로 검증(거짓 통과 방지).
-  // SIMPLE_HEADER/SESSION_HEADER 둘 다 _failures를 갖는다.
-  const assertLine = `            expect(_failures).toEqual([]);`;
+  // SIMPLE_HEADER/SESSION_HEADER 둘 다 _failures/_warnings를 갖는다.
+  const assertLine = `            if (_warnings.length) console.warn('[replay-warnings]', _warnings);
+            expect(_failures).toEqual([]);`;
 
   const header   = useSession ? SESSION_HEADER : SIMPLE_HEADER;
   const launchCall = (useSession && exePath && winFragOk)
@@ -1368,8 +1747,17 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
   const activateStep = simpleWinTitle
     ? `            osActivate(${JSON.stringify(simpleWinTitle)});\n`
     : '';
+  // Best available fragment identifying the main app window, for
+  // osDismissPopup()'s owner-PID scoping (session mode only — simple mode
+  // uses _appHwnd directly, already resolved by initAppHwnd()).
+  const mainTitleFrag = useSession
+    ? (winFragOk ? winFrag : (filtered.find(e => e.element?.windowTitle)?.element?.windowTitle || ''))
+    : '';
+
   const beforeHook = useSession ? `
     beforeAll(async () => {
+        _warmupPowerShell();
+        _mainTitleFrag = ${JSON.stringify(mainTitleFrag)};
         const { hostname, port } = browser.options;
         _APPIUM = \`http://\${hostname || '127.0.0.1'}:\${port || 4723}\`;
         console.log(\`[session] Appium endpoint resolved to \${_APPIUM}\`);
@@ -1391,6 +1779,7 @@ ${launchCall}    });
   // before the first step.
   const simpleBeforeHook = !useSession ? `
     beforeAll(async () => {
+        _warmupPowerShell();
         await initAppHwnd();
         normalizeWindowSimple(${JSON.stringify(recordedRect)});
     });
@@ -1555,13 +1944,15 @@ app.post('/api/generate', (req, res) => {
     const confContent = buildWdioConf(exe || name, wdioFiles.map(f => f.filename), useSession);
     const confFile    = { filename: 'wdio.conf.js', content: confContent };
     const ps1File     = { filename: 'osClick.ps1',  content: OS_CLICK_PS1 };
+    const dragPs1File   = { filename: 'osDrag.ps1',   content: OS_DRAG_PS1 };
     const scrollPs1File = { filename: 'osScroll.ps1', content: OS_SCROLL_PS1 };
     const winRectPs1File = { filename: 'osWindowRect.ps1', content: OS_WINRECT_PS1 };
     const moveWinPs1File = { filename: 'osMoveWindow.ps1', content: OS_MOVEWINDOW_PS1 };
     const typePs1File    = { filename: 'osType.ps1',       content: OS_TYPE_PS1 };
     const activatePs1File = { filename: 'osActivate.ps1',  content: OS_ACTIVATE_PS1 };
+    const dismissPopupPs1File = { filename: 'osDismissPopup.ps1', content: OS_DISMISS_POPUP_PS1 };
     const { savedPaths: wdioPaths, saveError: wdioErr } = saveFiles(
-      [...wdioFiles, confFile, ps1File, scrollPs1File, winRectPs1File, moveWinPs1File, typePs1File, activatePs1File], wdioOutDir
+      [...wdioFiles, confFile, ps1File, dragPs1File, scrollPs1File, winRectPs1File, moveWinPs1File, typePs1File, activatePs1File, dismissPopupPs1File], wdioOutDir
     );
 
     const warnings = !exe ? ['exePath missing — launchApp will be skipped'] : [];

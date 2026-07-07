@@ -21,6 +21,7 @@ MUST be run from an *Administrator* terminal, otherwise UIA properties
 """
 
 import json
+import math
 import os
 import queue
 import re
@@ -48,6 +49,11 @@ EXPRESS_EVENTS_URL = "http://localhost:3002/api/events"
 
 DOUBLE_CLICK_INTERVAL = 0.50   # seconds
 DOUBLE_CLICK_RADIUS = 6        # pixels
+DRAG_MIN_DIST = 10             # pixels — press-to-release distance above which
+                                # a left click is recorded as a drag instead
+                                # (deliberately above DOUBLE_CLICK_RADIUS so a
+                                # normal double-click's small jitter never
+                                # misfires as a drag)
 SCROLL_FLUSH_IDLE = 0.40       # seconds of no scrolling -> emit scroll event
 QUEUE_POLL_TIMEOUT = 0.20      # worker wakeup interval for pending flushes
 DISCOVER_TIMEOUT = 5.0         # seconds to wait for the target window to appear
@@ -471,6 +477,10 @@ class Recorder:
         self._pending_scroll = None
         self._type_buffer = ""
         self._type_elem = None       # element info captured at first keystroke
+        # Left-click emission is deferred from press to release so a
+        # press-hold-move-release gesture can be told apart from a plain
+        # click (drag support) — see _on_click/_handle/_emit_click_from_press.
+        self._pending_press = None
 
     # ---------------- control ----------------
     def start(self, app_name, exe_path, platform):
@@ -544,14 +554,17 @@ class Recorder:
     # synthesised (e.g. UWP buttons emit injected keystrokes on click, or an
     # automation tool sends input). We only record genuine physical input.
     def _on_click(self, x, y, button, pressed, injected=False):
-        if not self.recording or not pressed or injected:
+        if not self.recording or injected:
             return
         # DIAGNOSTIC (A vs B investigation): GetCursorPos() read right here,
         # alongside pynput's own (x, y), to see if the two coordinate spaces
         # ever disagree at capture time.
         cursor_pt = wintypes.POINT()
         ctypes.windll.user32.GetCursorPos(ctypes.byref(cursor_pt))
-        self.raw_queue.put({"kind": "click", "x": x, "y": y,
+        # Both press ("click") and release ("release") are enqueued — still
+        # enqueue-only, no UIA/COM here. The worker pairs them to tell a plain
+        # click apart from a press-hold-move-release drag (text selection).
+        self.raw_queue.put({"kind": "click" if pressed else "release", "x": x, "y": y,
                             "cursor_x": cursor_pt.x, "cursor_y": cursor_pt.y,
                             "button": button.name, "ts": time.time()})
 
@@ -796,9 +809,15 @@ class Recorder:
                 self._emit_pointer_event("rightClick", cx, cy, ins, ts)
                 return
 
-            # Every left click is recorded individually (preserves repeated
-            # presses like "9999" -> num9Button x4). A genuine fast double-click
-            # is recognised IN ADDITION, never by merging/dropping the clicks.
+            # Left press: emission is deferred to the matching release (see
+            # "release" below) so a press-hold-move-release gesture can be
+            # told apart from a plain click. A stale pending press with no
+            # matching release (should not happen in practice — defensive
+            # only) is flushed as a plain click first so it's never silently
+            # dropped. Element inspection stays at press time — that's the
+            # correct element for both a click and a drag's start point.
+            if self._pending_press is not None:
+                self._emit_click_from_press(self._pending_press)
             elem = self._inspect(ins, cx, cy)
             # DIAGNOSTIC (kept for verification) — pynput_pt vs cursor_pt and
             # the resolved element name, so a re-recording can be eyeballed.
@@ -807,17 +826,27 @@ class Recorder:
             log(f"[diag-click] pynput_pt=({x},{y}) cursor_pt=({cx},{cy}) "
                 f"delta={delta} gap={gap:.4f}s "
                 f"elem_name='{elem.get('name', '')}' elem_rect={elem.get('rect')}")
-            self._emit("click", elem, x=cx, y=cy, ts=ts)
-            self._last_click_xy = (cx, cy)
+            self._pending_press = {"x": cx, "y": cy, "ts": ts, "elem": elem}
+            return
 
-            ll = self._last_left_click
-            if (ll and ts - ll["ts"] <= DOUBLE_CLICK_INTERVAL
-                    and abs(cx - ll["x"]) <= DOUBLE_CLICK_RADIUS
-                    and abs(cy - ll["y"]) <= DOUBLE_CLICK_RADIUS):
-                self._emit("doubleClick", elem, x=cx, y=cy, ts=ts)
-                self._last_left_click = None  # consume; avoid chaining triples
+        if kind == "release":
+            if item["button"] != "left":
+                return  # right/middle releases carry no pending state
+            press, self._pending_press = self._pending_press, None
+            if press is None:
+                return  # no matching press (e.g. recording started mid-press)
+            x, y, ts = item["x"], item["y"], item["ts"]
+            cx = item.get("cursor_x", x)
+            cy = item.get("cursor_y", y)
+            dist = math.hypot(cx - press["x"], cy - press["y"])
+            if dist > DRAG_MIN_DIST:
+                log(f"[diag-drag] start=({press['x']},{press['y']}) "
+                    f"end=({cx},{cy}) dist={dist:.1f}")
+                self._emit("drag", press["elem"], x=press["x"], y=press["y"],
+                           ts=press["ts"], end=(cx, cy))
+                self._last_left_click = None  # a drag breaks any double-click chain
             else:
-                self._last_left_click = {"x": cx, "y": cy, "ts": ts}
+                self._emit_click_from_press(press)
             return
 
         if kind == "scroll":
@@ -912,9 +941,35 @@ class Recorder:
         if self._pending_scroll and now - self._pending_scroll["ts"] > SCROLL_FLUSH_IDLE:
             self._flush_pending_scroll()
 
+    def _emit_click_from_press(self, press):
+        """Emit click (+ doubleClick if paired) for a completed left press.
+        Shared by the release handler and the stale-press flush so both
+        paths reproduce identical click/double-click semantics."""
+        cx, cy, ts, elem = press["x"], press["y"], press["ts"], press["elem"]
+        # Every left click is recorded individually (preserves repeated
+        # presses like "9999" -> num9Button x4). A genuine fast double-click
+        # is recognised IN ADDITION, never by merging/dropping the clicks.
+        self._emit("click", elem, x=cx, y=cy, ts=ts)
+        self._last_click_xy = (cx, cy)
+
+        ll = self._last_left_click
+        if (ll and ts - ll["ts"] <= DOUBLE_CLICK_INTERVAL
+                and abs(cx - ll["x"]) <= DOUBLE_CLICK_RADIUS
+                and abs(cy - ll["y"]) <= DOUBLE_CLICK_RADIUS):
+            self._emit("doubleClick", elem, x=cx, y=cy, ts=ts)
+            self._last_left_click = None  # consume; avoid chaining triples
+        else:
+            self._last_left_click = {"x": cx, "y": cy, "ts": ts}
+
     def _flush_pending_click(self):
-        # Left clicks are emitted immediately; this only ends the open
-        # double-click window so an intervening event can't pair across it.
+        # A pending left press with no release yet (e.g. focus moved before
+        # button-up, or the release was lost) must not be silently dropped —
+        # emit it as a plain click, same as a completed press+release would.
+        if self._pending_press is not None:
+            press, self._pending_press = self._pending_press, None
+            self._emit_click_from_press(press)
+        # Ends the open double-click window so an intervening event can't
+        # pair across it.
         self._last_left_click = None
 
     def _flush_pending_scroll(self):
@@ -1023,7 +1078,7 @@ class Recorder:
         except Exception as e:
             log(f"WARN: could not POST session_meta: {e}")
 
-    def _emit(self, action, elem, x=None, y=None, value=None, delta=None, ts=None):
+    def _emit(self, action, elem, x=None, y=None, value=None, delta=None, ts=None, end=None):
         elem = elem or {}
         # Drop events captured before _discover_target_windows() resolved
         # target_hwnds. Mouse/keyboard hooks go live at recording=True, before
@@ -1157,6 +1212,8 @@ class Recorder:
             event["delta"] = delta
         if x is not None:
             event["x"], event["y"] = int(x), int(y)
+            if end is not None:
+                event["endX"], event["endY"] = int(end[0]), int(end[1])
             root_hwnd_for_rect = elem.get("rootHwnd", 0)
             if not root_hwnd_for_rect and x is not None:
                 root_hwnd_for_rect = top_window_at(int(x), int(y))   # 포인터 아래 실제 창 — 결정적
@@ -1176,6 +1233,9 @@ class Recorder:
                 event["winTop"] = win_top
                 event["winWidth"] = win_w
                 event["winHeight"] = win_h
+                if end is not None:
+                    event["endRelX"] = max(0, int(end[0]) - win_left)
+                    event["endRelY"] = max(0, int(end[1]) - win_top)
 
         # screenId: sanitized window title — groups events by UI context
         raw_title = event["element"].get("windowTitle", "") or self.session.get("appName", "")

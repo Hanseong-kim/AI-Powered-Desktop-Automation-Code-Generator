@@ -6,17 +6,41 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // 주입/헬스 실패 수집 — 마지막에 실질 assert로 검증.
 const _failures = [];
+// 조용히 넘어갈 수 있는 성능/폴백 신호 — 실패는 아니지만 재생 품질 저하 가능성을 기록.
+const _warnings = [];
+
+// One-time PowerShell/.NET cold-start warm-up. execSync's per-call timeout
+// budget was getting eaten by PowerShell's own process-spawn + Add-Type JIT
+// cost on the FIRST call of a run (confirmed 2026-07-07 — VSCode multi-window
+// osClick timeouts under concurrent PowerShell spawns). Absorbing that cost
+// once in beforeAll keeps every real step's timeout budget for the actual work.
+function _warmupPowerShell() {
+    try {
+        execSync('powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms"', { stdio: 'pipe', timeout: 30000 });
+    } catch (e) {
+        console.warn('[warmup] powershell warm-up failed (non-fatal):', String(e.message || e).substring(0, 100));
+    }
+}
 
 // OS-level click via PowerShell user32.dll — verified for Electron menus, native dialogs.
+// Retries once before giving up — a single slow PowerShell cold-start under
+// process-spawn contention shouldn't fail the whole step (confirmed 2026-07-07).
 function osClick(x, y, button = 'left', clicks = 1) {
-    try {
-        execSync(
-            `powershell -NoProfile -File "${join(__dirname, 'osClick.ps1')}" -x ${x} -y ${y} -button ${button} -clicks ${clicks}`,
-            { stdio: 'pipe', timeout: 5000 }
-        );
-    } catch (e) {
-        _failures.push('osClick');
-        console.warn('[osClick] failed:', String(e.message || e).substring(0, 100));
+    const cmd = `powershell -NoProfile -File "${join(__dirname, 'osClick.ps1')}" -x ${x} -y ${y} -button ${button} -clicks ${clicks}`;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+            const out = execSync(cmd, { stdio: 'pipe', timeout: 15000 });
+            const diag = out.toString().trim();
+            if (diag) console.log(diag);
+            return;
+        } catch (e) {
+            if (attempt === 2) {
+                _failures.push('osClick');
+                console.warn('[osClick] failed after retry:', String(e.message || e).substring(0, 100));
+            } else {
+                console.warn('[osClick] attempt 1 failed, retrying:', String(e.message || e).substring(0, 100));
+            }
+        }
     }
 }
 
@@ -25,11 +49,33 @@ function osScroll(x, y, delta) {
     try {
         execSync(
             `powershell -NoProfile -File "${join(__dirname, 'osScroll.ps1')}" -x ${x} -y ${y} -delta ${delta}`,
-            { stdio: 'pipe', timeout: 5000 }
+            { stdio: 'pipe', timeout: 15000 }
         );
     } catch (e) {
         _failures.push('osScroll');
         console.warn('[osScroll] failed:', String(e.message || e).substring(0, 100));
+    }
+}
+
+// OS-level press-hold-move-release drag via PowerShell user32.dll (text
+// selection etc.) — same execSync injection approach as osClick/osScroll,
+// retried once for the same PowerShell cold-start reason as osClick.
+function osDrag(x1, y1, x2, y2) {
+    const cmd = `powershell -NoProfile -File "${join(__dirname, 'osDrag.ps1')}" -x1 ${x1} -y1 ${y1} -x2 ${x2} -y2 ${y2}`;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+            const out = execSync(cmd, { stdio: 'pipe', timeout: 15000 });
+            const diag = out.toString().trim();
+            if (diag) console.log(diag);
+            return;
+        } catch (e) {
+            if (attempt === 2) {
+                _failures.push('osDrag');
+                console.warn('[osDrag] failed after retry:', String(e.message || e).substring(0, 100));
+            } else {
+                console.warn('[osDrag] attempt 1 failed, retrying:', String(e.message || e).substring(0, 100));
+            }
+        }
     }
 }
 
@@ -96,12 +142,13 @@ async function getWindowSession(title) {
     }
     const app = hwnd || 'Root';
     if (hwnd) console.log(`[session] hwnd=${hwnd} → scoped session`);
-    else console.warn(`[session] Window "${title}" not found — falling back to Root`);
+    else { console.warn(`[session] Window "${title}" not found — falling back to Root`); _warnings.push('session-fallback:' + title); }
     try {
         const sid = await _createSession(app);
         _sessionIds[title] = { sid, rootElId: null };
     } catch (e) {
         console.warn(`[session] scoped session failed (${e.message}) — reusing Root session for "${title}"`);
+        _warnings.push('session-fallback:' + title);
         _sessionIds[title] = { sid: browser.sessionId, rootElId: matchedEl ? matchedEl.elementId : null };
     }
     return _sessionIds[title];
@@ -118,11 +165,17 @@ async function getCenter(sid, rootElId, selector) {
         const el = await _appiumPost(path, { using, value });
         if (!el) return null;
         const elId = el.ELEMENT || el['element-6066-11e4-a52e-4f735466cecf'];
-        const r = await (await fetch(`${_APPIUM}/session/${sid}/element/${elId}/rect`)).json();
-        const rect = r.value;
-        if (!rect) return null;
-        return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
-    } catch { return null; }
+        // location+size (JSONWP) rather than /rect (W3C) — see getCenterSimple
+        // for why WinAppDriver's /rect support can't be relied on.
+        const locR = await (await fetch(`${_APPIUM}/session/${sid}/element/${elId}/location`)).json();
+        const sizeR = await (await fetch(`${_APPIUM}/session/${sid}/element/${elId}/size`)).json();
+        const loc = locR.value, size = sizeR.value;
+        if (!loc || !size) return null;
+        return { x: Math.round(loc.x + size.width / 2), y: Math.round(loc.y + size.height / 2) };
+    } catch (e) {
+        console.warn('[getCenter] live resolve failed:', String(e.message || e).substring(0, 120));
+        return null;
+    }
 }
 
 async function _typeScoped(sid, rootElId, selector, text) {
@@ -157,12 +210,17 @@ async function _typeScoped(sid, rootElId, selector, text) {
 // can land recorded titlebar clicks (including close) on the WRONG window.
 const _hwndCache = {};
 
+// Main app window title-fragment, set once in beforeAll (see generateWdio's
+// beforeHook) — lets osDismissPopup() identify the main window/PID for
+// owner-PID scoping without every call site having to pass it in.
+let _mainTitleFrag = '';
+
 function _listWindowHwnds(frag) {
     if (!frag) return [];
     try {
         const out = execSync(
             `powershell -NoProfile -File "${join(__dirname, 'osWindowRect.ps1')}" -titleLike "${frag}" -listOnly`,
-            { stdio: 'pipe', timeout: 5000 }
+            { stdio: 'pipe', timeout: 15000 }
         ).toString().trim();
         if (!out) return [];
         return out.split(/\r?\n/).map(s => s.trim()).filter(Boolean).map(Number);
@@ -178,7 +236,7 @@ function _resolveWinRect(frag) {
         const args = hwnd ? `-hwnd ${hwnd}` : `-titleLike "${frag}"`;
         const out = execSync(
             `powershell -NoProfile -File "${join(__dirname, 'osWindowRect.ps1')}" ${args}`,
-            { stdio: 'pipe', timeout: 5000 }
+            { stdio: 'pipe', timeout: 15000 }
         ).toString().trim();
         const m = out.match(/(-?\d+)\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)/);
         if (m) return { left: +m[1], top: +m[2], width: +m[3], height: +m[4] };
@@ -202,7 +260,7 @@ function normalizeWindow(frag, left, top, width, height) {
         const target = hwnd ? `-hwnd ${hwnd}` : `-titleLike "${frag}"`;
         execSync(
             `powershell -NoProfile -File "${join(__dirname, 'osMoveWindow.ps1')}" ${target} -left ${left} -top ${top} -width ${width} -height ${height}`,
-            { stdio: 'pipe', timeout: 8000 }
+            { stdio: 'pipe', timeout: 15000 }
         );
     } catch (e) {
         _failures.push('moveWindow');
@@ -221,24 +279,47 @@ function normalizeWindow(frag, left, top, width, height) {
 // directly instead of re-matching by (possibly ambiguous) title.
 async function launchApp(exePath, args, titleFrag, rect) {
     if (!exePath) return;
+    // agent.py is_aumid()와 동일 판정, 대칭 유지 — "PackageFamilyName!AppId"는
+    // 파일 경로가 아니라 explorer shell:AppsFolder로 활성화해야 한다.
+    // spawn(exePath,...)로 직접 넘기면 파일 경로로 오인해 비동기 ENOENT로
+    // 실패하는데, 이 실패는 이 catch 밖(다음 tick)에서 터져 try/catch에
+    // 잡히지 않고 _failures에도 안 찍힌 채 20초 타임아웃만 나는 문제가 있었다.
+    const isAumid = /!/.test(exePath) && !/[\/]/.test(exePath);
     const baseline = new Set(_listWindowHwnds(titleFrag));
     try {
-        spawn(exePath, args, { detached: true, stdio: 'ignore' }).unref();
+        if (isAumid) {
+            spawn('explorer.exe', ['shell:AppsFolder\\' + exePath], { detached: true, stdio: 'ignore' }).unref();
+        } else {
+            spawn(exePath, args, { detached: true, stdio: 'ignore' }).unref();
+        }
     } catch (e) {
         _failures.push('launch');
         console.warn('[launch] failed:', String(e.message || e).substring(0, 100));
         return;
     }
     const deadline = Date.now() + 20000;
+    let poll = 0;
     while (Date.now() < deadline) {
+        poll++;
+        const matched = _listWindowHwnds(titleFrag);
         if (titleFrag && !_hwndCache[titleFrag]) {
-            const fresh = _listWindowHwnds(titleFrag).find(h => !baseline.has(h));
+            const fresh = matched.find(h => !baseline.has(h));
             if (fresh) {
                 _hwndCache[titleFrag] = fresh;
                 console.log(`[launch] tracking new window hwnd=${fresh}`);
             }
         }
-        if (_resolveWinRect(titleFrag)) {
+        // A matched window with width/height 0 is a not-yet-rendered
+        // placeholder (Electron/UWP frame created before content loads,
+        // same hwnd, resized later) — treat it as "not found yet" and keep
+        // polling instead of normalizing/replaying against a window that
+        // isn't really there, which sent every later osClick to whatever
+        // was actually on screen underneath (e.g. the desktop).
+        const liveRect = _resolveWinRect(titleFrag);
+        // DIAGNOSTIC (temporary): trace why [launch] window-detection times
+        // out — remove once root cause of the Claude Desktop timeout is found.
+        console.log(`[launch-diag] poll=${poll} titleFrag=${JSON.stringify(titleFrag)} baseline=[${[...baseline]}] matched=[${matched}] hwndCache=${_hwndCache[titleFrag] ?? 'none'} liveRect=${JSON.stringify(liveRect)}`);
+        if (liveRect && liveRect.width > 0 && liveRect.height > 0) {
             if (rect) {
                 normalizeWindow(titleFrag, rect.left, rect.top, rect.width, rect.height);
                 const normalized = _resolveWinRect(titleFrag);
@@ -254,13 +335,18 @@ async function launchApp(exePath, args, titleFrag, rect) {
 
 function osClickRel(frag, relX, relY, absX, absY, button = 'left', clicks = 1) {
     const r = _resolveWinRect(frag);
-    if (r) osClick(r.left + relX, r.top + relY, button, clicks);
-    else   osClick(absX, absY, button, clicks);      // 창 못 찾으면 녹화 절대좌표로 폴백
+    if (r) { osClick(r.left + relX, r.top + relY, button, clicks); }
+    else { _failures.push('absCoord-fallback'); osClick(absX, absY, button, clicks); }      // 창 못 찾으면 녹화 절대좌표로 폴백 — 실패로 기록
 }
 function osScrollRel(frag, relX, relY, absX, absY, delta) {
     const r = _resolveWinRect(frag);
-    if (r) osScroll(r.left + relX, r.top + relY, delta);
-    else   osScroll(absX, absY, delta);
+    if (r) { osScroll(r.left + relX, r.top + relY, delta); }
+    else { _failures.push('absCoord-fallback'); osScroll(absX, absY, delta); }
+}
+function osDragRel(frag, relX1, relY1, relX2, relY2, absX1, absY1, absX2, absY2) {
+    const r = _resolveWinRect(frag);
+    if (r) { osDrag(r.left + relX1, r.top + relY1, r.left + relX2, r.top + relY2); }
+    else { _failures.push('absCoord-fallback'); osDrag(absX1, absY1, absX2, absY2); }
 }
 
 // Electron 입력: 직전 osClick이 포커스를 잡아둔 상태 → OS 키 주입.
@@ -269,7 +355,7 @@ function osType(text) {
         const b64 = Buffer.from(text, 'utf8').toString('base64');
         execSync(
             `powershell -NoProfile -File "${join(__dirname, 'osType.ps1')}" -b64 "${b64}"`,
-            { stdio: 'pipe', timeout: 8000 }
+            { stdio: 'pipe', timeout: 15000 }
         );
     } catch (e) {
         _failures.push('osType');
@@ -277,44 +363,80 @@ function osType(text) {
     }
 }
 
+// Fail-and-Recover popup dismissal (v1) — only called from _step() below,
+// after a step has already failed, so the happy path pays zero cost.
+// Prefers the tracked hwnd for the main app window (_hwndCache[_mainTitleFrag],
+// set by launchApp) for deterministic owner-PID scoping; falls back to a
+// title-substring match when no hwnd was tracked (e.g. app already running).
+function osDismissPopup() {
+    try {
+        const hwnd = _hwndCache[_mainTitleFrag];
+        const args = hwnd ? `-hwnd ${hwnd}` : (_mainTitleFrag ? `-titleLike "${_mainTitleFrag}"` : '');
+        const out = execSync(
+            `powershell -NoProfile -File "${join(__dirname, 'osDismissPopup.ps1')}" ${args}`,
+            { stdio: 'pipe', timeout: 15000 }
+        ).toString().trim();
+        if (out.startsWith('DISMISSED')) { console.log('[popup]', out); return true; }
+        return false;
+    } catch (e) {
+        console.warn('[osDismissPopup] failed:', String(e.message || e).substring(0, 100));
+        return false;
+    }
+}
+
+// Wraps a single replay step: on the happy path (no exception, no new
+// _failures entry) this costs nothing extra. On failure, scans for and
+// dismisses a known-shape popup that didn't exist at recording time (e.g.
+// FDM's "file already exists"), then retries the step ONCE. If no popup was
+// found, the original failure/exception stands untouched.
+async function _step(label, fn) {
+    console.log('[STEP] ' + label);
+    const before = _failures.length;
+    let err = null;
+    try { await fn(); } catch (e) { err = e; }
+    if (!err && _failures.length === before) return;
+    const dismissed = osDismissPopup();
+    if (!dismissed) { if (err) throw err; return; }
+    _warnings.push('popup-dismissed:' + label);
+    _failures.length = before;
+    await fn();
+}
+
 class VSCodePageById {
     async click1() {
-        let s = await getWindowSession('Visual Studio Code');
-        let c = await getCenter(s.sid, s.rootElId, '//*[@Name="데스크톱 1"]');
-        if (!c) {
-            delete _sessionIds['Visual Studio Code'];
-            s = await getWindowSession('Visual Studio Code');
-            c = await getCenter(s.sid, s.rootElId, '//*[@Name="데스크톱 1"]');
-        }
-        c = c ?? { x: 1615, y: 67 };
-        osClick(c.x, c.y);
+        osClickRel('Visual Studio Code', 1498, 171, 3409, -515);
     }
 
     async click2() {
-        osClickRel('시작 - Visual Studio Code', 89, 40, 82, 33);
+        osClickRel('Visual Studio Code', 75, 28, 1986, -658);
     }
 
     async click3() {
-        osClickRel('시작 - Visual Studio Code', 130, 224, 123, 217);
+        osClickRel('Visual Studio Code', 116, 179, 2027, -507);
     }
 
     async scroll4() {
-        osScrollRel('폴더 열기', 108, 313, 108, 313, -4200);
+        osScrollRel('폴더 열기', 99, 283, 2019, -394, -480);
     }
 
     async click5() {
         let s = await getWindowSession('폴더 열기');
-        let c = await getCenter(s.sid, s.rootElId, '//*[@Name="탐색 창"]');
+        let c = await getCenter(s.sid, s.rootElId, '//*[@Name="로컬 디스크 (C:)"]');
         if (!c) {
             delete _sessionIds['폴더 열기'];
             s = await getWindowSession('폴더 열기');
-            c = await getCenter(s.sid, s.rootElId, '//*[@Name="탐색 창"]');
+            c = await getCenter(s.sid, s.rootElId, '//*[@Name="로컬 디스크 (C:)"]');
         }
-        c = c ?? { x: 106, y: 357 };
+        if (!c) { _failures.push('click5:coord-fallback'); }
+        c = c ?? { x: 2019, y: -394 };
         osClick(c.x, c.y);
     }
 
-    async click6() {
+    async scroll6() {
+        osScrollRel('폴더 열기', 85, 248, 2005, -429, 720);
+    }
+
+    async click7() {
         let s = await getWindowSession('폴더 열기');
         let c = await getCenter(s.sid, s.rootElId, '~System.ItemNameDisplay');
         if (!c) {
@@ -322,64 +444,121 @@ class VSCodePageById {
             s = await getWindowSession('폴더 열기');
             c = await getCenter(s.sid, s.rootElId, '~System.ItemNameDisplay');
         }
-        c = c ?? { x: 327, y: 192 };
+        if (!c) { _failures.push('click7:coord-fallback'); }
+        c = c ?? { x: 2126, y: -515 };
         osClick(c.x, c.y);
-    }
-
-    async click7() {
-        osClickRel('폴더 열기', 327, 192, 327, 192);
     }
 
     async click8() {
-        osClickRel('폴더 열기', 327, 192, 327, 192, 'left', 2);
+        let s = await getWindowSession('폴더 열기');
+        let c = await getCenter(s.sid, s.rootElId, '~System.ItemNameDisplay');
+        if (!c) {
+            delete _sessionIds['폴더 열기'];
+            s = await getWindowSession('폴더 열기');
+            c = await getCenter(s.sid, s.rootElId, '~System.ItemNameDisplay');
+        }
+        if (!c) { _failures.push('click8:coord-fallback'); }
+        c = c ?? { x: 2126, y: -515 };
+        osClick(c.x, c.y);
     }
 
     async click9() {
-        let s = await getWindowSession('폴더 열기');
-        let c = await getCenter(s.sid, s.rootElId, '//*[@Name="항목 보기"]');
-        if (!c) {
-            delete _sessionIds['폴더 열기'];
-            s = await getWindowSession('폴더 열기');
-            c = await getCenter(s.sid, s.rootElId, '//*[@Name="항목 보기"]');
-        }
-        c = c ?? { x: 302, y: 269 };
-        osClick(c.x, c.y);
+        osClickRel('폴더 열기', 206, 162, 2126, -515);
     }
 
     async click10() {
-        osClickRel('폴더 열기', 302, 269, 302, 269);
+        osClickRel('폴더 열기', 206, 162, 2126, -515, 'left', 2);
     }
 
     async click11() {
-        osClickRel('폴더 열기', 302, 269, 302, 269, 'left', 2);
-    }
-
-    async scroll12() {
-        osScrollRel('폴더 열기', 348, 299, 348, 299, -5160);
-    }
-
-    async click13() {
         let s = await getWindowSession('폴더 열기');
-        let c = await getCenter(s.sid, s.rootElId, '~ScrollbarThumb');
+        let c = await getCenter(s.sid, s.rootElId, '~System.ItemNameDisplay');
         if (!c) {
             delete _sessionIds['폴더 열기'];
             s = await getWindowSession('폴더 열기');
-            c = await getCenter(s.sid, s.rootElId, '~ScrollbarThumb');
+            c = await getCenter(s.sid, s.rootElId, '~System.ItemNameDisplay');
         }
-        c = c ?? { x: 316, y: 369 };
+        if (!c) { _failures.push('click11:coord-fallback'); }
+        c = c ?? { x: 2160, y: -455 };
         osClick(c.x, c.y);
     }
 
-    async click14() {
-        osClickRel('폴더 열기', 710, 558, 703, 551);
+    async click12() {
+        osClickRel('폴더 열기', 240, 222, 2160, -455);
+    }
+
+    async click13() {
+        osClickRel('폴더 열기', 240, 222, 2160, -455, 'left', 2);
+    }
+
+    async scroll14() {
+        osScrollRel('폴더 열기', 240, 249, 2160, -428, -240);
+    }
+
+    async click15() {
+        let s = await getWindowSession('폴더 열기');
+        let c = await getCenter(s.sid, s.rootElId, '~System.ItemNameDisplay');
+        if (!c) {
+            delete _sessionIds['폴더 열기'];
+            s = await getWindowSession('폴더 열기');
+            c = await getCenter(s.sid, s.rootElId, '~System.ItemNameDisplay');
+        }
+        if (!c) { _failures.push('click15:coord-fallback'); }
+        c = c ?? { x: 2181, y: -428 };
+        osClick(c.x, c.y);
+    }
+
+    async click16() {
+        osClickRel('폴더 열기', 261, 249, 2181, -428);
+    }
+
+    async click17() {
+        osClickRel('폴더 열기', 261, 249, 2181, -428, 'left', 2);
+    }
+
+    async click18() {
+        let s = await getWindowSession('폴더 열기');
+        let c = await getCenter(s.sid, s.rootElId, '~System.ItemNameDisplay');
+        if (!c) {
+            delete _sessionIds['폴더 열기'];
+            s = await getWindowSession('폴더 열기');
+            c = await getCenter(s.sid, s.rootElId, '~System.ItemNameDisplay');
+        }
+        if (!c) { _failures.push('click18:coord-fallback'); }
+        c = c ?? { x: 2181, y: -428 };
+        osClick(c.x, c.y);
+    }
+
+    async click19() {
+        osClickRel('폴더 열기', 261, 249, 2181, -428);
+    }
+
+    async click20() {
+        osClickRel('폴더 열기', 261, 249, 2181, -428, 'left', 2);
+    }
+
+    async click21() {
+        let s = await getWindowSession('폴더 열기');
+        let c = await getCenter(s.sid, s.rootElId, '//*[@Name="폴더 선택(S)"]');
+        if (!c) {
+            delete _sessionIds['폴더 열기'];
+            s = await getWindowSession('폴더 열기');
+            c = await getCenter(s.sid, s.rootElId, '//*[@Name="폴더 선택(S)"]');
+        }
+        if (!c) { _failures.push('click21:coord-fallback'); }
+        c = c ?? { x: 2474, y: -239 };
+        osClick(c.x, c.y);
     }
 }
 
 describe('VSCodeTestById', () => {
     beforeAll(async () => {
+        _warmupPowerShell();
+        _mainTitleFrag = "Visual Studio Code";
         const { hostname, port } = browser.options;
         _APPIUM = `http://${hostname || '127.0.0.1'}:${port || 4723}`;
         console.log(`[session] Appium endpoint resolved to ${_APPIUM}`);
+        await launchApp("C:\\Users\\user\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe", ["-n"], "Visual Studio Code", {"left":1911,"top":-686,"width":1938,"height":1050});
     });
 
     afterAll(async () => {
@@ -392,35 +571,29 @@ describe('VSCodeTestById', () => {
     it('should replay recorded flow', async () => {
         const page = new VSCodePageById();
 
-            console.log('[STEP 1] click: 데스크톱 1');
-            await page.click1();
-            console.log('[STEP 2] click: 파일');
-            await page.click2();
-            console.log('[STEP 3] click: 편집기를 사용하여 작업 속도를 향상하는 방법에 관한 개요입니다.');
-            await page.click3();
-            console.log('[STEP 4] scroll: delta=-4200');
-            await page.scroll4();
-            console.log('[STEP 5] click: 탐색 창');
-            await page.click5();
-            console.log('[STEP 6] click: 이름');
-            await page.click6();
-            console.log('[STEP 7] click: ');
-            await page.click7();
-            console.log('[STEP 8] click: ');
-            await page.click8();
-            console.log('[STEP 9] click: 항목 보기');
-            await page.click9();
-            console.log('[STEP 10] click: ');
-            await page.click10();
-            console.log('[STEP 11] click: ');
-            await page.click11();
-            console.log('[STEP 12] scroll: delta=-5160');
-            await page.scroll12();
-            console.log('[STEP 13] click: 위치');
-            await page.click13();
-            console.log('[STEP 14] click: ');
-            await page.click14();
+            await _step('1:click ', () => page.click1());
+            await _step('2:click 파일', () => page.click2());
+            await _step('3:click 편집기를 사용하여 작업 속도를 향상하는 방법에 관한 개요입니다.', () => page.click3());
+            await _step('4:scroll delta=-480', () => page.scroll4());
+            await _step('5:click 로컬 디스크 (C:)', () => page.click5());
+            await _step('6:scroll delta=720', () => page.scroll6());
+            await _step('7:click 이름', () => page.click7());
+            await _step('8:click 이름', () => page.click8());
+            await _step('9:click ', () => page.click9());
+            await _step('10:doubleClick ', () => page.click10());
+            await _step('11:click 이름', () => page.click11());
+            await _step('12:click ', () => page.click12());
+            await _step('13:doubleClick ', () => page.click13());
+            await _step('14:scroll delta=-240', () => page.scroll14());
+            await _step('15:click 이름', () => page.click15());
+            await _step('16:click ', () => page.click16());
+            await _step('17:doubleClick ', () => page.click17());
+            await _step('18:click 이름', () => page.click18());
+            await _step('19:click ', () => page.click19());
+            await _step('20:doubleClick ', () => page.click20());
+            await _step('21:click 폴더 선택(S)', () => page.click21());
 
+            if (_warnings.length) console.warn('[replay-warnings]', _warnings);
             expect(_failures).toEqual([]);
     });
 });

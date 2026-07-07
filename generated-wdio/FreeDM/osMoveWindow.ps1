@@ -15,6 +15,7 @@ public class WinMove {
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
+  [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hWnd);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   public static List<IntPtr> Find(string titleLike) {
     var found = new List<IntPtr>();
@@ -45,6 +46,21 @@ if ($hwnd) {
   }
 }
 if ($hWnd -ne [IntPtr]::Zero) {
+  # Idempotency fast-path: if the window is already at the target geometry
+  # (and not maximized), skip ShowWindow(RESTORE)+MoveWindow entirely — avoids
+  # a visible restore-then-resize flicker when replay finds the window already
+  # in the recorded position (e.g. the "already maximized" case reported
+  # 2026-07-07: recorded flow assumes a maximize step is needed, but the
+  # window is already there).
+  $already = New-Object WinMove+RECT
+  [WinMove]::GetWindowRect($hWnd, [ref]$already) | Out-Null
+  $sameW = [math]::Abs(($already.Right - $already.Left) - $width) -le 2
+  $sameH = [math]::Abs(($already.Bottom - $already.Top) - $height) -le 2
+  $sameL = [math]::Abs($already.Left - $left) -le 2
+  $sameT = [math]::Abs($already.Top - $top) -le 2
+  if (-not [WinMove]::IsZoomed($hWnd) -and $sameW -and $sameH -and $sameL -and $sameT) {
+    exit
+  }
   [WinMove]::ShowWindow($hWnd, 9) | Out-Null
   Start-Sleep -Milliseconds 300
   $candW = $width

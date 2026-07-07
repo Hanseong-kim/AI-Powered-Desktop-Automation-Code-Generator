@@ -6,19 +6,41 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // 주입/헬스 실패 수집 — 마지막에 실질 assert로 검증.
 const _failures = [];
+// 조용히 넘어갈 수 있는 성능/폴백 신호 — 실패는 아니지만 재생 품질 저하 가능성을 기록.
+const _warnings = [];
+
+// One-time PowerShell/.NET cold-start warm-up. execSync's per-call timeout
+// budget was getting eaten by PowerShell's own process-spawn + Add-Type JIT
+// cost on the FIRST call of a run (confirmed 2026-07-07 — VSCode multi-window
+// osClick timeouts under concurrent PowerShell spawns). Absorbing that cost
+// once in beforeAll keeps every real step's timeout budget for the actual work.
+function _warmupPowerShell() {
+    try {
+        execSync('powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms"', { stdio: 'pipe', timeout: 30000 });
+    } catch (e) {
+        console.warn('[warmup] powershell warm-up failed (non-fatal):', String(e.message || e).substring(0, 100));
+    }
+}
 
 // OS-level click via PowerShell user32.dll — verified for Electron menus, native dialogs.
+// Retries once before giving up — a single slow PowerShell cold-start under
+// process-spawn contention shouldn't fail the whole step (confirmed 2026-07-07).
 function osClick(x, y, button = 'left', clicks = 1) {
-    try {
-        const out = execSync(
-            `powershell -NoProfile -File "${join(__dirname, 'osClick.ps1')}" -x ${x} -y ${y} -button ${button} -clicks ${clicks}`,
-            { stdio: 'pipe', timeout: 5000 }
-        );
-        const diag = out.toString().trim();
-        if (diag) console.log(diag);
-    } catch (e) {
-        _failures.push('osClick');
-        console.warn('[osClick] failed:', String(e.message || e).substring(0, 100));
+    const cmd = `powershell -NoProfile -File "${join(__dirname, 'osClick.ps1')}" -x ${x} -y ${y} -button ${button} -clicks ${clicks}`;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+            const out = execSync(cmd, { stdio: 'pipe', timeout: 15000 });
+            const diag = out.toString().trim();
+            if (diag) console.log(diag);
+            return;
+        } catch (e) {
+            if (attempt === 2) {
+                _failures.push('osClick');
+                console.warn('[osClick] failed after retry:', String(e.message || e).substring(0, 100));
+            } else {
+                console.warn('[osClick] attempt 1 failed, retrying:', String(e.message || e).substring(0, 100));
+            }
+        }
     }
 }
 
@@ -27,11 +49,33 @@ function osScroll(x, y, delta) {
     try {
         execSync(
             `powershell -NoProfile -File "${join(__dirname, 'osScroll.ps1')}" -x ${x} -y ${y} -delta ${delta}`,
-            { stdio: 'pipe', timeout: 5000 }
+            { stdio: 'pipe', timeout: 15000 }
         );
     } catch (e) {
         _failures.push('osScroll');
         console.warn('[osScroll] failed:', String(e.message || e).substring(0, 100));
+    }
+}
+
+// OS-level press-hold-move-release drag via PowerShell user32.dll (text
+// selection etc.) — same execSync injection approach as osClick/osScroll,
+// retried once for the same PowerShell cold-start reason as osClick.
+function osDrag(x1, y1, x2, y2) {
+    const cmd = `powershell -NoProfile -File "${join(__dirname, 'osDrag.ps1')}" -x1 ${x1} -y1 ${y1} -x2 ${x2} -y2 ${y2}`;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+            const out = execSync(cmd, { stdio: 'pipe', timeout: 15000 });
+            const diag = out.toString().trim();
+            if (diag) console.log(diag);
+            return;
+        } catch (e) {
+            if (attempt === 2) {
+                _failures.push('osDrag');
+                console.warn('[osDrag] failed after retry:', String(e.message || e).substring(0, 100));
+            } else {
+                console.warn('[osDrag] attempt 1 failed, retrying:', String(e.message || e).substring(0, 100));
+            }
+        }
     }
 }
 
@@ -98,12 +142,13 @@ async function getWindowSession(title) {
     }
     const app = hwnd || 'Root';
     if (hwnd) console.log(`[session] hwnd=${hwnd} → scoped session`);
-    else console.warn(`[session] Window "${title}" not found — falling back to Root`);
+    else { console.warn(`[session] Window "${title}" not found — falling back to Root`); _warnings.push('session-fallback:' + title); }
     try {
         const sid = await _createSession(app);
         _sessionIds[title] = { sid, rootElId: null };
     } catch (e) {
         console.warn(`[session] scoped session failed (${e.message}) — reusing Root session for "${title}"`);
+        _warnings.push('session-fallback:' + title);
         _sessionIds[title] = { sid: browser.sessionId, rootElId: matchedEl ? matchedEl.elementId : null };
     }
     return _sessionIds[title];
@@ -165,12 +210,17 @@ async function _typeScoped(sid, rootElId, selector, text) {
 // can land recorded titlebar clicks (including close) on the WRONG window.
 const _hwndCache = {};
 
+// Main app window title-fragment, set once in beforeAll (see generateWdio's
+// beforeHook) — lets osDismissPopup() identify the main window/PID for
+// owner-PID scoping without every call site having to pass it in.
+let _mainTitleFrag = '';
+
 function _listWindowHwnds(frag) {
     if (!frag) return [];
     try {
         const out = execSync(
             `powershell -NoProfile -File "${join(__dirname, 'osWindowRect.ps1')}" -titleLike "${frag}" -listOnly`,
-            { stdio: 'pipe', timeout: 5000 }
+            { stdio: 'pipe', timeout: 15000 }
         ).toString().trim();
         if (!out) return [];
         return out.split(/\r?\n/).map(s => s.trim()).filter(Boolean).map(Number);
@@ -186,7 +236,7 @@ function _resolveWinRect(frag) {
         const args = hwnd ? `-hwnd ${hwnd}` : `-titleLike "${frag}"`;
         const out = execSync(
             `powershell -NoProfile -File "${join(__dirname, 'osWindowRect.ps1')}" ${args}`,
-            { stdio: 'pipe', timeout: 5000 }
+            { stdio: 'pipe', timeout: 15000 }
         ).toString().trim();
         const m = out.match(/(-?\d+)\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)/);
         if (m) return { left: +m[1], top: +m[2], width: +m[3], height: +m[4] };
@@ -210,7 +260,7 @@ function normalizeWindow(frag, left, top, width, height) {
         const target = hwnd ? `-hwnd ${hwnd}` : `-titleLike "${frag}"`;
         execSync(
             `powershell -NoProfile -File "${join(__dirname, 'osMoveWindow.ps1')}" ${target} -left ${left} -top ${top} -width ${width} -height ${height}`,
-            { stdio: 'pipe', timeout: 8000 }
+            { stdio: 'pipe', timeout: 15000 }
         );
     } catch (e) {
         _failures.push('moveWindow');
@@ -285,13 +335,18 @@ async function launchApp(exePath, args, titleFrag, rect) {
 
 function osClickRel(frag, relX, relY, absX, absY, button = 'left', clicks = 1) {
     const r = _resolveWinRect(frag);
-    if (r) osClick(r.left + relX, r.top + relY, button, clicks);
-    else   osClick(absX, absY, button, clicks);      // 창 못 찾으면 녹화 절대좌표로 폴백
+    if (r) { osClick(r.left + relX, r.top + relY, button, clicks); }
+    else { _failures.push('absCoord-fallback'); osClick(absX, absY, button, clicks); }      // 창 못 찾으면 녹화 절대좌표로 폴백 — 실패로 기록
 }
 function osScrollRel(frag, relX, relY, absX, absY, delta) {
     const r = _resolveWinRect(frag);
-    if (r) osScroll(r.left + relX, r.top + relY, delta);
-    else   osScroll(absX, absY, delta);
+    if (r) { osScroll(r.left + relX, r.top + relY, delta); }
+    else { _failures.push('absCoord-fallback'); osScroll(absX, absY, delta); }
+}
+function osDragRel(frag, relX1, relY1, relX2, relY2, absX1, absY1, absX2, absY2) {
+    const r = _resolveWinRect(frag);
+    if (r) { osDrag(r.left + relX1, r.top + relY1, r.left + relX2, r.top + relY2); }
+    else { _failures.push('absCoord-fallback'); osDrag(absX1, absY1, absX2, absY2); }
 }
 
 // Electron 입력: 직전 osClick이 포커스를 잡아둔 상태 → OS 키 주입.
@@ -300,7 +355,7 @@ function osType(text) {
         const b64 = Buffer.from(text, 'utf8').toString('base64');
         execSync(
             `powershell -NoProfile -File "${join(__dirname, 'osType.ps1')}" -b64 "${b64}"`,
-            { stdio: 'pipe', timeout: 8000 }
+            { stdio: 'pipe', timeout: 15000 }
         );
     } catch (e) {
         _failures.push('osType');
@@ -308,54 +363,116 @@ function osType(text) {
     }
 }
 
+// Fail-and-Recover popup dismissal (v1) — only called from _step() below,
+// after a step has already failed, so the happy path pays zero cost.
+// Prefers the tracked hwnd for the main app window (_hwndCache[_mainTitleFrag],
+// set by launchApp) for deterministic owner-PID scoping; falls back to a
+// title-substring match when no hwnd was tracked (e.g. app already running).
+function osDismissPopup() {
+    try {
+        const hwnd = _hwndCache[_mainTitleFrag];
+        const args = hwnd ? `-hwnd ${hwnd}` : (_mainTitleFrag ? `-titleLike "${_mainTitleFrag}"` : '');
+        const out = execSync(
+            `powershell -NoProfile -File "${join(__dirname, 'osDismissPopup.ps1')}" ${args}`,
+            { stdio: 'pipe', timeout: 15000 }
+        ).toString().trim();
+        if (out.startsWith('DISMISSED')) { console.log('[popup]', out); return true; }
+        return false;
+    } catch (e) {
+        console.warn('[osDismissPopup] failed:', String(e.message || e).substring(0, 100));
+        return false;
+    }
+}
+
+// Wraps a single replay step: on the happy path (no exception, no new
+// _failures entry) this costs nothing extra. On failure, scans for and
+// dismisses a known-shape popup that didn't exist at recording time (e.g.
+// FDM's "file already exists"), then retries the step ONCE. If no popup was
+// found, the original failure/exception stands untouched.
+async function _step(label, fn) {
+    console.log('[STEP] ' + label);
+    const before = _failures.length;
+    let err = null;
+    try { await fn(); } catch (e) { err = e; }
+    if (!err && _failures.length === before) return;
+    const dismissed = osDismissPopup();
+    if (!dismissed) { if (err) throw err; return; }
+    _warnings.push('popup-dismissed:' + label);
+    _failures.length = before;
+    await fn();
+}
+
 class ClaudeDesktopPageByClass {
     async click1() {
-        osClickRel('Claude', 106, 117, 133, 169);
+        let s = await getWindowSession('Claude');
+        let c = await getCenter(s.sid, s.rootElId, '//Pane[@ClassName="Windows.UI.Input.InputSite.WindowClass"]');
+        if (!c) {
+            delete _sessionIds['Claude'];
+            s = await getWindowSession('Claude');
+            c = await getCenter(s.sid, s.rootElId, '//Pane[@ClassName="Windows.UI.Input.InputSite.WindowClass"]');
+        }
+        if (!c) { _failures.push('click1:coord-fallback'); }
+        c = c ?? { x: 926, y: 752 };
+        osClick(c.x, c.y);
     }
 
-    async click2() {
-        osClickRel('Claude', 100, 138, 127, 190);
+    async scroll2() {
+        osScrollRel('Claude', 723, 530, 716, 523, 360);
     }
 
-    async click3() {
-        osClickRel('Claude', 97, 169, 124, 221);
+    async scroll3() {
+        osScrollRel('Claude', 723, 530, 716, 523, 600);
     }
 
-    async click4() {
-        osClickRel('Claude', 91, 195, 118, 247);
+    async scroll4() {
+        osScrollRel('Claude', 723, 530, 716, 523, 600);
     }
 
-    async click5() {
-        osClickRel('Claude', 97, 220, 124, 272);
+    async scroll5() {
+        osScrollRel('Claude', 722, 529, 715, 522, 720);
     }
 
-    async click6() {
-        osClickRel('Claude', 99, 240, 126, 292);
+    async scroll6() {
+        osScrollRel('Claude', 722, 529, 715, 522, 840);
     }
 
-    async type7(value) {
-        osType(value);
+    async scroll7() {
+        osScrollRel('Claude', 722, 529, 715, 522, 840);
     }
 
-    async click8() {
-        osClickRel('Claude', 1062, 74, 1089, 126);
+    async scroll8() {
+        osScrollRel('Claude', 722, 529, 715, 522, 840);
     }
 
-    async click9() {
-        osClickRel('Claude', 143, 321, 170, 373);
+    async scroll9() {
+        osScrollRel('Claude', 722, 529, 715, 522, 840);
     }
 
-    async click10() {
-        osClickRel('Claude', 153, 345, 180, 397);
+    async scroll10() {
+        osScrollRel('Claude', 722, 529, 715, 522, 960);
+    }
+
+    async scroll11() {
+        osScrollRel('Claude', 722, 529, 715, 522, -720);
+    }
+
+    async scroll12() {
+        osScrollRel('Claude', 722, 529, 715, 522, -840);
+    }
+
+    async scroll13() {
+        osScrollRel('Claude', 722, 529, 715, 522, -7320);
     }
 }
 
 describe('ClaudeDesktopTestByClass', () => {
     beforeAll(async () => {
+        _warmupPowerShell();
+        _mainTitleFrag = "Claude";
         const { hostname, port } = browser.options;
         _APPIUM = `http://${hostname || '127.0.0.1'}:${port || 4723}`;
         console.log(`[session] Appium endpoint resolved to ${_APPIUM}`);
-        await launchApp("Claude_pzs8sxrjxfjjc!Claude", [], "Claude", {"left":27,"top":52,"width":1218,"height":810});
+        await launchApp("Claude_pzs8sxrjxfjjc!Claude", [], "Claude", {"left":-7,"top":-7,"width":1550,"height":830});
     });
 
     afterAll(async () => {
@@ -368,27 +485,21 @@ describe('ClaudeDesktopTestByClass', () => {
     it('should replay recorded flow', async () => {
         const page = new ClaudeDesktopPageByClass();
 
-            console.log('[STEP 1] click: 새 채팅');
-            await page.click1();
-            console.log('[STEP 2] click: 프로젝트');
-            await page.click2();
-            console.log('[STEP 3] click: 아티팩트');
-            await page.click3();
-            console.log('[STEP 4] click: 예정됨');
-            await page.click4();
-            console.log('[STEP 5] click: 발송 베타');
-            await page.click5();
-            console.log('[STEP 6] click: 사용자 지정');
-            await page.click6();
-            console.log('[STEP 7] type: wlrma anjgo?');
-            await page.type7('wlrma anjgo?');
-            console.log('[STEP 8] click: ');
-            await page.click8();
-            console.log('[STEP 9] click: 태블릿 자동화 파이프라인 앱 삭제 스크립트');
-            await page.click9();
-            console.log('[STEP 10] click: code-generator');
-            await page.click10();
+            await _step('1:click ', () => page.click1());
+            await _step('2:scroll delta=360', () => page.scroll2());
+            await _step('3:scroll delta=600', () => page.scroll3());
+            await _step('4:scroll delta=600', () => page.scroll4());
+            await _step('5:scroll delta=720', () => page.scroll5());
+            await _step('6:scroll delta=840', () => page.scroll6());
+            await _step('7:scroll delta=840', () => page.scroll7());
+            await _step('8:scroll delta=840', () => page.scroll8());
+            await _step('9:scroll delta=840', () => page.scroll9());
+            await _step('10:scroll delta=960', () => page.scroll10());
+            await _step('11:scroll delta=-720', () => page.scroll11());
+            await _step('12:scroll delta=-840', () => page.scroll12());
+            await _step('13:scroll delta=-7320', () => page.scroll13());
 
+            if (_warnings.length) console.warn('[replay-warnings]', _warnings);
             expect(_failures).toEqual([]);
     });
 });

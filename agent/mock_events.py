@@ -60,7 +60,7 @@ def request(method, path, body=None, timeout=8):
 # ---------------------------------------------------------------------------
 def make_event(action, name="", automation_id="", class_name="",
                control_type="Button", window_title="Calculator",
-               value=None, x=0, y=0, index=0):
+               value=None, x=0, y=0, index=0, **extra):
     elem = {
         "name": name,
         "automationId": automation_id,
@@ -82,6 +82,7 @@ def make_event(action, name="", automation_id="", class_name="",
     }
     if value is not None:
         ev["value"] = value
+    ev.update(extra)  # e.g. relX/relY/endX/endY/endRelX/endRelY/winLeft/winTop/winWidth/winHeight
     return ev
 
 
@@ -96,6 +97,10 @@ MOCK_EVENTS = [
     make_event("doubleClick", name="Result display", automation_id="CalculatorResults", class_name="TextBlock", control_type="Text", x=320, y=240, index=7),
     make_event("scroll",      name="",               automation_id="",             class_name="ApplicationFrameWindow", control_type="Window", value="-3", x=320, y=300, index=8),
     make_event("rightClick",  name="Result display", automation_id="CalculatorResults", class_name="TextBlock", control_type="Text", x=320, y=240, index=9),
+    make_event("drag",        name="Result display", automation_id="CalculatorResults", class_name="TextBlock", control_type="Text",
+               x=300, y=250, index=10,
+               relX=100, relY=80, endX=500, endY=250, endRelX=300, endRelY=80,
+               winLeft=200, winTop=170, winWidth=800, winHeight=600),
 ]
 
 
@@ -194,6 +199,21 @@ def step_wdio_generate():
             f"  {fname} has no pause()",
             "pause(" not in content,
             f"found pause() calls — hardcoded waits are banned (CLAUDE.md)",
+        )
+        check(
+            f"  {fname} tracks _warnings",
+            "_warnings" in content,
+            "missing _warnings — silent session/coord fallbacks would go unnoticed",
+        )
+        check(
+            f"  {fname} replays the drag event",
+            "osDragRel(" in content or "osDrag(" in content,
+            "missing osDrag/osDragRel call — drag event fell through to a plain click",
+        )
+        check(
+            f"  {fname} wraps steps for popup Fail-and-Recover",
+            "_step(" in content,
+            "missing _step( wrapper — steps would not retry after a popup dismissal",
         )
 
 
