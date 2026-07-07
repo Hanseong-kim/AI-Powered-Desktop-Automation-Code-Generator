@@ -1133,6 +1133,37 @@ async function getWindowSession(title) {
     const cached = _sessionIds[title];
     if (cached && await _isSessionAlive(cached.sid)) return cached;
     delete _sessionIds[title];
+    _ensureDialog(title);
+
+    // Preferred path: Win32 EnumWindows (_listWindowHwnds) finds the TRUE
+    // top-level window by title — no ambiguity with a child element's own
+    // NativeWindowHandle (confirmed 2026-07-07: the desktop-UIA XPath scan
+    // below matched a child control inside the "폴더 열기" dialog, whose
+    // NativeWindowHandle Appium rejected with "not a top level window
+    // handle", which silently degraded every subsequent getCenter() call to
+    // garbage coordinates). _ensureDialog() above already resolved and
+    // cached this hwnd (and normalized the window to its recorded rect), so
+    // this is normally just a cache read.
+    let hwndNum = _hwndCache[title];
+    if (!hwndNum) {
+        const hs = _listWindowHwnds(title);
+        if (hs.length) { hwndNum = hs[0]; _hwndCache[title] = hwndNum; }
+    }
+    if (hwndNum) {
+        const hwndHex = '0x' + hwndNum.toString(16);
+        console.log(\`[session] top-level hwnd=\${hwndHex} for "\${title}" → scoped session\`);
+        try {
+            const sid = await _createSession(hwndHex);
+            _sessionIds[title] = { sid, rootElId: null };
+            return _sessionIds[title];
+        } catch (e) {
+            console.warn(\`[session] scoped session on \${hwndHex} failed (\${e.message}) — falling back to desktop-UIA scan for "\${title}"\`);
+        }
+    }
+
+    // Safety net: EnumWindows found nothing (e.g. an empty/dynamic dialog
+    // title) — fall back to the original desktop-UIA XPath scan + Root
+    // session reuse.
     console.log(\`[session] Root scan for: "\${title}"\`);
     const shortTitle = title.slice(0, 30).replace(/"/g, '');
     let hwnd = null;
@@ -1141,8 +1172,8 @@ async function getWindowSession(title) {
         try {
             const el = await browser.$(sel);
             const raw = await el.getAttribute('NativeWindowHandle');
-            const hwndNum = parseInt(raw, 10);
-            if (hwndNum) { hwnd = '0x' + hwndNum.toString(16); matchedEl = el; break; }
+            const rawNum = parseInt(raw, 10);
+            if (rawNum) { hwnd = '0x' + rawNum.toString(16); matchedEl = el; break; }
         } catch {}
     }
     const app = hwnd || 'Root';
@@ -1220,6 +1251,40 @@ const _hwndCache = {};
 // owner-PID scoping without every call site having to pass it in.
 let _mainTitleFrag = '';
 
+// Native (non-Electron) dialog title → its recorded window geometry, set
+// once in beforeAll (see generateWdio's beforeHook). _ensureDialog() uses
+// this to normalize a dialog to the position/size it was RECORDED at (e.g.
+// on a specific monitor in a multi-monitor setup) the first time replay
+// touches it — without this, a dialog's rel-offsets (relX/relY captured
+// against the recording-time window) point at the wrong pixels once the
+// dialog opens at a different position (confirmed 2026-07-07: VSCode's
+// "폴더 열기" dialog opened on monitor 1 while recording was done on
+// monitor 2, so every rel-offset click/scroll landed off-window).
+let _dialogRects = {};
+const _dialogsReady = new Set();
+
+// Resolves a dialog's TRUE top-level hwnd via Win32 EnumWindows (title
+// substring match — see _listWindowHwnds), then normalizes it to its
+// recorded rect and brings it to the foreground, ONCE per title. A no-op
+// for the main Electron window or any title not in _dialogRects (both
+// _resolveWinRect/getWindowSession callers pass titles indiscriminately —
+// this function is the single gate deciding whether a given title is a
+// "dialog that needs normalizing" at all).
+function _ensureDialog(title) {
+    if (!title || !(title in _dialogRects) || _dialogsReady.has(title)) return;
+    _dialogsReady.add(title);
+    const hs = _listWindowHwnds(title);
+    if (!hs.length) {
+        console.warn(\`[dialog] "\${title}" not found by EnumWindows — rel-offsets may be unreliable\`);
+        return;
+    }
+    _hwndCache[title] = hs[0];
+    const r = _dialogRects[title];
+    normalizeWindow(title, r.left, r.top, r.width, r.height);
+    osActivate(title, hs[0]);
+    console.log(\`[dialog] "\${title}" hwnd=\${hs[0]} normalized to\`, r);
+}
+
 function _listWindowHwnds(frag) {
     if (!frag) return [];
     try {
@@ -1270,6 +1335,21 @@ function normalizeWindow(frag, left, top, width, height) {
     } catch (e) {
         _failures.push('moveWindow');
         console.warn('[moveWindow] failed:', String(e.message || e).substring(0, 100));
+    }
+}
+
+// Bring a dialog (or, if hwnd is unknown, anything matching titleLike) to
+// the foreground — same OS-level foreground-lock bypass as SIMPLE_HEADER's
+// osActivate, but hwnd-first since _ensureDialog always already has one.
+function osActivate(titleLike, hwnd) {
+    try {
+        const args = hwnd ? \`-hwnd \${hwnd}\` : \`-titleLike "\${titleLike}"\`;
+        execSync(
+            \`powershell -NoProfile -File "\${join(__dirname, 'osActivate.ps1')}" \${args}\`,
+            { stdio: 'pipe', timeout: 15000 }
+        );
+    } catch (e) {
+        console.warn('[osActivate] failed:', String(e.message || e).substring(0, 100));
     }
 }
 
@@ -1339,16 +1419,19 @@ async function launchApp(exePath, args, titleFrag, rect) {
 }
 
 function osClickRel(frag, relX, relY, absX, absY, button = 'left', clicks = 1) {
+    _ensureDialog(frag);
     const r = _resolveWinRect(frag);
     if (r) { osClick(r.left + relX, r.top + relY, button, clicks); }
     else { _failures.push('absCoord-fallback'); osClick(absX, absY, button, clicks); }      // 창 못 찾으면 녹화 절대좌표로 폴백 — 실패로 기록
 }
 function osScrollRel(frag, relX, relY, absX, absY, delta) {
+    _ensureDialog(frag);
     const r = _resolveWinRect(frag);
     if (r) { osScroll(r.left + relX, r.top + relY, delta); }
     else { _failures.push('absCoord-fallback'); osScroll(absX, absY, delta); }
 }
 function osDragRel(frag, relX1, relY1, relX2, relY2, absX1, absY1, absX2, absY2) {
+    _ensureDialog(frag);
     const r = _resolveWinRect(frag);
     if (r) { osDrag(r.left + relX1, r.top + relY1, r.left + relX2, r.top + relY2); }
     else { _failures.push('absCoord-fallback'); osDrag(absX1, absY1, absX2, absY2); }
@@ -1438,6 +1521,27 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
   const recordedRect = _rectEvent
     ? { left: _rectEvent.winLeft, top: _rectEvent.winTop, width: _rectEvent.winWidth, height: _rectEvent.winHeight }
     : (_sessionMeta?.initialWindow || null);
+
+  // 네이티브(비-Electron) 다이얼로그 title → 녹화 시점 창 기하. 재생 중 _ensureDialog가
+  // 각 다이얼로그를 이 위치로 최초 1회 정규화한다 — 안 하면 rel 오프셋(relX/relY)이
+  // 녹화 당시 창 기준이라 다이얼로그가 다른 위치/모니터에서 열릴 경우 어긋난다
+  // (confirmed 2026-07-07: VSCode "폴더 열기"가 녹화 모니터와 다른 위치에서 열려
+  // 스크롤/클릭이 전부 빗나감). "coordinate" 폴백 이벤트(windowTitle 빈 문자열)는
+  // 직전 실제 title을 승계해 같은 다이얼로그로 묶는다 — 위 lastWinTitle 승계 로직과 동일 가정.
+  const dialogRects = {};
+  {
+    let _lastT = '';
+    for (const e of filtered) {
+      const t = e.element?.windowTitle || _lastT;
+      if (e.element?.windowTitle) _lastT = e.element.windowTitle;
+      if (!t || (winFragOk && t.includes(winFrag))) continue;   // 메인 Electron 창 제외
+      if (t in dialogRects) continue;
+      if (Number.isInteger(e.winLeft) && Number.isInteger(e.winTop) &&
+          Number.isInteger(e.winWidth) && Number.isInteger(e.winHeight)) {
+        dialogRects[t] = { left: e.winLeft, top: e.winTop, width: e.winWidth, height: e.winHeight };
+      }
+    }
+  }
 
   // 다이얼로그 내부의 "coordinate" 폴백 이벤트(agent.py가 element.windowTitle을
   // 못 채운 경우)는 relX/relY/winLeft/winTop은 있지만 windowTitle이 빈 문자열이다.
@@ -1758,6 +1862,7 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
     beforeAll(async () => {
         _warmupPowerShell();
         _mainTitleFrag = ${JSON.stringify(mainTitleFrag)};
+        _dialogRects = ${JSON.stringify(dialogRects)};
         const { hostname, port } = browser.options;
         _APPIUM = \`http://\${hostname || '127.0.0.1'}:\${port || 4723}\`;
         console.log(\`[session] Appium endpoint resolved to \${_APPIUM}\`);
