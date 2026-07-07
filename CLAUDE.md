@@ -24,10 +24,8 @@ npx wdio run Calculator/wdio.conf.js               # 폴더 이름 = PascalCase 
 npx wdio run Notepad/wdio.conf.js
 
 # Regression (no agent needed, server must be running)
-python agent/mock_events.py                        # expect 35/35 non-Groq checks
+python agent/mock_events.py                        # expect 49/49 checks
 ```
-
-`.env` at repo root (gitignored): `GROQ_API_KEY=gsk_...`
 
 ---
 
@@ -36,8 +34,13 @@ python agent/mock_events.py                        # expect 35/35 non-Groq check
 ```
 React UI (3000) --HTTP--> Express (3002) --HTTP--> Python Agent (4444)
       ^                        |
-      +------- SSE feed -------+--> Groq API (llama-3.3-70b-versatile)
+      +------- SSE feed -------+
 ```
+
+`/api/generate` is template-based (no LLM call) — no API key, no `.env`, no network
+call to any AI provider. The Groq/LLM-generation path described in older docs
+(`Claude code task v2.md`, `Claude code task server token opt.md`) has been fully
+replaced; those files are historical and superseded.
 
 Key files:
 - `server/server.js` — `/api/generate` (template-based, no LLM); saves to `generated-wdio/<AppName>/`
@@ -52,13 +55,14 @@ All UIA/COM runs on the worker thread after `CoInitialize`.
 
 ## 3. Hard Rules (never break)
 
-- **Groq model**: `llama-3.3-70b-versatile` always. 8b is banned (code quality = 25% grade).
-- **API key**: never hardcode/print. UI uses `req.body.apiKey`; `.env` is script-only fallback.
 - **pynput callbacks**: enqueue + return immediately. No UIA/COM inside hooks.
 - **File naming**: PascalCase app name → subfolder name. Server enforces this.
-- **No Java**: test-runner 삭제됨. Java/TestNG 코드 생성 없음. WdIO + Playwright only.
-- **Regression gates**: mock_events 35/35 non-Groq checks.
+- **No Java, no Playwright**: test-runner 삭제됨, generated-playwright 경로 삭제됨.
+  WebdriverIO (JS) 템플릿 생성만 지원.
+- **Regression gates**: `python agent/mock_events.py` 49/49 checks.
 - **Documentation honesty**: never write GUI-unverified work as "DONE" in docs.
+- **`generated-wdio/*` 직접 편집 금지**: 매 Generate 호출마다 덮어써지는 산출물이므로
+  수정은 항상 `server/server.js`/`agent/agent.py` 원본에서.
 
 ---
 
@@ -81,10 +85,17 @@ In real use (dialog open), Root scan finds hwnd in one query (~5-30s), then cach
 - test-runner 폴더 삭제 (Java/TestNG 완전 제거)
 - Calculator preset exePath → AUMID로 수정
 
+**Since session 13 (commit `f268f4e`, 2026-07-06): FreeDM(Qt/QML) + ClaudeDesktop(Electron)
+support added** — hwnd 기반 창 추적(`initAppHwnd`/`normalizeWindowSimple`), QML 셀렉터
+비유일성 대응(`trustLiveSelector`), `osType`/`osClickRel` 등. 코드 레벨 검증(생성물 확인)은
+됐지만 **`npx wdio run` 실제 GUI 통과 로그가 daily note에 없음** — 다음 세션에서 실행하며
+`[hwnd]`/`[normalize]` 로그와 함께 결과를 daily note에 남길 것 (문서 정직성 원칙, §3).
+
 **Next actions:**
-1. Run VSCode full flow with VSCode + 폴더 열기 dialog actually open → measure real timing.
-2. Notepad regression: regenerate + `npx wdio run Notepad/wdio.conf.js`.
-3. Check `INPUT_CONTROL_TYPES` if typing in new apps is silently dropped
+1. FreeDM/ClaudeDesktop `npx wdio run <App>/wdio.conf.js` 실제 실행 → 통과 여부와 elapsed를 기록.
+2. Run VSCode full flow with VSCode + 폴더 열기 dialog actually open → measure real timing.
+3. Notepad regression: regenerate + `npx wdio run Notepad/wdio.conf.js`.
+4. Check `INPUT_CONTROL_TYPES` if typing in new apps is silently dropped
    (current set: `{"Edit", "Document", "ComboBox"}`).
 
 **Risk:** If a text area's `controlType` is not in `INPUT_CONTROL_TYPES`, typing is filtered.
@@ -98,8 +109,16 @@ Verify on each new app type.
   appTopLevelWindow. Clicks/focus capture unreliable. Demo on Win32 (regedit, classic Notepad).
 - **By.name exact-match**: UWP window titles change on load. Use XPath `contains(@Name,...)` fallback.
 - **Agent not Admin**: element `automationId`/`name` come back empty. Always verify startup log.
-- **Groq 429**: account-level quota (not per-key). Wait ~35s or use `compile_loop` retry logic.
 - **WordPad**: removed from Win11 24H2. Do not add back as preset.
+- **VSCode/Electron content**: Chromium renderer exposes no UIA tree → clicks on
+  VSCode's own menus/editor UI fall back to absolute `osClick(x,y)` (breaks if window
+  moves). Native dialogs (e.g. "Open Folder") are safe — those use live UIA re-query.
+  Untested fix candidate: launch with `--force-renderer-accessibility`.
+- **QML/Qt controls (FreeDM)**: `el.click()` (UIA Invoke) can succeed with no error yet
+  never reach the real MouseArea. Also `el.getRect()` is unreliable on WinAppDriver —
+  use `getLocation()+getSize()`. See `trustLiveSelector`/`osClickRel` in server.js.
+- **`agent.py` requires restart after edits** — no hot reload; changes only take effect
+  on next `python agent/agent.py` run.
 - Full history → `dev-log.md` | Issues & fixes → `troubleshooting.md`
 
 ---

@@ -1,6 +1,6 @@
 ﻿import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useStream } from './useStream';
-import { getConfig, getStatus, startRecording, stopRecording, clearEvents, generate, deleteEvent } from './api';
+import { getStatus, startRecording, stopRecording, clearEvents, generate, deleteEvent } from './api';
 import ControlPanel from './components/ControlPanel';
 import EventTable from './components/EventTable';
 import CodeViewer from './components/CodeViewer';
@@ -11,8 +11,6 @@ const DEFAULT_FORM = {
   appName: 'Calculator',
   exePath: 'C:\\Windows\\System32\\calc.exe',
   platform: 'Windows',
-  framework: 'wdio',
-  apiKey: '',
 };
 
 let _toastId = 0;
@@ -22,7 +20,6 @@ export default function App() {
   const [status, setStatus] = useState({ agentOnline: false, isAdmin: null, recording: false });
   const [events, setEvents] = useState([]);
   const [genState, setGenState] = useState({ generating: false, files: null, error: null });
-  const [hasServerKey, setHasServerKey] = useState(false);
   const [toasts, setToasts] = useState([]);
   const dismissTimers = useRef({});
 
@@ -37,16 +34,6 @@ export default function App() {
     delete dismissTimers.current[id];
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }
-
-  // Ask the server whether it has a .env key. If so, the user can leave the
-  // key field blank — the server uses its own key (never sent to the browser).
-  useEffect(() => {
-    let alive = true;
-    getConfig()
-      .then(({ hasServerKey }) => { if (alive) setHasServerKey(!!hasServerKey); })
-      .catch(() => { /* server offline — treat as no key */ });
-    return () => { alive = false; };
-  }, []);
 
   // Poll agent status every 3 s
   useEffect(() => {
@@ -147,21 +134,14 @@ export default function App() {
     setGenState({ generating: true, files: null, error: null });
     try {
       const res = await generate({
-        apiKey: form.apiKey,
         appName: form.appName || undefined,
         exePath: form.exePath || undefined,
         platform: form.platform || undefined,
-        framework: form.framework || 'wdio',
       });
       if (res.ok) {
         setGenState({ generating: false, files: res.files, error: null });
         if (res.savedPaths?.length) {
-          const dest = res.framework === 'playwright'
-            ? 'generated-playwright/'
-            : res.framework === 'wdio'
-            ? 'generated-wdio/'
-            : 'test-runner/…/tests/';
-          addToast('info', `Files saved to ${dest}`);
+          addToast('info', `Files saved to generated-wdio/${res.folder || ''}`);
         }
       } else {
         // SSE 'generation:error' event already fires addToast; only update state here
@@ -192,7 +172,6 @@ export default function App() {
           onGenerate={handleGenerate}
           generating={genState.generating}
           eventCount={events.length}
-          hasServerKey={hasServerKey}
         />
         <EventTable events={events} onDeleteEvent={handleDeleteEvent} />
         <CodeViewer files={genState.files} error={genState.error} />

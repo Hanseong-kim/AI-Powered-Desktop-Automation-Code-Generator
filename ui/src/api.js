@@ -14,7 +14,6 @@ const post = (path, body) =>
     body: JSON.stringify(body),
   }).then(json);
 
-export const getConfig    = ()     => fetch(`${BASE}/config`).then(json);
 export const getStatus    = ()     => fetch(`${BASE}/status`).then(json);
 export const startRecording = (body) => post('/start', body);
 export const stopRecording  = ()     => post('/stop', {});

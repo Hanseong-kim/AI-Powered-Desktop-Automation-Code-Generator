@@ -7,9 +7,8 @@ directly to the server. No agent, no admin rights, no real app needed.
 Usage:
     python agent/mock_events.py
 
-With code generation (requires Groq key):
-    set GROQ_API_KEY=gsk_...
-    python agent/mock_events.py
+Note: /api/generate is template-based (no LLM call) — code generation
+always runs, no API key or environment variable needed.
 """
 
 import io
@@ -23,13 +22,6 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 import urllib.error
 import urllib.request
-
-# Load .env for local validation (UI requests still use user-supplied key)
-try:
-    from dotenv import load_dotenv
-    load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
-except ImportError:
-    pass
 
 BASE = "http://localhost:3002"
 APP_NAME = "Calculator"
@@ -153,89 +145,34 @@ def step_bad_exepath():
     check("Response has error message", has_msg, body.get("message", ""))
 
 
-def step_generate(api_key):
-    print("\n[6] Code generation (Groq)")
-    status, body = request("POST", "/api/generate", {
-        "apiKey": api_key,
-        "appName": APP_NAME,
-        "platform": PLATFORM,
-    }, timeout=60)
-    check("POST /api/generate returns 200", status == 200, f"got {status}")
-    if status == 200:
-        check("ok == true", body.get("ok") is True, body.get("message", ""))
-        files = body.get("files", [])
-        check("Two files returned", len(files) == 2, f"got {len(files)}")
-        for f in files:
-            check(f"  {f['filename']} has content", bool(f.get("content")))
-            check(f"  {f['filename']} starts with package", f.get("content", "").startswith("package"))
-    else:
-        check("(skipped file checks)", False, body.get("message", ""))
-
-
-def step_missing_apikey():
-    print("\n[7] Missing API key guard")
-    status, body = request("POST", "/api/generate", {
-        "appName": APP_NAME,
-        "platform": PLATFORM,
-    })
-    check("Returns 400 when apiKey absent", status == 400, f"got {status}")
-
-
 def step_generate_no_events():
-    print("\n[8] Generate with empty event list")
+    print("\n[6] Generate with empty event list")
     request("DELETE", "/api/events")
     status, body = request("POST", "/api/generate", {
-        "apiKey": "dummy",
         "appName": APP_NAME,
         "platform": PLATFORM,
     })
     check("Returns 400 when no events", status == 400, f"got {status}")
 
 
-def step_playwright_generate(api_key):
-    print("\n[10] Playwright Python generation")
-    status, body = request("POST", "/api/generate", {
-        "apiKey": api_key,
-        "appName": APP_NAME,
-        "platform": PLATFORM,
-        "framework": "playwright",
-    }, timeout=60)
-    check("POST /api/generate (playwright) returns 200", status == 200, f"got {status}")
-    if status == 200:
-        check("ok == true", body.get("ok") is True)
-        files = body.get("files", [])
-        check("One file returned", len(files) == 1, f"got {len(files)}")
-        if files:
-            fname = files[0].get("filename", "")
-            content = files[0].get("content", "")
-            check(f"Filename ends with .py", fname.endswith(".py"), f"got {fname}")
-            check("Content is non-empty", bool(content.strip()))
-            # Python syntax check
-            try:
-                compile(content, fname, "exec")
-                check("Python syntax valid (compile)", True)
-            except SyntaxError as e:
-                check(f"Python syntax valid (compile)", False, str(e))
-
-
-def step_wdio_generate(api_key):
-    print("\n[11] WebdriverIO JavaScript generation")
+def step_wdio_generate():
+    print("\n[7] WebdriverIO JavaScript generation (template-based, no API key)")
     # Ensure events are loaded before generate call
     request("DELETE", "/api/events")
     for ev in MOCK_EVENTS:
         request("POST", "/api/events", ev)
 
     status, body = request("POST", "/api/generate", {
-        "apiKey": api_key,
         "appName": APP_NAME,
         "platform": PLATFORM,
-        "framework": "wdio",
-    }, timeout=90)
-    check("POST /api/generate (wdio) returns 200", status == 200, f"got {status}")
+    }, timeout=30)
+    check("POST /api/generate returns 200", status == 200, f"got {status}")
     if status != 200:
         check("(skipped file checks)", False, body.get("message", ""))
         return
     check("ok == true", body.get("ok") is True)
+    check("folder field present", bool(body.get("folder")), f"got {body.get('folder')}")
+    check("runCommand field present", bool(body.get("runCommand")))
     files = body.get("files", [])
     check("Two .js files returned", len(files) == 2, f"got {len(files)}")
     for f in files:
@@ -244,24 +181,24 @@ def step_wdio_generate(api_key):
         check(f"  {fname} ends with .js", fname.endswith(".js"), f"got '{fname}'")
         check(f"  {fname} has content", bool(content.strip()))
         check(
-            f"  {fname} contains waitForDisplayed",
-            "waitForDisplayed" in content,
-            "missing waitForDisplayed — possible pause() regression",
+            f"  {fname} contains waitForExist",
+            "waitForExist" in content,
+            "missing waitForExist — possible regression",
         )
         check(
-            f"  {fname} has at most 1 pause (startup only)",
-            content.count("pause(") <= 1,
-            f"found {content.count('pause(')} pause() calls — only 1 (startup) is allowed",
+            f"  {fname} asserts on _failures",
+            "expect(_failures).toEqual([])" in content,
+            "missing _failures assert — injection failures would go unnoticed",
         )
         check(
-            f"  {fname} imports webdriverio",
-            "webdriverio" in content or "@wdio/globals" in content,
-            "missing webdriverio import",
+            f"  {fname} has no pause()",
+            "pause(" not in content,
+            f"found pause() calls — hardcoded waits are banned (CLAUDE.md)",
         )
 
 
 def step_delete_event():
-    print("\n[9] Event row delete (6 inject -> 1 delete -> 5 remain)")
+    print("\n[8] Event row delete (6 inject -> 1 delete -> 5 remain)")
     request("DELETE", "/api/events")
     # Inject exactly 6 events
     for ev in MOCK_EVENTS[:6]:
@@ -297,23 +234,13 @@ def main():
     step_post_events()
     step_verify_events()
     step_bad_exepath()
-    step_missing_apikey()
     step_generate_no_events()
     step_delete_event()
 
-    # Re-load events for optional generation test
+    # Re-load events for generation test
     step_clear_events()
     step_post_events()
-
-    api_key = os.environ.get("GROQ_API_KEY", "")
-    if api_key:
-        step_generate(api_key)
-        step_playwright_generate(api_key)
-        step_wdio_generate(api_key)
-    else:
-        print("\n[6] Code generation - SKIPPED (set GROQ_API_KEY env var to enable)")
-        print("\n[10] Playwright generation - SKIPPED (set GROQ_API_KEY env var to enable)")
-        print("\n[11] WDIO generation - SKIPPED (set GROQ_API_KEY env var to enable)")
+    step_wdio_generate()
 
     passed = sum(_results)
     total = len(_results)
