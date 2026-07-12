@@ -1,8 +1,21 @@
 # AI-Powered Desktop Automation Code Generator
 
-Records user interactions with any Windows desktop application (Win32, WPF,
-UWP, Qt, or Electron) and generates runnable **WebdriverIO (JavaScript)** or
-**Playwright (Python)** test code.
+Records user interactions (clicks, typing, double-clicks, scrolls) with any
+Windows desktop application and generates runnable **WebdriverIO (JavaScript)**
+test code that replays the session — targeting every element through
+**UI Automation selectors (AutomationId / ClassName / Name XPath) only, never
+screen coordinates**.
+
+- **Generic**: point it at any `.exe` (or UWP AUMID) — no per-app integration.
+- **XPath-only replay**: coordinates are forbidden everywhere. Elements without
+  a unique id/name are resolved through an anchor-relative XPath
+  (`//*[@AutomationId="X"]/Button[3]`). Events with no usable selector are
+  generated as **explicit failing steps** instead of silently degrading.
+- **Template-based generation**: no LLM call, no API key, no network — code is
+  built directly from the recorded event list in well under a second.
+- **Self-recovering replay**: every step is wrapped in a Fail-and-Recover
+  routine that dismisses unexpected popups (e.g. "file already exists") and
+  retries once before failing honestly.
 
 ## Architecture
 
@@ -12,56 +25,59 @@ React UI (3000) --HTTP--> Express (3002) --HTTP--> Python Agent (4444)
       +---- SSE live feed ----+
 ```
 
-Three cooperating processes. The Python agent captures mouse/keyboard input and
-Windows UI Automation element data; the Express bridge stores events, decides
-the replay architecture (see [App Support Tiers](#app-support-tiers) below),
-and generates the test code directly from the recorded events (template-based,
-no LLM call); the React dashboard provides live monitoring and triggers code
-generation.
+Three cooperating processes:
+
+| Process | Role |
+|---|---|
+| **Python agent** (`agent/agent.py`) | Global mouse/keyboard hooks (pynput) + Windows UI Automation (UIA/COM) element inspection. Hooks only enqueue raw events; all UIA work runs on a dedicated worker thread. |
+| **Express bridge** (`server/server.js`) | Stores events, decides the replay architecture (single-window vs multi-window session mode), and generates the test code from templates via `/api/generate`. |
+| **React dashboard** (`ui/`) | Live event feed (SSE), per-event delete, app presets, Generate button. |
 
 ## Prerequisites
 
 | Tool | Version | Notes |
 |---|---|---|
-| Python | 3.9+ | Must run agent from **Administrator** terminal |
-| Node.js | 18+ | For Express bridge, React UI, and generated WebdriverIO tests |
-| WinAppDriver | 1.2.1 | Install + enable Developer Mode (Settings → Privacy & security → For developers). No manual startup needed — the generated test suite's `@wdio/appium-service` spawns Appium (which proxies to WinAppDriver) automatically. |
+| Python | 3.9+ | The agent **must** run from an Administrator terminal |
+| Node.js | 18+ | For the Express bridge, React UI, and generated tests |
+| WinAppDriver | 1.2.1 | Install it and enable Developer Mode (Settings → Privacy & security → For developers). No manual startup — the generated suite's `@wdio/appium-service` spawns Appium, which proxies to WinAppDriver. |
 
-> There is no Java/Maven dependency, and no external API key is required —
-> code generation is fully template-based (see the note in
-> [Recording a Session](#2-recording-a-session)).
+> No Java/Maven, no Playwright, no API key. Output is WebdriverIO JavaScript
+> only.
 
 ---
 
-## 1. Install & Run the Code Generator
+## 1. Install & Run
 
-### Terminal 1 — Express Bridge (normal terminal)
+### Terminal 1 — Express bridge (normal terminal)
 
 ```powershell
 cd server
-npm install
+npm install          # first time only
 node server.js
 # Listening on http://localhost:3002
 ```
 
-### Terminal 2 — Python Agent (Administrator PowerShell)
+### Terminal 2 — Python agent (Administrator PowerShell)
 
 ```powershell
 cd agent
-pip install -r requirements.txt
+pip install -r requirements.txt   # first time only
 python agent.py
 # Must print: Administrator rights: YES
 ```
 
-If it prints `NO`, close the terminal and reopen PowerShell using
-"Run as Administrator" — without it, UIA element properties
-(`automationId`/`name`) come back empty for most applications.
+If it prints `NO`, close the terminal and reopen PowerShell with
+"Run as Administrator" — without admin rights, UIA element properties
+(`automationId`/`name`) come back **empty** for most applications and the
+generated test will be full of unusable steps.
+
+> The agent has no hot reload — after any edit to `agent.py`, restart it.
 
 ### Terminal 3 — React UI (normal terminal)
 
 ```powershell
 cd ui
-npm install
+npm install          # first time only
 npm run dev
 # Open http://localhost:3000
 ```
@@ -70,88 +86,129 @@ npm run dev
 
 ## 2. Recording a Session
 
-1. Select a **Target App** from the preset dropdown — Calculator, Notepad,
-   Paint (UWP), Registry Editor, IDM, VSCode, GitHub Desktop, Free Download
-   Manager, Claude Desktop, or **Custom…** (enter App Name + Exe Path
-   manually; UWP apps use an AUMID like `Package.Family.Name!App` instead of
-   a file path — the agent detects the `!` and launches via
-   `explorer shell:AppsFolder` automatically).
-2. Select **Platform** (Windows / Android / iOS).
-3. Select **Output Framework**: `WebdriverIO JavaScript (v9)` or
-   `Playwright Python`.
-4. Click **Launch** — the target app opens and recording begins.
-5. Interact with the app (clicks, typing, scrolling). **English input only** —
-   IME/CJK keystrokes are silently dropped. Avoid clicking the taskbar or
-   other windows right after Launch, and wait for the app window to fully
-   render before your first click (a click captured before the target window
-   is fully resolved gets dropped rather than mis-attributed).
-6. Click **Stop** when done.
-7. Each captured event row can be **deleted individually** by hovering over
-   it and clicking the `×` button.
-8. Click **Generate Code**. Generated files are **saved to disk
-   automatically** (toast confirms the path) under `generated-wdio/<AppName>/`
-   (PascalCase folder name) or `generated-playwright/`.
+1. **Pick a Target App** from the preset dropdown (Calculator, Notepad,
+   Registry Editor, …) or choose **Custom…** and enter:
+   - **App Name** — becomes the PascalCase output folder name
+     (e.g. `My App` → `generated-wdio/MyApp/`).
+   - **Exe Path** — full path to the executable
+     (e.g. `C:\Program Files\7-Zip\7zFM.exe`).
+     UWP apps use an AUMID like `Package.Family.Name!App` instead of a file
+     path — the agent detects the `!` and launches via
+     `explorer shell:AppsFolder` automatically.
+2. Click **Launch** — the target app opens and recording begins. Wait for the
+   window to fully render before your first click.
+3. **Interact with the app.** Supported event scope: **Click, Type,
+   Double-Click, Scroll**. (Drag and right-click are captured for diagnostics
+   but rendered as scope-out comments, not replayed.)
+   - **English input only** — IME/CJK keystrokes are silently dropped.
+   - Avoid clicking the taskbar or unrelated windows mid-recording.
+   - Avoid **rapid-fire menu clicking** (opening several menus within a
+     second): a menu's light-dismiss overlay can race the element inspection.
+     The agent re-resolves the element beneath the overlay automatically, but
+     a deliberate pace gives the cleanest capture.
+4. Watch the **live event feed** — each row shows the action, the resolved
+   element (automationId / name / className), and the window. If a row shows
+   an empty element, that step will be generated as an explicit FAIL step
+   (coordinates are never used as a fallback), so consider re-doing that
+   interaction.
+5. Click **Stop** when done.
+6. **Delete stray rows** (mis-clicks, taskbar clicks) by hovering a row and
+   clicking `×`.
+7. Click **Generate Code**. Files are saved automatically under
+   `generated-wdio/<AppName>/` — a toast confirms the path.
+
+Recordings are also backed up as JSON under `recorded-events/` (git-ignored),
+and can be restored via `POST /api/events/restore` for re-generation without
+re-recording.
 
 ### Generated output
 
-| Framework | Files |
-|---|---|
-| WebdriverIO | `generated-wdio/<AppName>/{App}TestById.js`, `{App}TestByClass.js`, `wdio.conf.js`, plus `osClick.ps1`/`osScroll.ps1`/`osType.ps1`/`osWindowRect.ps1`/`osMoveWindow.ps1` replay helpers |
-| Playwright Python | `generated-playwright/test_{app}_playwright.py` |
+```
+generated-wdio/<AppName>/
+├── <AppName>TestById.js       # selectors prefer AutomationId (~id / XPath)
+├── <AppName>TestByClass.js    # selectors prefer ClassName+Name XPath
+├── wdio.conf.js               # per-app config (Appium service, capabilities)
+├── osScroll.ps1               # UIA ScrollPattern scroll (PostMessage wheel fallback)
+├── osType.ps1                 # OS-level SendKeys fallback for stubborn edit controls
+├── osActivate.ps1             # bring the app window to the foreground
+├── osWindowRect.ps1           # read window geometry (hwnd-first)
+├── osMoveWindow.ps1           # restore the recorded window position/size
+├── osDismissPopup.ps1         # Fail-and-Recover: dismiss unexpected dialogs
+└── osEscape.ps1               # Fail-and-Recover: ESC out of stuck input states
+```
 
-> **Generation is template-based, not an LLM call.** `/api/generate` in
-> `server/server.js` builds WebdriverIO/Playwright code directly from the
-> recorded event list — no external API, no rate limits, no key required.
-> The UI still has a "Groq API Key" field and the server still loads
-> `GROQ_API_KEY` from `.env` if present, but neither is currently read by
-> the generation endpoint — they're inert leftovers from an earlier
-> LLM-based version of the generator. The two WebdriverIO files (ById +
-> ByClass) are generated together and typically finish in well under a
-> second.
+The two test files are alternative locator strategies for the same recording —
+if `ById` fails on an app whose ids are unstable, try `ByClass`.
+
+> The `.ps1` helpers are **not** coordinate injection: they handle keyboard
+> input, window management, and popup recovery. Element targeting is always
+> selector-based. Do not edit generated files — they are overwritten on every
+> Generate; fix `server/server.js` templates instead.
 
 ---
 
-## 3. Run Generated WebdriverIO Tests
+## 3. Running Generated Tests
 
 ```powershell
 cd generated-wdio
-npm install          # first time only — installs webdriverio, @wdio/appium-service, appium, etc.
+npm install          # first time only
 npx wdio run <AppName>/wdio.conf.js
 # e.g. npx wdio run Calculator/wdio.conf.js
 ```
 
-Appium starts automatically (via `@wdio/appium-service`) on port `4723` and
-proxies to WinAppDriver — no separate WinAppDriver terminal needed.
+Appium starts automatically on port `4723` and proxies to WinAppDriver — no
+separate WinAppDriver terminal needed. The replay is **visual**: the app
+launches, its window is moved back to the recorded geometry, and each step
+clicks/types/scrolls the real UI.
 
-To run only one spec file:
-```powershell
-npx wdio run <AppName>/wdio.conf.js --spec ./<AppName>/{App}TestById.js
-```
-
-### Run Generated Playwright Tests
+Run a single spec:
 
 ```powershell
-cd generated-playwright
-pip install playwright
-playwright install
-python test_{app}_playwright.py
+npx wdio run <AppName>/wdio.conf.js --spec ./<AppName>/<AppName>TestById.js
 ```
+
+### How a test decides PASS/FAIL
+
+- Every step is logged as `[STEP] n:action label`.
+- Injection failures, un-resolvable selectors, and window-management errors
+  are pushed into a `_failures` array; the test ends with
+  `expect(_failures).toEqual([])`, so **any silently broken step fails the
+  run** — there are no false PASSes.
+- Recoverable incidents (a popup was dismissed and the step retried
+  successfully) are recorded in `_warnings` and printed, but do not fail the
+  test.
+
+### Replay architecture (chosen automatically at generate time)
+
+| Mode | When | How it replays |
+|---|---|---|
+| **Simple** | Single-window native app | `appium:app = exePath`; clicks via `browser.$(selector).click()` (UIA Invoke) |
+| **Session** | Multi-window flows or Electron-class apps | `appium:app = 'Root'`; each new HWND gets its own scoped WinAppDriver session; clicks/typing resolve the XPath **inside that window's session** (`_clickScoped`/`_typeScoped`) |
+
+Scrolling never uses pixels: the recorded scroll container is re-found via UIA
+and scrolled with `ScrollPattern.Scroll()`; legacy controls that lack
+ScrollPattern get an hwnd-scoped `WM_MOUSEWHEEL` via `PostMessageW`.
 
 ---
 
-## 4. Regression Testing
+## 4. Regression Testing (no agent, no admin, no GUI)
 
 ```powershell
-# Requires only the server running (no agent, no admin rights needed)
-cd server; node server.js         # Terminal 1
-python agent/mock_events.py       # Terminal 2
-# Prints "N/N checks passed"
+# Terminal 1
+cd server; node server.js
+
+# Terminal 2
+python agent/mock_events.py
+# expect: 115/115 checks passed
 ```
 
-`mock_events.py` also has a handful of checks that only run when
-`GROQ_API_KEY` is set in the environment (`$env:GROQ_API_KEY="gsk_..."; python
-agent/mock_events.py`) — these are legacy checks against the same inert code
-path described above and can be skipped safely.
+`mock_events.py` POSTs a synthetic recording to the live server, generates
+code for both the simple and session (multi-window) paths, and asserts on the
+output: XPath-only invariants (no `osClick(`/`osDrag(`/`osClickRel(` anywhere),
+anchor-XPath rendering, double-click dedupe, Fail-and-Recover wiring, ps1
+helper contents (ScrollPattern present, `SetCursorPos` absent), and that stale
+coordinate helpers left by older versions are removed from the output folder
+on regenerate.
 
 ---
 
@@ -159,50 +216,46 @@ path described above and can be skipped safely.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `Agent unreachable` from Express | Python agent not running | Start `python agent.py` in Admin terminal |
-| `Administrator rights: NO` | Agent not started as Administrator | Reopen PowerShell → Run as Administrator |
-| UIA properties (`automationId`/`name`) empty | Not running as Admin | Restart agent terminal as Administrator |
-| `Connection refused` on port 4723 | Appium/WinAppDriver not started | Handled automatically by `@wdio/appium-service` when you run `npx wdio run ...`; check the console for `Appium started with ID: ...` |
-| `SessionNotCreatedException` | Wrong exe path / AUMID in preset | Verify the path/AUMID passed to Launch |
-| `NoSuchElementException` | Locator mismatch or timing | Try the `ByClass` file instead of `ById` |
-| A click in the generated test lands on the wrong element/coordinate | Electron app's dynamic content (chat lists, scroll position) differs between recording and replay | Coordinate-only replay (Tier 3, see below) is inherently sensitive to app state drift — re-record close to the replay environment |
-| Recorded events include clicks on unrelated windows (taskbar, IDE, task switcher) | Clicked outside the target window during/right after recording | Delete the stray event rows before generating, or re-record avoiding other windows for the first few seconds |
-| Toast "Server connection lost" loops | Express server crashed | Restart `node server.js`; toasts fire once per episode |
-| `UnicodeEncodeError cp949` | Windows terminal encoding | Use `chcp 65001` before running Python scripts |
+| `Agent unreachable` from Express | Python agent not running | Start `python agent.py` in an Admin terminal |
+| `Administrator rights: NO` | Agent not elevated | Reopen PowerShell → Run as Administrator |
+| Captured elements have empty `automationId`/`name` | Agent not elevated, or the app genuinely exposes nothing (see limitations) | Restart agent as Admin; check the agent log for `[inspect] anchor XPath ...` lines |
+| Test fails with `n:click:no-selector` | That event was captured with no selector and no anchor (coordinates are forbidden) | Delete the event row and re-record that interaction at a calmer pace |
+| `Connection refused` on port 4723 | Appium not up | Handled by `@wdio/appium-service`; check the console for `Appium started with ID: ...` |
+| `SessionNotCreatedException` | Wrong exe path / AUMID | Verify the path passed to Launch |
+| `NoSuchElementException` at replay | Locator mismatch or timing | Try the `ByClass` spec instead of `ById`; check the app's UI state matches recording |
+| Replay clicks something, a stray dialog appears, test still passes with `popup-dismissed` warning | Working as intended — Fail-and-Recover dismissed it and retried | Nothing to do; check `_warnings` output if curious |
+| Recorded rows include taskbar/IDE clicks | Clicked outside the target during recording | Delete those rows before Generate |
+| `UnicodeEncodeError cp949` | Windows terminal encoding | `chcp 65001` before running Python scripts |
 
 ---
 
-## App Support Tiers
+## Known Limitations
 
-The automation engine uses a three-tier strategy based on how much the app
-exposes via Windows UI Automation (UIA), decided per-recording by
-`needsSessionSwitching()` in `server/server.js`:
+- **Electron/Chromium apps (VSCode-class) are out of scope.** The Chromium
+  renderer exposes no usable UIA tree, so content clicks have no selector and
+  generate as explicit FAIL steps. Native OS dialogs opened by such apps
+  (e.g. "Open Folder") replay fine.
+- **Qt/QML apps** can accept a UIA Invoke without error while the real
+  `MouseArea` never fires, and their AutomationIds are often non-unique —
+  currently out of scope.
+- **UWP quirks**: window titles change during load (`contains(@Name,...)`
+  matching handles most of it); Win11 Notepad is a single-instance app that
+  holds the user's unsaved tabs — prefer other demo targets.
+- **Admin-manifested targets** (e.g. `regedit.exe`): a non-elevated agent can
+  see the top-level window but UIPI blocks child element inspection — run the
+  agent elevated (required anyway).
+- **Typing capture** is filtered by control type
+  (`{"Edit", "Document", "ComboBox"}`). If typing into a new app type is
+  silently dropped, the target control's type needs to be added in
+  `agent/agent.py` (`INPUT_CONTROL_TYPES`).
 
-| Tier | App Types | Detection | Replay Strategy |
-|------|-----------|-----------|------------------|
-| 1 — Win32/WPF/UWP | Calculator, Notepad, Registry Editor, IDM | Full UIA tree, single window | `browser.$(selector)` (automationId → name → className), falls back to `getCenterSimple()` (live `getRect()`) + OS-level `osClick.ps1` click if the selector fails |
-| 2 — Qt | Free Download Manager | Partial UIA tree; containers can swallow AutomationId (QML sets it on every node, not just leaves) | Same selector-first approach as Tier 1; `UIAInspector._deepen()` walks past over-matched containers using bounding-rect/ControlType heuristics |
-| 3 — Electron / multi-window | VSCode, Claude Desktop, GitHub Desktop | Window class `Chrome_WidgetWin*`, or any app that opens more than one top-level window | Session-switching architecture: `launchApp()` launches a fresh instance and waits for a real (non-zero-size) window; clicks replay via `osClickRel(titleFrag, relX, relY, ...)`, re-reading the live window rect each time so replay tracks a moved/resized window |
+## Project Layout
 
-### Coordinate replay
-
-Pointer events carry both `relX`/`relY` (window-relative) and absolute `x`/`y`
-as a fallback. Replay is **not** done via WebdriverIO/W3C pointer Actions
-(WinAppDriver doesn't support them) — it's done via direct OS-level mouse
-injection (`user32.dll` `SendInput`, wrapped in `osClick.ps1`/`osScroll.ps1`),
-so it also works against Electron web content where `NativeWindowHandle` is 0
-and no UIA-scoped session is possible.
-
-### Known limitations
-
-- **Electron coordinate replay is state-sensitive.** If the app's dynamic
-  content (chat history, scroll position, item order) differs between
-  recording and replay, a recorded pixel offset can land on the wrong
-  element — there's no selector-based verification for Electron clicks today
-  (a Root-session UIA lookup is possible but costs 10–50s per click, so it's
-  intentionally not used for every step).
-- **Paint canvas drawing.** Toolbar/button clicks work, but freehand
-  mouse-drag drawing cannot be reliably replayed.
-- **Multi-monitor moves.** Coordinates are relative to the window origin, not
-  the screen — moving the window to a different monitor between capture and
-  replay can shift coordinates if the monitor's origin differs.
+```
+agent/          Python capture agent + mock_events.py regression gate
+server/         Express bridge + template-based code generator
+ui/             React dashboard (Vite)
+generated-wdio/ Generated test suites (one folder per app) + shared npm deps
+recorded-events/  JSON backups of every recording session (git-ignored)
+poc/            Standalone PowerShell PoCs (XPath click, ScrollPattern, HWND scoping)
+```
