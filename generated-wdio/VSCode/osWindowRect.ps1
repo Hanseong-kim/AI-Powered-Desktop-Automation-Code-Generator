@@ -1,4 +1,4 @@
-param([string]$titleLike, [string]$hwnd, [switch]$listOnly)
+﻿param([string]$titleLike, [string]$hwnd, [switch]$listOnly, [switch]$ownerOnly)
 Add-Type @"
 using System;
 using System.Text;
@@ -13,6 +13,7 @@ public class WinEnum {
   [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder sb, int max);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hWnd, uint cmd);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   public static List<IntPtr> Find(string titleLike) {
     var found = new List<IntPtr>();
@@ -36,6 +37,13 @@ public class WinEnum {
 # never drifts onto an unrelated window (see launchApp's hwnd tracking).
 if ($hwnd) {
   $h = [IntPtr]([int64]$hwnd)
+  if ($ownerOnly) {
+    # GW_OWNER=4 — nonzero means an owned (dialog-style) window, which
+    # WinAppDriver's appTopLevelWindow rejects outright ("not a top level
+    # window handle"), so callers skip the scoped-session attempt entirely.
+    Write-Output ([int64][WinEnum]::GetWindow($h, 4))
+    exit
+  }
   $r = New-Object WinEnum+RECT
   if ([WinEnum]::GetWindowRect($h, [ref]$r)) {
     Write-Output ("{0} {1} {2} {3}" -f $r.Left, $r.Top, ($r.Right - $r.Left), ($r.Bottom - $r.Top))

@@ -1,4 +1,4 @@
-param([string]$titleLike, [string]$hwnd)
+﻿param([string]$titleLike, [string]$hwnd)
 Add-Type @"
 using System;
 using System.Text;

@@ -106,6 +106,42 @@ class UIAInspector:
             interface=comtypes.client.GetModule("UIAutomationCore.dll").IUIAutomation,
         )
 
+    # File-list rows (e.g. the "폴더 열기" dialog's Explorer ListView) hit-test
+    # to this generic in-place-rename edit surrogate rather than the row
+    # itself — its Name is the localized COLUMN header ("이름"), not the
+    # actual filename/folder name. The row's real Name (e.g. "run",
+    # "hansung") lives on the ListItem/TreeItem ancestor (confirmed
+    # 2026-07-08: VSCode folder-picker replay opened the wrong folder
+    # because every row click fell back to blind rel-offset coordinates —
+    # a dialog's last-visited folder/scroll state isn't guaranteed to match
+    # between recording and replay, so a coordinate-only click can land on
+    # a different row than the one actually clicked).
+    GENERIC_CELL_AUTOMATION_IDS = {"System.ItemNameDisplay"}
+    ROW_CONTROL_TYPES = {50007, 50024}  # ListItem, TreeItem
+
+    def _nearest_row_ancestor(self, elem, max_up=6):
+        """Walk up from elem toward the nearest ListItem/TreeItem ancestor
+        that has a real Name. See GENERIC_CELL_AUTOMATION_IDS docstring."""
+        try:
+            walker = self._uia.ControlViewWalker
+            cur = elem
+            for _ in range(max_up):
+                try:
+                    if cur.CurrentControlType in self.ROW_CONTROL_TYPES and cur.CurrentName:
+                        return cur
+                except Exception:
+                    break
+                try:
+                    parent = walker.GetParentElement(cur)
+                except Exception:
+                    break
+                if parent is None:
+                    break
+                cur = parent
+        except Exception:
+            pass
+        return None
+
     def element_at(self, x, y):
         pt = wintypes.POINT(int(x), int(y))
         elem = self._uia.ElementFromPoint(pt)
@@ -131,14 +167,23 @@ class UIAInspector:
                     if deeper is not None:
                         try:
                             if deeper.CurrentAutomationId or deeper.CurrentName:
-                                return deeper
+                                elem = deeper
                         except Exception:
                             pass
             except Exception:
                 pass
+        try:
+            aid = elem.CurrentAutomationId if elem is not None else ""
+            name = elem.CurrentName if elem is not None else ""
+            if elem is not None and (aid in self.GENERIC_CELL_AUTOMATION_IDS or (not aid and not name)):
+                row = self._nearest_row_ancestor(elem)
+                if row is not None:
+                    return row
+        except Exception:
+            pass
         return elem
 
-    def _deepen(self, elem, x, y, depth=0):
+    def _deepen(self, elem, x, y, depth=0, skip_overlay=False):
         """Walk ControlView tree to find the deepest child containing (x, y).
         Depth cap was 5, tuned for WPF/UWP trees. Chromium/Electron a11y trees
         nest list rows much deeper (row wrapper > flex container > icon/text
@@ -146,24 +191,145 @@ class UIAInspector:
         icons) hit the cap before reaching the actual leaf and fell back to
         reporting the whole scroll container ("사이드바") as the clicked
         element — static top-level buttons (shallower trees) were unaffected,
-        which is why only some clicks showed the wrong element."""
+        which is why only some clicks showed the wrong element.
+
+        skip_overlay: ignore XAML "Light Dismiss" scrims while descending —
+        used by element_under_overlay() to hit-test what the user actually
+        clicked when the async inspection raced a menu/flyout opening and
+        the full-window overlay already covers the point."""
         if depth >= 15:
             return None
         try:
             walker = self._uia.ControlViewWalker
             child = walker.GetFirstChildElement(elem)
             while child is not None:
-                try:
-                    rect = child.CurrentBoundingRectangle
-                    if rect.left <= x <= rect.right and rect.top <= y <= rect.bottom:
-                        deeper = self._deepen(child, x, y, depth + 1)
-                        return deeper if deeper is not None else child
-                except Exception:
-                    pass
+                skip = False
+                if skip_overlay:
+                    try:
+                        if child.CurrentAutomationId == "Light Dismiss":
+                            skip = True
+                    except Exception:
+                        pass
+                if not skip:
+                    try:
+                        rect = child.CurrentBoundingRectangle
+                        if rect.left <= x <= rect.right and rect.top <= y <= rect.bottom:
+                            deeper = self._deepen(child, x, y, depth + 1, skip_overlay)
+                            return deeper if deeper is not None else child
+                    except Exception:
+                        pass
                 try:
                     child = walker.GetNextSiblingElement(child)
                 except Exception:
                     break
+        except Exception:
+            pass
+        return None
+
+    def element_under_overlay(self, x, y):
+        """Re-resolve the element beneath a XAML light-dismiss overlay.
+
+        ElementFromPoint returns the topmost element — once a menu/flyout is
+        open, that is the full-window "Light Dismiss" scrim, not the control
+        the user clicked half a second earlier (worker-thread inspection lag).
+        The real control is still present in the same top-level window's
+        ControlView tree as a SIBLING subtree of the overlay, so descend from
+        the foreground top-level window while skipping the overlay. Returns
+        None when nothing better than the window itself is found."""
+        try:
+            hwnd = foreground_top_window()
+            if not hwnd:
+                return None
+            root = self._uia.ElementFromHandle(hwnd)
+            if root is None:
+                return None
+            deeper = self._deepen(root, int(x), int(y), skip_overlay=True)
+            if deeper is None:
+                return None
+            try:
+                if deeper.CurrentAutomationId == "Light Dismiss":
+                    return None
+            except Exception:
+                pass
+            return deeper
+        except Exception:
+            return None
+
+    # ── anchor 기반 relative XPath (2026-07-10 지시) ─────────────────────────
+    # 좌표 재생이 전면 금지되면서 셀렉터 없는 이벤트는 재생 불가(FAIL)가 된다.
+    # 유니크 AutomationId/Name이 없는 요소는 "안정적 ID를 가진 조상 anchor"까지
+    # 걸어 올라가 anchor 기준 relative XPath(/Tag[i]/... 형태)를 캡처한다.
+    ANCHOR_MAX_UP = 8          # anchor 탐색 최대 상승 깊이
+    ANCHOR_MAX_SIBLINGS = 60   # 레벨당 형제 스캔 상한 — 초과 시 (가상화 리스트
+                               # 등) 인덱스가 불안정하므로 anchor 포기
+
+    def anchor_path(self, elem):
+        """Return (anchor_automation_id, rel_path) — e.g. ("NumberPad",
+        "/Button[3]") — for an element lacking its own id/name, or None.
+        rel_path steps are ControlType tags with 1-based same-type sibling
+        indices, matching WinAppDriver's XML view (tag name == ControlType)."""
+        try:
+            walker = self._uia.ControlViewWalker
+            steps = []
+            cur = elem
+            for _ in range(self.ANCHOR_MAX_UP):
+                try:
+                    ct = cur.CurrentControlType
+                except Exception:
+                    return None
+                tag = UIA_CONTROL_TYPES.get(ct)
+                if not tag:
+                    return None
+                idx = 1
+                scanned = 0
+                sib = walker.GetPreviousSiblingElement(cur)
+                while sib is not None:
+                    scanned += 1
+                    if scanned > self.ANCHOR_MAX_SIBLINGS:
+                        return None
+                    try:
+                        if sib.CurrentControlType == ct:
+                            idx += 1
+                    except Exception:
+                        pass
+                    sib = walker.GetPreviousSiblingElement(sib)
+                steps.append(f"/{tag}[{idx}]")
+                parent = walker.GetParentElement(cur)
+                if parent is None:
+                    return None
+                aid = ""
+                try:
+                    aid = parent.CurrentAutomationId or ""
+                except Exception:
+                    aid = ""
+                # 안정적 anchor 조건: 비어있지 않고, 런타임 슬롯 인덱스(순수
+                # 숫자)도 QML dotted path도 아닌 AutomationId.
+                if aid and not aid.isdigit() and "." not in aid:
+                    return aid, "".join(reversed(steps))
+                cur = parent
+        except Exception:
+            pass
+        return None
+
+    # UIA_IsScrollPatternAvailablePropertyId — 스크롤 컨테이너 판별용.
+    IS_SCROLL_PATTERN_AVAILABLE = 30034
+
+    def scroll_container(self, elem):
+        """Nearest self-or-ancestor exposing ScrollPattern — the container the
+        generated osScroll.ps1 re-finds at replay time and scrolls
+        programmatically (ScrollPattern first, PostMessage wheel fallback)."""
+        try:
+            walker = self._uia.ControlViewWalker
+            cur = elem
+            for _ in range(10):
+                if cur is None:
+                    return None
+                try:
+                    if cur.GetCurrentPropertyValue(self.IS_SCROLL_PATTERN_AVAILABLE):
+                        return cur
+                except Exception:
+                    pass
+                cur = walker.GetParentElement(cur)
         except Exception:
             pass
         return None
@@ -614,7 +780,24 @@ class Recorder:
     def _foreground_is_target(self):
         if not self.target_hwnds:
             return True
-        return foreground_top_window() in self.target_hwnds
+        fg = foreground_top_window()
+        if fg in self.target_hwnds:
+            return True
+        # UWP: the ApplicationFrameWindow that actually receives keyboard focus
+        # is a different hwnd from the CoreWindow discovery tracks, and (unlike
+        # the click path in _emit) this check has no lazy-frame adoption of its
+        # own — so a type-only recording (no click ever happens) drops every
+        # keystroke forever. Mirror _emit's lazy-frame adoption here: if fg
+        # hosts a tracked CoreWindow as a child, adopt it now and let typing
+        # through (confirmed 2026-07-08: Calculator typing-only capture was
+        # silently empty because of this exact gap).
+        if fg and fg not in self._popup_hwnds:
+            for core in list(self.target_hwnds):
+                if self._window_contains_child(fg, core):
+                    self.target_hwnds.add(fg)
+                    log(f"[target] lazy frame {fg} hosts CoreWindow {core} — added (keyboard)")
+                    return True
+        return False
 
     def _discover_target_windows(self):
         """Poll up to DISCOVER_TIMEOUT for the window(s) the launched app opens.
@@ -856,9 +1039,29 @@ class Recorder:
             cx = item.get("cursor_x", x)
             cy = item.get("cursor_y", y)
             if self._pending_scroll is None:
+                elem_info = self._inspect(ins, cx, cy)
+                # 스크롤 컨테이너 캡처 (2026-07-10 지시): 포인터 아래 요소에서
+                # ScrollPattern 보유 조상까지 걸어 올라가 그 컨테이너의 셀렉터를
+                # 기록 — 재생은 이 컨테이너를 다시 찾아 프로그래매틱으로 스크롤.
+                target = None
+                try:
+                    cont = ins.scroll_container(ins.element_at(cx, cy))
+                    if cont is not None:
+                        d = UIAInspector.describe(cont)
+                        target = {
+                            "automationId": d.get("automationId", ""),
+                            "className": d.get("className", ""),
+                            "name": d.get("name", ""),
+                            "controlType": d.get("controlType", ""),
+                        }
+                        log(f"[scroll] container id='{target['automationId']}' "
+                            f"class='{target['className']}' name='{target['name'][:30]}'")
+                except Exception:
+                    pass
                 self._pending_scroll = {"x": cx, "y": cy, "ts": ts,
                                         "amount": item["dy"],
-                                        "elem": self._inspect(ins, cx, cy)}
+                                        "elem": elem_info,
+                                        "target": target}
             else:
                 self._pending_scroll["amount"] += item["dy"]
                 self._pending_scroll["ts"] = ts
@@ -875,9 +1078,24 @@ class Recorder:
                 self._flush_type_buffer()
                 return
             if special == "enter":
-                # Preserve newline so sendKeys("...\n") can replay it
-                if self._type_buffer:
-                    self._type_buffer += "\n"
+                # Preserve newline so sendKeys("...\n") can replay it. An
+                # Enter with an empty buffer (blank line: Enter pressed right
+                # after the previous flush) must still emit a newline-only
+                # burst instead of vanishing — mirrors the burst-start gate/
+                # elem-binding at lines 918-934 below (confirmed 2026-07-08:
+                # consecutive blank lines in Notepad were silently dropped).
+                if not self._type_buffer:
+                    if not self._foreground_is_target():
+                        self._flush_type_buffer()
+                        return
+                    elem = None
+                    try:
+                        fe = ins.focused_element()
+                        elem = ins.describe(fe)
+                    except Exception:
+                        pass
+                    self._type_elem = elem or {}
+                self._type_buffer += "\n"
                 self._flush_type_buffer()
                 return
             if special == "backspace":
@@ -922,6 +1140,51 @@ class Recorder:
         try:
             elem = ins.element_at(x, y)
             info = ins.describe(elem)
+            light_dismiss = info.get("automationId") == "Light Dismiss"
+            if light_dismiss:
+                # The click raced a menu/flyout opening: by the time this hit
+                # test ran, the XAML light-dismiss overlay (a full-window,
+                # click-anywhere-to-close scrim) already covered the point,
+                # so the selector describes the overlay, not what the user
+                # actually clicked (confirmed 2026-07-08: clicking Notepad's
+                # File menu button was captured as '~Light Dismiss'
+                # spanning the whole window; reconfirmed 2026-07-12: rapid
+                # 파일→편집→보기 menu-bar clicks lost 2 of 3 selectors and the
+                # generated test failed on the explicit no-selector steps).
+                # The real control is still in the window's ControlView tree
+                # underneath the scrim — re-hit-test from the foreground
+                # window subtree, skipping the overlay (2026-07-12 fix).
+                under = ins.element_under_overlay(x, y)
+                if under is not None:
+                    resolved = ins.describe(under)
+                    if resolved.get("automationId") or resolved.get("name"):
+                        info = resolved
+                        elem = under   # keep anchor/row logic consistent below
+                        light_dismiss = False
+                        log(f"[inspect] resolved under light-dismiss at ({x},{y}): "
+                            f"id={info.get('automationId')!r} name={info.get('name')!r} "
+                            f"type={info.get('controlType')!r}")
+                if light_dismiss:
+                    # Still nothing usable — coordinate replay is forbidden
+                    # (2026-07-10), so codegen will surface this event as an
+                    # explicit failing step.
+                    log(f"[inspect] light-dismiss overlay at ({x},{y}) — dropping selector")
+                    for k in ("name", "automationId", "className", "controlType"):
+                        info[k] = ""
+                    info["locatorStrategy"] = "coordinate"
+                    info["locatorValue"] = ""
+            # 유니크 id/name이 없는 요소 → anchor 기반 relative XPath 캡처
+            # (2026-07-10: 좌표 재생 금지 — anchor XPath가 유일한 재생 수단).
+            # light-dismiss 오버레이는 전체 창을 덮는 요소라 anchor가 무의미.
+            if (not light_dismiss and elem is not None
+                    and not info.get("automationId") and not info.get("name")):
+                a = ins.anchor_path(elem)
+                if a:
+                    info["anchorId"], info["anchorPath"] = a
+                    info["locatorStrategy"] = "anchorXPath"
+                    info["locatorValue"] = f'//*[@AutomationId="{a[0]}"]{a[1]}'
+                    info["xpath"] = info["locatorValue"]
+                    log(f"[inspect] anchor XPath for id/name-less element: {info['xpath']}")
             # locatorFallback mirrors locatorStrategy for backwards compat
             if info.get("locatorStrategy") == "coordinate":
                 info["locatorFallback"] = "coordinate"
@@ -975,8 +1238,10 @@ class Recorder:
     def _flush_pending_scroll(self):
         ps, self._pending_scroll = self._pending_scroll, None
         if ps:
+            extra = {"scrollTarget": ps["target"]} if ps.get("target") else None
             self._emit("scroll", ps["elem"], x=ps["x"], y=ps["y"],
-                       value=str(ps["amount"]), delta=ps["amount"], ts=ps["ts"])
+                       value=str(ps["amount"]), delta=ps["amount"], ts=ps["ts"],
+                       extra=extra)
 
     def _flush_type_buffer(self):
         text, self._type_buffer = self._type_buffer, ""
@@ -1032,6 +1297,18 @@ class Recorder:
                     return hwnd
             except Exception:
                 continue
+        # Only CoreWindows tracked so far (frame not yet lazily adopted — this
+        # runs right after discovery, before any click/keystroke can trigger
+        # that). Search all currently visible top-level windows for the frame
+        # that owns one of them, so session_meta doesn't lock onto the ghost
+        # rect (confirmed 2026-07-08: Calculator's initialWindow came back
+        # (0,26,322,500) — the CoreWindow's own rect — instead of the real
+        # on-screen position).
+        candidates = visible_toplevel_windows()
+        for core in self.target_hwnds:
+            frame = frame_owning_corewindow(core, candidates)
+            if frame:
+                return frame
         return next(iter(self.target_hwnds), 0)
 
     def _window_contains_child(self, parent_hwnd, target_child):
@@ -1078,7 +1355,7 @@ class Recorder:
         except Exception as e:
             log(f"WARN: could not POST session_meta: {e}")
 
-    def _emit(self, action, elem, x=None, y=None, value=None, delta=None, ts=None, end=None):
+    def _emit(self, action, elem, x=None, y=None, value=None, delta=None, ts=None, end=None, extra=None):
         elem = elem or {}
         # Drop events captured before _discover_target_windows() resolved
         # target_hwnds. Mouse/keyboard hooks go live at recording=True, before
@@ -1190,6 +1467,10 @@ class Recorder:
                 "locatorFallback": elem.get("locatorFallback", ""),   # NEW
                 "locatorStrategy": elem.get("locatorStrategy", ""),
                 "locatorValue": elem.get("locatorValue", ""),
+                # anchor 기반 relative XPath (유니크 id/name 없는 요소 전용,
+                # 2026-07-10 지시) — codegen이 //*[@AutomationId=anchor]/path 생성.
+                "anchorId": elem.get("anchorId", ""),
+                "anchorPath": elem.get("anchorPath", ""),
                 "rect": elem.get("rect"),   # DIAGNOSTIC — see UIAInspector.describe()
             },
             "timestamp": time.time(),
@@ -1210,6 +1491,8 @@ class Recorder:
             event["value"] = value
         if delta is not None:
             event["delta"] = delta
+        if extra:
+            event.update(extra)   # e.g. scrollTarget
         if x is not None:
             event["x"], event["y"] = int(x), int(y)
             if end is not None:

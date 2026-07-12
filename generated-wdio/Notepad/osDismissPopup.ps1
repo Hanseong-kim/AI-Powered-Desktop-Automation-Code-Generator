@@ -1,4 +1,5 @@
-param([string]$titleLike, [string]$hwnd)
+﻿param([string]$titleLike, [string]$hwnd, [string]$exclude)
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes -ErrorAction SilentlyContinue
 Add-Type @"
 using System;
@@ -15,6 +16,8 @@ public class PopupWin {
   [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern int GetClassName(IntPtr hWnd, StringBuilder sb, int max);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
   [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hWnd, uint cmd);
+  public static IntPtr OwnerOf(IntPtr h) { return GetWindow(h, 4); } // GW_OWNER
   public static List<IntPtr> AllTop() {
     var f = new List<IntPtr>();
     EnumWindows((h, l) => { if (IsWindowVisible(h)) f.Add(h); return true; }, IntPtr.Zero);
@@ -48,13 +51,37 @@ elseif ($titleLike) {
 $targetPid = 0
 if ($mainHwnd -ne [IntPtr]::Zero) { $targetPid = [PopupWin]::PidOf($mainHwnd) }
 
+$excludeSet = New-Object 'System.Collections.Generic.HashSet[long]'
+if ($exclude) {
+  foreach ($tok in ($exclude -split ',')) {
+    $t = $tok.Trim()
+    if ($t) { [void]$excludeSet.Add([int64]$t) }
+  }
+}
+
+# Candidate = dialog-shaped window of the target process only:
+#  - same PID AND (#32770 class OR owned window)  → native/Electron/Qt dialogs
+#  - #32770 owned by a target-PID window          → dialog hosted out-of-process
+# Never: unowned main-class windows (a sibling VS Code window shares the PID
+# but is nobody's popup), excluded hwnds (windows the replay itself drives),
+# or windows of unrelated processes. If no target PID could be resolved at
+# all, dismiss nothing — guessing across the whole desktop is how an
+# unrelated app loses a dialog.
 $candidates = New-Object System.Collections.Generic.List[IntPtr]
-foreach ($h in [PopupWin]::AllTop()) {
-  if ($h -eq $mainHwnd) { continue }
-  $cls = [PopupWin]::ClassOf($h)
-  $isDialogClass = ($cls -eq '#32770')
-  $isOwnedByTarget = ($targetPid -ne 0 -and [PopupWin]::PidOf($h) -eq $targetPid)
-  if ($isDialogClass -or $isOwnedByTarget) { $candidates.Add($h) }
+if ($targetPid -ne 0) {
+  foreach ($h in [PopupWin]::AllTop()) {
+    if ($h -eq $mainHwnd) { continue }
+    if ($excludeSet.Contains([int64]$h)) { continue }
+    $isDialogClass = ([PopupWin]::ClassOf($h) -eq '#32770')
+    $owner = [PopupWin]::OwnerOf($h)
+    $qualifies = $false
+    if ([PopupWin]::PidOf($h) -eq $targetPid) {
+      $qualifies = ($isDialogClass -or ($owner -ne [IntPtr]::Zero))
+    } elseif ($isDialogClass -and $owner -ne [IntPtr]::Zero -and [PopupWin]::PidOf($owner) -eq $targetPid) {
+      $qualifies = $true
+    }
+    if ($qualifies) { $candidates.Add($h) }
+  }
 }
 
 # Conservative order: no-side-effect dismissal first (Cancel/No/Close), only

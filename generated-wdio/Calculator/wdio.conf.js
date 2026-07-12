@@ -6,7 +6,7 @@ export const config = {
   capabilities: [{
     platformName: 'Windows',
     'appium:automationName': 'Windows',
-    'appium:app': 'Microsoft.WindowsCalculator_8wekyb3d8bbwe!App',
+    'appium:app': 'Calculator',
     'appium:newCommandTimeout': 60000,
     'appium:connectHardwareKeyboard': false,
   }],

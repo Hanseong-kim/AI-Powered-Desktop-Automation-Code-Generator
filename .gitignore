@@ -15,6 +15,9 @@ windows-use/
 
 recorded-events/
 
+# mock_events.py 회귀 게이트가 매 실행마다 재생성하는 산출물
+generated-wdio/MockMulti/
+
 Claude code task server token opt.md
 Claude code task v2.md
 

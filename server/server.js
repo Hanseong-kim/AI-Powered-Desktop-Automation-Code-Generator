@@ -177,71 +177,105 @@ app.get('/api/stream', (req, res) => {
 
 const EDITABLE_CONTROL_TYPES = new Set(['Edit', 'Document', 'RichEdit', 'RichEditD2DPT', 'ComboBox']);
 
-// PowerShell helper script — generated alongside every test suite.
-// Performs an OS-level click via user32.dll (SetCursorPos + mouse_event).
-// Verified in probe: works for Electron deep menus where WinAppDriver el.click()
-// and W3C touch Actions are both rejected or silently ignored.
-const OS_CLICK_PS1 = `param([int]$x, [int]$y, [string]$button = 'left', [int]$clicks = 1)
-Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
-$sig = '[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y); [DllImport("user32.dll")] public static extern void mouse_event(int f, int dx, int dy, int d, int e);'
-Add-Type -MemberDefinition $sig -Name WinMouse -Namespace U -ErrorAction SilentlyContinue
-[U.WinMouse]::SetCursorPos($x, $y) | Out-Null
-Start-Sleep -Milliseconds 150
-# DIAGNOSTIC: requested vs landed cursor position — reveals DPI-scaling drift
-# when DPI-aware getRect() coordinates get fed into DPI-unaware SetCursorPos.
-# Write-Output (not Write-Host) so the Node caller's execSync stdout actually
-# captures it.
-$landed = [System.Windows.Forms.Cursor]::Position
-Write-Output "[osClick-diag] requested=($x,$y) landed=($($landed.X),$($landed.Y))"
-$down = if ($button -eq 'right') { 8 } else { 2 }
-$up   = if ($button -eq 'right') { 16 } else { 4 }
-for ($i = 0; $i -lt $clicks; $i++) {
-  [U.WinMouse]::mouse_event($down, 0, 0, 0, 0)
-  Start-Sleep -Milliseconds 50
-  [U.WinMouse]::mouse_event($up, 0, 0, 0, 0)
-  if ($i -lt ($clicks - 1)) { Start-Sleep -Milliseconds 80 }
-}
-`;
+// PowerShell helper — programmatic scroll (2026-07-10 스테이크홀더 지시:
+// PowerShell로 화면 좌표에 물리 마우스 신호를 주입하는 방식 금지).
+// 1) 추적 중인 top-level hwnd 아래에서 녹화된 스크롤 컨테이너를 UIA로 찾고
+//    ScrollPattern.Scroll()로 픽셀 없이 스크롤 (PoC ② 실증: Explorer
+//    UIItemsView에서 VerticalScrollPercent 0→0.374, SetCursorPos 0회).
+// 2) 레거시 컨트롤(MMC ListView, CharGridWClass 등 — PoC에서 ScrollPattern
+//    미지원 확인)은 hwnd-scoped WM_MOUSEWHEEL을 PostMessageW로 전달.
+//    반드시 PostMessage(비동기) — SendMessageW(동기)는 PoC 중 charmap.exe를
+//    비정상 종료시킴. lParam의 좌표는 요소의 "라이브" rect 중심을 지금
+//    계산한 것으로, 녹화 좌표 재생이 아니다. 물리 커서/마우스 상태는 일절
+//    건드리지 않는다 (SetCursorPos / mouse_event 없음).
+const OS_SCROLL_PS1 = `param([string]$hwnd, [string]$selB64, [int]$delta)
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes -ErrorAction SilentlyContinue
+$sig = '[DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);'
+Add-Type -MemberDefinition $sig -Name WheelMsg -Namespace U -ErrorAction SilentlyContinue
+if (-not $hwnd -or [int64]$hwnd -eq 0) { Write-Error 'osScroll: -hwnd is required'; exit 2 }
+$root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]([int64]$hwnd))
+if (-not $root) { Write-Error 'osScroll: AutomationElement.FromHandle failed'; exit 2 }
 
-// PowerShell helper script — press-hold-move-release drag via user32.dll.
-// WinAppDriver/Appium's W3C Actions API rejects mouse pointerMove ("only pen
-// and touch pointer input source types are supported" — same limitation that
-// rules out Actions for clicks, see OS_CLICK_PS1 usage), so a text-selection
-// drag (press, hold, move, release) has no WebDriver-level primitive either.
-// Replays via the same SetCursorPos+mouse_event injection as OS_CLICK_PS1,
-// but interpolates the cursor between down and up instead of moving instantly
-// (an instant SetCursorPos jump between down/up drops the selection — the
-// target app never sees the intermediate positions it needs to extend a
-// selection/drag).
-const OS_DRAG_PS1 = `param([int]$x1, [int]$y1, [int]$x2, [int]$y2, [int]$steps = 15)
-Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
-$sig = '[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y); [DllImport("user32.dll")] public static extern void mouse_event(int f, int dx, int dy, int d, int e);'
-Add-Type -MemberDefinition $sig -Name WinMouse -Namespace U -ErrorAction SilentlyContinue
-[U.WinMouse]::SetCursorPos($x1, $y1) | Out-Null
-Start-Sleep -Milliseconds 150
-$landed = [System.Windows.Forms.Cursor]::Position
-Write-Output "[osDrag-diag] requested=($x1,$y1)->($x2,$y2) landed=($($landed.X),$($landed.Y))"
-[U.WinMouse]::mouse_event(2, 0, 0, 0, 0)   # MOUSEEVENTF_LEFTDOWN
-Start-Sleep -Milliseconds 80
-for ($i = 1; $i -le $steps; $i++) {
-  $ix = [int]($x1 + ($x2 - $x1) * $i / $steps)
-  $iy = [int]($y1 + ($y2 - $y1) * $i / $steps)
-  [U.WinMouse]::SetCursorPos($ix, $iy) | Out-Null
-  Start-Sleep -Milliseconds 12
+# selB64 = base64(UTF-8 JSON { automationId, className, name }) — 캡처 시점에
+# agent.py가 ScrollPattern 보유 조상으로 걸어 올라가 기록한 컨테이너 셀렉터.
+$sel = $null
+if ($selB64) {
+  try {
+    $json = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($selB64))
+    $sel = $json | ConvertFrom-Json
+  } catch {}
 }
-Start-Sleep -Milliseconds 80
-[U.WinMouse]::mouse_event(4, 0, 0, 0, 0)   # MOUSEEVENTF_LEFTUP
-`;
 
-// PowerShell helper script — mouse wheel via user32.dll MOUSEEVENTF_WHEEL (0x0800).
-// WinAppDriver/Appium's W3C Actions API has no wheel-scroll primitive, so scroll
-// events replay the same OS-level injection approach as OS_CLICK_PS1.
-const OS_SCROLL_PS1 = `param([int]$x, [int]$y, [int]$delta)
-$sig = '[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y); [DllImport("user32.dll")] public static extern void mouse_event(int f, int dx, int dy, int d, int e);'
-Add-Type -MemberDefinition $sig -Name WinMouse -Namespace U -ErrorAction SilentlyContinue
-[U.WinMouse]::SetCursorPos($x, $y) | Out-Null
-Start-Sleep -Milliseconds 100
-[U.WinMouse]::mouse_event(0x0800, 0, 0, $delta, 0)
+$target = $null
+if ($sel) {
+  $conds = @()
+  if ($sel.automationId) {
+    $conds += New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::AutomationIdProperty, [string]$sel.automationId)
+  }
+  if ($sel.className) {
+    $conds += New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ClassNameProperty, [string]$sel.className)
+  }
+  if ($sel.name) {
+    $conds += New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty, [string]$sel.name)
+  }
+  foreach ($c in $conds) {
+    try { $target = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $c) } catch {}
+    if ($target) { break }
+  }
+}
+if (-not $target) { $target = $root }
+
+# 1차: 대상(또는 가장 가까운 스크롤 가능 조상)의 ScrollPattern.
+$walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+$cur = $target
+$scroll = $null
+for ($i = 0; $i -lt 10 -and $cur; $i++) {
+  $p = $null
+  if ($cur.TryGetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern, [ref]$p)) {
+    $sp = [System.Windows.Automation.ScrollPattern]$p
+    if ($sp.Current.VerticallyScrollable) { $scroll = $sp; break }
+  }
+  try { $cur = $walker.GetParent($cur) } catch { break }
+}
+if ($scroll) {
+  $before = $scroll.Current.VerticalScrollPercent
+  # 휠 업(양수 delta) = 콘텐츠 위로 = SmallDecrement. 노치당 약 3줄.
+  $dir = if ($delta -gt 0) { [System.Windows.Automation.ScrollAmount]::SmallDecrement }
+         else { [System.Windows.Automation.ScrollAmount]::SmallIncrement }
+  $n = [math]::Abs($delta) * 3
+  for ($i = 0; $i -lt $n; $i++) {
+    $scroll.Scroll([System.Windows.Automation.ScrollAmount]::NoAmount, $dir)
+  }
+  Start-Sleep -Milliseconds 150
+  $after = $scroll.Current.VerticalScrollPercent
+  Write-Output "[osScroll] ScrollPattern $before -> $after (delta=$delta)"
+  exit 0
+}
+
+# 2차: hwnd-scoped WM_MOUSEWHEEL (PostMessageW — 비동기, SendMessage 금지).
+$postH = [IntPtr]([int64]$hwnd)
+$cur = $target
+for ($i = 0; $i -lt 10 -and $cur; $i++) {
+  try {
+    $nh = $cur.Current.NativeWindowHandle
+    if ($nh) { $postH = [IntPtr]$nh; break }
+    $cur = $walker.GetParent($cur)
+  } catch { break }
+}
+$cx = 0; $cy = 0
+try {
+  $r = $target.Current.BoundingRectangle
+  $cx = [int]($r.X + $r.Width / 2)
+  $cy = [int]($r.Y + $r.Height / 2)
+} catch {}
+$wp = [IntPtr]([int64]($delta * 120) -shl 16)
+$lp = [IntPtr]([int64]((($cy -band 0xFFFF) -shl 16) -bor ($cx -band 0xFFFF)))
+[U.WheelMsg]::PostMessageW($postH, 0x020A, $wp, $lp) | Out-Null
+Write-Output "[osScroll] PostMessageW WM_MOUSEWHEEL hwnd=$postH delta=$delta (ScrollPattern unavailable)"
 `;
 
 // PowerShell helper — read the current rect of a window whose title contains
@@ -252,7 +286,7 @@ Start-Sleep -Milliseconds 100
 // NOTE: no SetProcessDPIAware call here — agent.py capture and osClick.ps1 are
 // both DPI-unaware, and adding awareness here would skew coordinates by the
 // DPI scale factor (verified: unaware rect matches agent-captured winLeft).
-const OS_WINRECT_PS1 = `param([string]$titleLike, [string]$hwnd, [switch]$listOnly)
+const OS_WINRECT_PS1 = `param([string]$titleLike, [string]$hwnd, [switch]$listOnly, [switch]$ownerOnly)
 Add-Type @"
 using System;
 using System.Text;
@@ -267,6 +301,7 @@ public class WinEnum {
   [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder sb, int max);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hWnd, uint cmd);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   public static List<IntPtr> Find(string titleLike) {
     var found = new List<IntPtr>();
@@ -290,6 +325,13 @@ public class WinEnum {
 # never drifts onto an unrelated window (see launchApp's hwnd tracking).
 if ($hwnd) {
   $h = [IntPtr]([int64]$hwnd)
+  if ($ownerOnly) {
+    # GW_OWNER=4 — nonzero means an owned (dialog-style) window, which
+    # WinAppDriver's appTopLevelWindow rejects outright ("not a top level
+    # window handle"), so callers skip the scoped-session attempt entirely.
+    Write-Output ([int64][WinEnum]::GetWindow($h, 4))
+    exit
+  }
   $r = New-Object WinEnum+RECT
   if ([WinEnum]::GetWindowRect($h, [ref]$r)) {
     Write-Output ("{0} {1} {2} {3}" -f $r.Left, $r.Top, ($r.Right - $r.Left), ($r.Bottom - $r.Top))
@@ -429,6 +471,16 @@ foreach ($ch in $text.ToCharArray()) {
 }
 `;
 
+// Fail-and-Recover ESC fallback (v1 extension) — only called from _step()
+// after a step already failed AND osDismissPopup() found no known dismiss
+// button (e.g. an inline rename edit-box or an open context menu, not a
+// dialog with named buttons). A bare ESC is the generic "back out" input
+// for both cases.
+const OS_ESCAPE_PS1 = `Add-Type -AssemblyName System.Windows.Forms
+Start-Sleep -Milliseconds 100
+[System.Windows.Forms.SendKeys]::SendWait("{ESC}")
+`;
+
 // PowerShell helper — bring a window whose title contains $titleLike to the
 // foreground. Simple-mode (single-window, non-session) tests never call
 // launchApp's normalizeWindow/foreground step, so a freshly launched app can
@@ -487,16 +539,25 @@ if ($hwnd) {
 }
 `;
 
-// PowerShell helper — Fail-and-Recover popup dismissal (v1). Only ever invoked
+// PowerShell helper — Fail-and-Recover popup dismissal (v2). Only ever invoked
 // AFTER a step has already failed (see _step() in the headers below), so it
-// costs nothing on the happy path. Scans for candidate popup windows — dialog
-// class #32770, or any OTHER top-level window owned by the same process as
-// the known main-app window (owner-PID scoping prevents dismissing an
-// unrelated app's dialog) — and clicks the first button matching a
-// conservative preference order (no-side-effect buttons first). $hwnd (when
-// known) identifies the main app window deterministically, same rationale as
-// -hwnd elsewhere (see OS_WINRECT_PS1); $titleLike is the fallback.
-const OS_DISMISS_POPUP_PS1 = `param([string]$titleLike, [string]$hwnd)
+// costs nothing on the happy path. Scans for candidate popup windows and
+// clicks the first button matching a conservative preference order
+// (no-side-effect buttons first). $hwnd (when known) identifies the main app
+// window deterministically, same rationale as -hwnd elsewhere (see
+// OS_WINRECT_PS1); $titleLike is the fallback. A window qualifies as a popup
+// candidate only when it is dialog-SHAPED: dialog class #32770 or an owned
+// window, belonging to (or owned by) the target process. v1 qualified EVERY
+// same-PID top-level window, which in single-process multi-window apps put
+// the user's other main windows on the list — VS Code runs all windows in
+// one Code.exe process, and the preferred-button scan then Invoke()d the
+// TITLEBAR close button (UIA Name "닫기") of the user's own editor window
+// (confirmed 2026-07-09: replay closed the VS Code window running the user's
+// other work mid-run). $exclude lists hwnds the replay itself is driving
+// (main window + tracked dialogs) — dismissing those would tear down the
+// very UI the failed step is about to retry against.
+const OS_DISMISS_POPUP_PS1 = `param([string]$titleLike, [string]$hwnd, [string]$exclude)
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes -ErrorAction SilentlyContinue
 Add-Type @"
 using System;
@@ -513,6 +574,8 @@ public class PopupWin {
   [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern int GetClassName(IntPtr hWnd, StringBuilder sb, int max);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
   [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hWnd, uint cmd);
+  public static IntPtr OwnerOf(IntPtr h) { return GetWindow(h, 4); } // GW_OWNER
   public static List<IntPtr> AllTop() {
     var f = new List<IntPtr>();
     EnumWindows((h, l) => { if (IsWindowVisible(h)) f.Add(h); return true; }, IntPtr.Zero);
@@ -546,13 +609,37 @@ elseif ($titleLike) {
 $targetPid = 0
 if ($mainHwnd -ne [IntPtr]::Zero) { $targetPid = [PopupWin]::PidOf($mainHwnd) }
 
+$excludeSet = New-Object 'System.Collections.Generic.HashSet[long]'
+if ($exclude) {
+  foreach ($tok in ($exclude -split ',')) {
+    $t = $tok.Trim()
+    if ($t) { [void]$excludeSet.Add([int64]$t) }
+  }
+}
+
+# Candidate = dialog-shaped window of the target process only:
+#  - same PID AND (#32770 class OR owned window)  → native/Electron/Qt dialogs
+#  - #32770 owned by a target-PID window          → dialog hosted out-of-process
+# Never: unowned main-class windows (a sibling VS Code window shares the PID
+# but is nobody's popup), excluded hwnds (windows the replay itself drives),
+# or windows of unrelated processes. If no target PID could be resolved at
+# all, dismiss nothing — guessing across the whole desktop is how an
+# unrelated app loses a dialog.
 $candidates = New-Object System.Collections.Generic.List[IntPtr]
-foreach ($h in [PopupWin]::AllTop()) {
-  if ($h -eq $mainHwnd) { continue }
-  $cls = [PopupWin]::ClassOf($h)
-  $isDialogClass = ($cls -eq '#32770')
-  $isOwnedByTarget = ($targetPid -ne 0 -and [PopupWin]::PidOf($h) -eq $targetPid)
-  if ($isDialogClass -or $isOwnedByTarget) { $candidates.Add($h) }
+if ($targetPid -ne 0) {
+  foreach ($h in [PopupWin]::AllTop()) {
+    if ($h -eq $mainHwnd) { continue }
+    if ($excludeSet.Contains([int64]$h)) { continue }
+    $isDialogClass = ([PopupWin]::ClassOf($h) -eq '#32770')
+    $owner = [PopupWin]::OwnerOf($h)
+    $qualifies = $false
+    if ([PopupWin]::PidOf($h) -eq $targetPid) {
+      $qualifies = ($isDialogClass -or ($owner -ne [IntPtr]::Zero))
+    } elseif ($isDialogClass -and $owner -ne [IntPtr]::Zero -and [PopupWin]::PidOf($owner) -eq $targetPid) {
+      $qualifies = $true
+    }
+    if ($qualifies) { $candidates.Add($h) }
+  }
 }
 
 # Conservative order: no-side-effect dismissal first (Cancel/No/Close), only
@@ -635,34 +722,58 @@ function filterEvents(eventList) {
   return eventList.filter(e => e.action && e.action !== 'session_meta');
 }
 
+// agent.py의 _emit_click_from_press()는 물리적 더블클릭 1회를 click + click +
+// doubleClick 3개 이벤트로 방출한다(반복 단일클릭 "9999" 보존을 위한 의도된 설계 —
+// 병합/드롭 없음). 그러나 그대로 재생하면 각 이벤트가 별도 _step()이 되어 스텝 사이에
+// 수백ms~수초의 간격이 생기고, 탐색기 같은 앱에서는 "클릭 → 대기 → 재클릭"이 곧
+// rename 제스처가 되어 폴더 진입 대신 이름 바꾸기 모드가 켜진다(2026-07-08 VSCode
+// "폴더 열기" 다이얼로그에서 확인). 코드 생성 시점에 doubleClick 구성 클릭(직전 최대
+// 2개의 click, 같은 좌표+근접 타임스탬프)을 걷어내 doubleClick 스텝 하나만 남긴다.
+const DEDUPE_RADIUS = 6;       // px — agent.py DOUBLE_CLICK_RADIUS와 동일
+const DEDUPE_MAX_GAP_MS = 1500; // ms — 방출 시각 비교라 캡처 창(500ms)보다 여유 있게
+
+function dedupeDoubleClicks(events) {
+  const out = [];
+  for (const raw of events) {
+    let e = raw;
+    if (e.action === 'doubleClick') {
+      let merged = 0;
+      let donorElement = null;
+      while (merged < 2 && out.length > 0) {
+        const prev = out[out.length - 1];
+        if (prev.action !== 'click') break;
+        const dx = Math.abs((prev.x ?? 0) - (e.x ?? 0));
+        const dy = Math.abs((prev.y ?? 0) - (e.y ?? 0));
+        const dt = Math.abs((prev.timestamp ?? 0) - (e.timestamp ?? 0)) * 1000;
+        if (dx > DEDUPE_RADIUS || dy > DEDUPE_RADIUS || dt > DEDUPE_MAX_GAP_MS) break;
+        out.pop();
+        merged++;
+        // 두 번째 press 시점의 hit-test는 (더블클릭 도중 UI가 전환되는 타이밍이라)
+        // 자주 빈 요소를 반환한다(confirmed 2026-07-08: VSCode 폴더 다이얼로그의
+        // doubleClick 이벤트 3개 전부 automationId/name/className 없음) — 걷어낸
+        // 구성 click 중 셀렉터를 가진 것이 있으면 doubleClick에 승계해 좌표만
+        // 재생하는 대신 이름 기반 셀렉터를 쓸 수 있게 한다.
+        if (!donorElement && (prev.element?.automationId || prev.element?.name || prev.element?.className)) {
+          donorElement = prev.element;
+        }
+      }
+      if (merged > 0) {
+        console.log(`[dedupe] merged ${merged} click(s) into doubleClick @(${e.x},${e.y})`);
+      }
+      const own = e.element || {};
+      if (!own.automationId && !own.name && !own.className && donorElement) {
+        console.log(`[dedupe] doubleClick @(${e.x},${e.y}) had no element data — adopted selector from constituent click`);
+        e = { ...e, element: donorElement };
+      }
+    }
+    out.push(e);
+  }
+  return out;
+}
+
 // ── WdIO locator 결정 ────────────────────────────────────────────────────────
 
-/** Qt/QML control (className like "BaseTextField_QMLTYPE_31" or "QQuickPopupItem")
- * — UIA Invoke frequently doesn't reach the real MouseArea/TapHandler, so these
- * need a real OS click rather than el.click() (confirmed on FreeDM 2026-07-06). */
-function isQtControl(el) {
-  const cn = el?.className || '';
-  return /_QMLTYPE_|^QQuick/.test(cn);
-}
-
-// True only for a genuinely unique, short automationId — NOT a QML dotted
-// path. getCenterSimple's browser.$() resolves the FIRST XPath/accessibility-id
-// match in the whole window; a QML automationId chain (e.g.
-// "AppQApplication.ApplicationWindow_QMLTYPE_67...BaseLabel_QMLTYPE_11") is
-// built from generic, repeated node names, so "first match" is very often
-// the WRONG instance (confirmed 2026-07-06: 4 different FreeDM clicks all
-// silently resolved to the same node). A short, dot-free id assigned by the
-// app itself (e.g. "SearchBox") doesn't have that ambiguity. Live resolve is
-// only trusted in that narrow case; everything QML-shaped uses the recorded
-// rel-offset instead.
-function trustLiveSelector(sel, el) {
-  if (!sel || !sel.startsWith("'~")) return false;
-  if (isQtControl(el)) return false;
-  const id = el?.automationId || '';
-  return id.length > 0 && !id.includes('.');
-}
-
-/** className에 공백이 많거나 소문자 camelCase면 Electron/VSCode CSS 클래스 — coordinate fallback */
+/** className에 공백이 많거나 소문자 camelCase면 Electron/VSCode CSS 클래스 — 신뢰 불가 */
 function isStableClassName(cn) {
   if (!cn) return false;
   const spaces = (cn.match(/ /g) || []).length;
@@ -685,13 +796,37 @@ function escapeAttr(s) {
     .replace(/"/g,  '&quot;');
 }
 
+// XAML controls often carry their bare type name as automationId (e.g. a
+// Notepad menu item captured as automationId="TextBlock") — these repeat
+// throughout a window/popup, so trusting them as a unique accessibility id
+// matches the wrong instance (confirmed 2026-07-08: File-menu item "다른
+// 이름으로 저장" carried automationId="TextBlock"). Same treatment as the
+// numeric-id skip below: prefer Name when one was captured.
+const GENERIC_AUTOMATION_IDS = new Set(['TextBlock', 'Image', 'ContentPresenter', 'Border', 'Grid', 'StackPanel']);
+
+// 자기 자신에게 유니크 AutomationId/Name이 없는 요소용 — 캡처 시점에 agent.py가
+// 찾아둔 "안정적 ID를 가진 조상 anchor" 기준 relative XPath (2026-07-10 지시:
+// 유니크 ID가 없는 요소는 이웃 anchor 요소 기준 relative XPath로 해결).
+// anchorPath는 "/Pane[2]/Button[1]" 형태만 신뢰 — 그 외 형식은 무시해 XPath
+// 인젝션/오생성을 차단한다.
+function anchorSelector(el) {
+  if (!el?.anchorId || !el?.anchorPath) return null;
+  if (!/^(\/[A-Za-z]+\[\d+\])+$/.test(el.anchorPath)) return null;
+  return `'//*[@AutomationId="${escapeAttr(el.anchorId)}"]${el.anchorPath}'`;
+}
+
 function wdioSelectorById(el) {
   if (!el) return null;
   // Skip purely numeric automationIds (e.g. "4", "1") — these are ListView slot
   // indices assigned at runtime, not stable accessibility IDs. Use name instead.
-  const hasStableId = el.automationId && !/^\d+$/.test(el.automationId);
+  const hasStableId = el.automationId && !/^\d+$/.test(el.automationId)
+    && !(GENERIC_AUTOMATION_IDS.has(el.automationId) && el.name);
   if (hasStableId) return `'~${escapeAttr(el.automationId)}'`;
   if (el.name)     return `'//*[@Name="${escapeAttr(el.name)}"]'`;
+  // anchor를 className보다 우선 — anchor는 인덱스까지 고정된 유일 경로지만
+  // bare className XPath는 첫 매치가 엉뚱한 인스턴스일 수 있다.
+  const anchored = anchorSelector(el);
+  if (anchored) return anchored;
   if (el.className && isStableClassName(el.className)) return `'//*[@ClassName="${escapeAttr(el.className)}"]'`;
   return null;
 }
@@ -702,14 +837,14 @@ function wdioSelectorByClass(el) {
   // 노드 태그명이 곧 ControlType이므로(예: Button, Edit, Pane), 와일드카드(*)보다
   // 탐색 폭이 좁아지고 잘못된 노드(예: 컬럼 헤더)에 매칭될 여지가 줄어든다
   // (confirmed 2026-07-07 — VSCode ByClass가 UIProperty/@Name="이름" 와일드카드로
-  // 엉뚱한 노드를 골라 osClick 타임아웃을 유발).
+  // 엉뚱한 노드를 골라 클릭 타임아웃을 유발).
   const tag = (el.controlType && /^[A-Za-z]+$/.test(el.controlType)) ? el.controlType : '*';
   if (el.className && isStableClassName(el.className) && el.name)
     return `'//${tag}[@ClassName="${escapeAttr(el.className)}" and @Name="${escapeAttr(el.name)}"]'`;
   if (el.className && isStableClassName(el.className)) return `'//${tag}[@ClassName="${escapeAttr(el.className)}"]'`;
   if (el.name)         return `'//${tag}[@Name="${escapeAttr(el.name)}"]'`;
   if (el.automationId) return `'~${escapeAttr(el.automationId)}'`;
-  return null;
+  return anchorSelector(el);
 }
 
 // ── WdIO 코드 생성 ───────────────────────────────────────────────────────────
@@ -732,6 +867,12 @@ function needsSessionSwitching(eventList) {
   const filtered = filterEvents(eventList);
   const hasElectron = filtered.some(e => e.isElectron === true);
   if (hasElectron) return true;
+  // 콘텐츠에 따라 타이틀이 바뀌는 단일 창(예: Win11 메모장의 "*a - 메모장" →
+  // "*asdfasdfasdf - 메모장")을 여러 창으로 오인해 세션 전환 모드로 빠지는 것을 방지.
+  // rootHwndHex는 agent.py가 이벤트마다 emit하는 실제 top-level 창 핸들 — 전부
+  // 동일하면 창은 하나뿐이므로 titles.size는 무시하고 simple 모드로 강제한다.
+  const roots = new Set(filtered.map(e => e.rootHwndHex).filter(Boolean));
+  if (roots.size === 1) return false;
   const titles = new Set(filtered.map(e => e.element?.windowTitle || '').filter(Boolean));
   return titles.size > 1;
 }
@@ -769,60 +910,26 @@ function _warmupPowerShell() {
     }
 }
 
-// OS-level click fallback via PowerShell user32.dll. Retries once before
-// giving up — a single slow PowerShell cold-start under process-spawn
-// contention shouldn't fail the whole step (confirmed 2026-07-07).
-function osClick(x, y, button = 'left', clicks = 1) {
-    const cmd = \`powershell -NoProfile -File "\${join(__dirname, 'osClick.ps1')}" -x \${x} -y \${y} -button \${button} -clicks \${clicks}\`;
-    for (let attempt = 1; attempt <= 2; attempt++) {
-        try {
-            const out = execSync(cmd, { stdio: 'pipe', timeout: 15000 });
-            const diag = out.toString().trim();
-            if (diag) console.log(diag);
-            return;
-        } catch (e) {
-            if (attempt === 2) {
-                _failures.push('osClick');
-                console.warn('[osClick] failed after retry:', String(e.message || e).substring(0, 100));
-            } else {
-                console.warn('[osClick] attempt 1 failed, retrying:', String(e.message || e).substring(0, 100));
-            }
-        }
+// 프로그래매틱 스크롤 — osScroll.ps1이 추적된 top-level hwnd 아래에서 녹화된
+// 컨테이너를 UIA로 찾아 ScrollPattern.Scroll()을 호출하고, ScrollPattern
+// 미지원 레거시 컨트롤에만 hwnd-scoped WM_MOUSEWHEEL을 PostMessageW로
+// 전달한다. 픽셀 좌표/물리 커서 주입 없음 (2026-07-10 좌표 실행 금지 지시).
+function osScrollEl(hwnd, target, delta) {
+    if (!hwnd) {
+        _failures.push('osScroll:no-hwnd');
+        console.warn('[osScroll] no window hwnd — cannot scroll without a window handle');
+        return;
     }
-}
-
-// OS-level mouse wheel via PowerShell user32.dll (WinAppDriver has no wheel API).
-function osScroll(x, y, delta) {
     try {
-        execSync(
-            \`powershell -NoProfile -File "\${join(__dirname, 'osScroll.ps1')}" -x \${x} -y \${y} -delta \${delta}\`,
-            { stdio: 'pipe', timeout: 15000 }
-        );
+        const selB64 = Buffer.from(JSON.stringify(target || {}), 'utf8').toString('base64');
+        const out = execSync(
+            \`powershell -NoProfile -File "\${join(__dirname, 'osScroll.ps1')}" -hwnd \${hwnd} -selB64 "\${selB64}" -delta \${delta}\`,
+            { stdio: 'pipe', timeout: 20000 }
+        ).toString().trim();
+        if (out) console.log(out);
     } catch (e) {
         _failures.push('osScroll');
-        console.warn('[osScroll] failed:', String(e.message || e).substring(0, 100));
-    }
-}
-
-// OS-level press-hold-move-release drag via PowerShell user32.dll (text
-// selection etc.) — same execSync injection approach as osClick/osScroll,
-// retried once for the same PowerShell cold-start reason as osClick.
-function osDrag(x1, y1, x2, y2) {
-    const cmd = \`powershell -NoProfile -File "\${join(__dirname, 'osDrag.ps1')}" -x1 \${x1} -y1 \${y1} -x2 \${x2} -y2 \${y2}\`;
-    for (let attempt = 1; attempt <= 2; attempt++) {
-        try {
-            const out = execSync(cmd, { stdio: 'pipe', timeout: 15000 });
-            const diag = out.toString().trim();
-            if (diag) console.log(diag);
-            return;
-        } catch (e) {
-            if (attempt === 2) {
-                _failures.push('osDrag');
-                console.warn('[osDrag] failed after retry:', String(e.message || e).substring(0, 100));
-            } else {
-                console.warn('[osDrag] attempt 1 failed, retrying:', String(e.message || e).substring(0, 100));
-            }
-        }
+        console.warn('[osScroll] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).substring(0, 200));
     }
 }
 
@@ -863,37 +970,9 @@ function osActivate(titleLike) {
     }
 }
 
-// Qt/QML controls only: UIA Invoke (el.click()) reaches the accessibility
-// tree but often isn't wired to the control's real MouseArea/TapHandler, so
-// the click succeeds with no error yet the app never reacts (confirmed
-// 2026-07-06 — FreeDM toolbar click "succeeded" but never opened its dialog).
-// Resolve the element's LIVE center via XPath (still window-move-safe, no
-// hardcoded coordinates), then inject a real OS click there.
-// Uses getLocation()+getSize() rather than getRect(): WinAppDriver is a
-// JSONWP-era driver bridged into W3C by appium-windows-driver, and el.getRect()
-// (the newer W3C /rect endpoint) is unreliable there — confirmed 2026-07-06,
-// every FreeDM click silently fell back to its recorded literal coordinates
-// (production of a moved-window miss), which only happens if getRect() throws
-// on every single call. location/size are the older JSONWP endpoints and are
-// consistently supported.
-async function getCenterSimple(selector) {
-    try {
-        const el = await browser.$(selector);
-        await el.waitForExist({ timeout: 8000 });
-        const loc = await el.getLocation();
-        const size = await el.getSize();
-        return { x: Math.round(loc.x + size.width / 2), y: Math.round(loc.y + size.height / 2) };
-    } catch (e) {
-        console.warn('[getCenterSimple] live resolve failed, using recorded fallback coords:', String(e.message || e).substring(0, 120));
-        return null;
-    }
-}
-
 // Reads the window's CURRENT rect — by hwnd when the session's own window is
-// known (deterministic), by title match otherwise — and replays a recorded
-// window-relative offset against it, so a moved/repositioned window still
-// gets clicked in the right spot. Falls back to the recorded absolute
-// coordinates only when the window can't be found at all.
+// known (deterministic), by title match otherwise. Geometry read only —
+// used by normalizeWindowSimple to restore the recorded window position/size.
 function _resolveWinRect(titleLike) {
     try {
         const args = _appHwnd ? \`-hwnd \${_appHwnd}\` : \`-titleLike "\${titleLike}"\`;
@@ -929,27 +1008,10 @@ function normalizeWindowSimple(rect) {
     }
 }
 
-function osClickRel(titleLike, relX, relY, absX, absY, button = 'left', clicks = 1) {
-    const r = _resolveWinRect(titleLike);
-    if (r) { osClick(r.left + relX, r.top + relY, button, clicks); }
-    else { _failures.push('absCoord-fallback'); osClick(absX, absY, button, clicks); }
-}
-function osScrollRel(titleLike, relX, relY, absX, absY, delta) {
-    const r = _resolveWinRect(titleLike);
-    if (r) { osScroll(r.left + relX, r.top + relY, delta); }
-    else { _failures.push('absCoord-fallback'); osScroll(absX, absY, delta); }
-}
-function osDragRel(titleLike, relX1, relY1, relX2, relY2, absX1, absY1, absX2, absY2) {
-    const r = _resolveWinRect(titleLike);
-    if (r) { osDrag(r.left + relX1, r.top + relY1, r.left + relX2, r.top + relY2); }
-    else { _failures.push('absCoord-fallback'); osDrag(absX1, absY1, absX2, absY2); }
-}
-
-// Qt/QML controls only: el.setValue() (UIA ValuePattern) crashes WinAppDriver
-// with an unhandled "unknown error" on custom text inputs (confirmed
-// 2026-07-06 — FreeDM's BaseTextField_QMLTYPE_31 threw mid-suite and aborted
-// the whole test). OS-level keystrokes after a real click sidestep the
-// unsupported UIA pattern entirely.
+// OS-level keystrokes into the focused control (SendKeys — keyboard
+// injection, not coordinate execution). Fallback for edit controls whose
+// element/value endpoint WinAppDriver rejects (confirmed 2026-07-08:
+// Win11 Notepad's RichEditD2DPT Document control).
 function osType(text) {
     try {
         const b64 = Buffer.from(text, 'utf8').toString('base64');
@@ -963,10 +1025,12 @@ function osType(text) {
     }
 }
 
-// Fail-and-Recover popup dismissal (v1) — only called from _step() below,
+// Fail-and-Recover popup dismissal (v2) — only called from _step() below,
 // after a step has already failed, so the happy path pays zero cost.
 // _appHwnd (resolved by initAppHwnd() in beforeAll) identifies the main
-// app window deterministically for owner-PID scoping.
+// app window deterministically for owner-PID scoping. Simple mode drives a
+// single window (_appHwnd, already excluded as the ps1's $mainHwnd), so no
+// -exclude list is needed here — see the session header's osDismissPopup.
 function osDismissPopup() {
     try {
         const args = _appHwnd ? \`-hwnd \${_appHwnd}\` : '';
@@ -982,11 +1046,29 @@ function osDismissPopup() {
     }
 }
 
+// ESC fallback — see OS_ESCAPE_PS1. Called only when osDismissPopup() found
+// no known dismiss button (rename edit-box, open menu, etc).
+function osEscape() {
+    try {
+        execSync(
+            \`powershell -NoProfile -File "\${join(__dirname, 'osEscape.ps1')}"\`,
+            { stdio: 'pipe', timeout: 15000 }
+        );
+        return true;
+    } catch (e) {
+        console.warn('[osEscape] failed:', String(e.message || e).substring(0, 100));
+        return false;
+    }
+}
+
 // Wraps a single replay step: on the happy path (no exception, no new
 // _failures entry) this costs nothing extra. On failure, scans for and
 // dismisses a known-shape popup that didn't exist at recording time (e.g.
-// FDM's "file already exists"), then retries the step ONCE. If no popup was
-// found, the original failure/exception stands untouched.
+// FDM's "file already exists"), then retries the step ONCE. If no dismiss
+// button was found (e.g. an inline rename edit-box left open by a mistimed
+// double-click), falls back to osActivate + ESC to back out of whatever
+// modal input state grabbed focus, then retries once. If that still fails,
+// the original failure/exception stands untouched (no false PASSED).
 async function _step(label, fn) {
     console.log('[STEP] ' + label);
     const before = _failures.length;
@@ -994,8 +1076,13 @@ async function _step(label, fn) {
     try { await fn(); } catch (e) { err = e; }
     if (!err && _failures.length === before) return;
     const dismissed = osDismissPopup();
-    if (!dismissed) { if (err) throw err; return; }
-    _warnings.push('popup-dismissed:' + label);
+    if (dismissed) {
+        _warnings.push('popup-dismissed:' + label);
+    } else {
+        osActivate('');
+        osEscape();
+        _warnings.push('esc-recovery:' + label);
+    }
     _failures.length = before;
     await fn();
 }
@@ -1027,61 +1114,37 @@ function _warmupPowerShell() {
     }
 }
 
-// OS-level click via PowerShell user32.dll — verified for Electron menus, native dialogs.
-// Retries once before giving up — a single slow PowerShell cold-start under
-// process-spawn contention shouldn't fail the whole step (confirmed 2026-07-07).
-function osClick(x, y, button = 'left', clicks = 1) {
-    const cmd = \`powershell -NoProfile -File "\${join(__dirname, 'osClick.ps1')}" -x \${x} -y \${y} -button \${button} -clicks \${clicks}\`;
-    for (let attempt = 1; attempt <= 2; attempt++) {
-        try {
-            const out = execSync(cmd, { stdio: 'pipe', timeout: 15000 });
-            const diag = out.toString().trim();
-            if (diag) console.log(diag);
-            return;
-        } catch (e) {
-            if (attempt === 2) {
-                _failures.push('osClick');
-                console.warn('[osClick] failed after retry:', String(e.message || e).substring(0, 100));
-            } else {
-                console.warn('[osClick] attempt 1 failed, retrying:', String(e.message || e).substring(0, 100));
-            }
-        }
+// 프로그래매틱 스크롤 — osScroll.ps1이 대상 창 hwnd 아래에서 녹화된 컨테이너를
+// UIA로 찾아 ScrollPattern.Scroll()을 호출하고, ScrollPattern 미지원 레거시
+// 컨트롤에만 hwnd-scoped WM_MOUSEWHEEL을 PostMessageW로 전달한다. 픽셀
+// 좌표/물리 커서 주입 없음 (2026-07-10 좌표 실행 금지 지시).
+function osScrollEl(hwnd, target, delta) {
+    if (!hwnd) {
+        _failures.push('osScroll:no-hwnd');
+        console.warn('[osScroll] no window hwnd — cannot scroll without a window handle');
+        return;
     }
-}
-
-// OS-level mouse wheel via PowerShell user32.dll (WinAppDriver has no wheel API).
-function osScroll(x, y, delta) {
     try {
-        execSync(
-            \`powershell -NoProfile -File "\${join(__dirname, 'osScroll.ps1')}" -x \${x} -y \${y} -delta \${delta}\`,
-            { stdio: 'pipe', timeout: 15000 }
-        );
+        const selB64 = Buffer.from(JSON.stringify(target || {}), 'utf8').toString('base64');
+        const out = execSync(
+            \`powershell -NoProfile -File "\${join(__dirname, 'osScroll.ps1')}" -hwnd \${hwnd} -selB64 "\${selB64}" -delta \${delta}\`,
+            { stdio: 'pipe', timeout: 20000 }
+        ).toString().trim();
+        if (out) console.log(out);
     } catch (e) {
         _failures.push('osScroll');
-        console.warn('[osScroll] failed:', String(e.message || e).substring(0, 100));
+        console.warn('[osScroll] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).substring(0, 200));
     }
 }
 
-// OS-level press-hold-move-release drag via PowerShell user32.dll (text
-// selection etc.) — same execSync injection approach as osClick/osScroll,
-// retried once for the same PowerShell cold-start reason as osClick.
-function osDrag(x1, y1, x2, y2) {
-    const cmd = \`powershell -NoProfile -File "\${join(__dirname, 'osDrag.ps1')}" -x1 \${x1} -y1 \${y1} -x2 \${x2} -y2 \${y2}\`;
-    for (let attempt = 1; attempt <= 2; attempt++) {
-        try {
-            const out = execSync(cmd, { stdio: 'pipe', timeout: 15000 });
-            const diag = out.toString().trim();
-            if (diag) console.log(diag);
-            return;
-        } catch (e) {
-            if (attempt === 2) {
-                _failures.push('osDrag');
-                console.warn('[osDrag] failed after retry:', String(e.message || e).substring(0, 100));
-            } else {
-                console.warn('[osDrag] attempt 1 failed, retrying:', String(e.message || e).substring(0, 100));
-            }
-        }
-    }
+// 스크롤 대상 창의 top-level hwnd 해석 — launchApp/_ensureDialog가 채운
+// _hwndCache 우선, 없으면 EnumWindows 타이틀 매치로 1회 해석 후 캐시.
+function _scrollHwnd(title) {
+    _ensureDialog(title);
+    if (_hwndCache[title]) return _hwndCache[title];
+    const hs = _listWindowHwnds(title);
+    if (hs.length) { _hwndCache[title] = hs[0]; return hs[0]; }
+    return 0;
 }
 
 // Window session pool: title → Appium sessionId.
@@ -1089,22 +1152,58 @@ function osDrag(x1, y1, x2, y2) {
 // a fast scoped appTopLevelWindow session is then opened via Appium REST API.
 let _APPIUM = 'http://127.0.0.1:4723';
 const _sessionIds = {};
+// hwnds whose scoped-session creation already failed once this run.
+// appium-windows-driver spawns a NEW WinAppDriver.exe per session and WAD's
+// POST /session can block indefinitely attaching to some dialog hwnds
+// (confirmed 2026-07-09: "폴더 열기" attach timed out, then the Root-scan
+// fallback re-derived the SAME hwnd and paid the full timeout again).
+// Never retry a handle that failed — go straight to Root-session reuse.
+// Keyed by hwnd, not title: a reopened dialog gets a fresh hwnd and is
+// allowed a new attempt.
+const _scopedFailHwnds = new Set();
 
-async function _appiumPost(path, body) {
-    const r = await fetch(\`\${_APPIUM}\${path}\`, {
+// Hard timeout on every Appium HTTP call — WinAppDriver can block internally
+// on a POST /session for a hwnd whose window is mid-close (confirmed
+// 2026-07-09: STEP replay hung forever inside _createSession with no
+// "failed" log ever printed, because the fetch neither resolved nor
+// rejected). Without this, getWindowSession's existing catch-and-fall-back-
+// to-Root-scan path never runs, since a promise that never settles never
+// reaches a catch block.
+async function _appiumFetch(path, opts = {}, timeoutMs = 20000) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+        return await fetch(\`\${_APPIUM}\${path}\`, { ...opts, signal: ctrl.signal });
+    } catch (e) {
+        if (e.name === 'AbortError') throw new Error(\`Appium request timed out after \${timeoutMs}ms: \${opts.method || 'GET'} \${path}\`);
+        throw e;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+async function _appiumPost(path, body, timeoutMs = 20000) {
+    const r = await _appiumFetch(path, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-    });
+    }, timeoutMs);
     return (await r.json()).value;
 }
 
 async function _createSession(app) {
     const isHwnd = /^0x[0-9a-f]+$/i.test(app);
+    // createSessionTimeout 15s caps the driver's internal WAD POST /session
+    // retry loop; with WAD spawn (~3s) + /status poll (≤10s) that totals
+    // ~28s worst case, so the 30s client abort below only fires when WAD is
+    // truly wedged. Keeping server budget < client budget means Appium
+    // settles definitively first — no more "client aborted at 20s while the
+    // server went on to create an orphaned session/WAD process" race
+    // (observed 2026-07-09).
     const cap = isHwnd
-        ? { platformName: 'Windows', 'appium:automationName': 'Windows', 'appium:appTopLevelWindow': app, 'appium:newCommandTimeout': 60000 }
-        : { platformName: 'Windows', 'appium:automationName': 'Windows', 'appium:app': app, 'appium:newCommandTimeout': 60000 };
-    const v = await _appiumPost('/session', { capabilities: { alwaysMatch: cap } });
+        ? { platformName: 'Windows', 'appium:automationName': 'Windows', 'appium:appTopLevelWindow': app, 'appium:newCommandTimeout': 60000, 'appium:createSessionTimeout': 15000 }
+        : { platformName: 'Windows', 'appium:automationName': 'Windows', 'appium:app': app, 'appium:newCommandTimeout': 60000, 'appium:createSessionTimeout': 15000 };
+    const v = await _appiumPost('/session', { capabilities: { alwaysMatch: cap } }, 30000);
     if (!v?.sessionId) throw new Error(\`Appium session failed for "\${app}": \${JSON.stringify(v)}\`);
     return v.sessionId;
 }
@@ -1149,15 +1248,32 @@ async function getWindowSession(title) {
         const hs = _listWindowHwnds(title);
         if (hs.length) { hwndNum = hs[0]; _hwndCache[title] = hwndNum; }
     }
-    if (hwndNum) {
+    // Owned windows (native dialogs owned by the app's main window) can
+    // never become scoped sessions — WAD rejects them, but only after the
+    // full ~16s spawn/retry budget. Blacklist them up front (see _windowOwner).
+    if (hwndNum && !_scopedFailHwnds.has(hwndNum)) {
+        const ownerHwnd = _windowOwner(hwndNum);
+        if (ownerHwnd) {
+            console.log(\`[session] hwnd=0x\${hwndNum.toString(16)} owned by 0x\${ownerHwnd.toString(16)} — skipping scoped session (WAD rejects owned windows)\`);
+            _scopedFailHwnds.add(hwndNum);
+        }
+    }
+    if (hwndNum && !_scopedFailHwnds.has(hwndNum)) {
         const hwndHex = '0x' + hwndNum.toString(16);
         console.log(\`[session] top-level hwnd=\${hwndHex} for "\${title}" → scoped session\`);
+        const t0 = Date.now();
         try {
             const sid = await _createSession(hwndHex);
-            _sessionIds[title] = { sid, rootElId: null };
+            console.log(\`[session] scoped session on \${hwndHex} ready in \${Date.now() - t0}ms\`);
+            // hwnd tracked here (not 0/Root) — a scoped session's element
+            // /location returns coordinates relative to that window, not the
+            // screen (confirmed 2026-07-08), so callers must add the live
+            // window origin before feeding a point to osClick.
+            _sessionIds[title] = { sid, rootElId: null, hwnd: hwndNum };
             return _sessionIds[title];
         } catch (e) {
-            console.warn(\`[session] scoped session on \${hwndHex} failed (\${e.message}) — falling back to desktop-UIA scan for "\${title}"\`);
+            _scopedFailHwnds.add(hwndNum);
+            console.warn(\`[session] scoped session on \${hwndHex} failed after \${Date.now() - t0}ms (\${e.message}) — falling back to desktop-UIA scan for "\${title}"\`);
         }
     }
 
@@ -1176,21 +1292,45 @@ async function getWindowSession(title) {
             if (rawNum) { hwnd = '0x' + rawNum.toString(16); matchedEl = el; break; }
         } catch {}
     }
-    const app = hwnd || 'Root';
-    if (hwnd) console.log(\`[session] hwnd=\${hwnd} → scoped session\`);
-    else { console.warn(\`[session] Window "\${title}" not found — falling back to Root\`); _warnings.push('session-fallback:' + title); }
-    try {
-        const sid = await _createSession(app);
-        _sessionIds[title] = { sid, rootElId: null };
-    } catch (e) {
-        console.warn(\`[session] scoped session failed (\${e.message}) — reusing Root session for "\${title}"\`);
-        _warnings.push('session-fallback:' + title);
-        _sessionIds[title] = { sid: browser.sessionId, rootElId: matchedEl ? matchedEl.elementId : null };
+    const scanHwndNum = hwnd ? parseInt(hwnd, 16) : 0;
+    // Same owned-window pre-check as the EnumWindows path above.
+    if (scanHwndNum && !_scopedFailHwnds.has(scanHwndNum)) {
+        const ownerHwnd = _windowOwner(scanHwndNum);
+        if (ownerHwnd) {
+            console.log(\`[session] hwnd=\${hwnd} owned by 0x\${ownerHwnd.toString(16)} — skipping scoped session (WAD rejects owned windows)\`);
+            _scopedFailHwnds.add(scanHwndNum);
+        }
     }
+    if (scanHwndNum && !_scopedFailHwnds.has(scanHwndNum)) {
+        console.log(\`[session] hwnd=\${hwnd} → scoped session\`);
+        const t0 = Date.now();
+        try {
+            const sid = await _createSession(hwnd);
+            console.log(\`[session] scoped session on \${hwnd} ready in \${Date.now() - t0}ms\`);
+            // Scoped window's hwnd tracked — element /location is window-
+            // relative here, same distinction as the EnumWindows path above.
+            _sessionIds[title] = { sid, rootElId: null, hwnd: scanHwndNum };
+            return _sessionIds[title];
+        } catch (e) {
+            _scopedFailHwnds.add(scanHwndNum);
+            console.warn(\`[session] scoped session failed after \${Date.now() - t0}ms (\${e.message}) — reusing Root session for "\${title}"\`);
+        }
+    }
+    // Root-session reuse (proven 2026-07-08): no new session, no WAD spawn.
+    // Element lookups are scoped to the matched dialog element's subtree via
+    // rootElId; hwnd 0 = /location is already screen-absolute. Deliberately
+    // NOT _createSession('Root') — that would spawn yet another WinAppDriver
+    // process with the same 30s-hang exposure as the scoped path.
+    if (!hwnd) console.warn(\`[session] Window "\${title}" not found — falling back to Root\`);
+    _warnings.push('session-fallback:' + title);
+    _sessionIds[title] = { sid: browser.sessionId, rootElId: matchedEl ? matchedEl.elementId : null, hwnd: 0 };
     return _sessionIds[title];
 }
 
-async function getCenter(sid, rootElId, selector) {
+// 스코프 세션(또는 Root 폴백의 rootElId 서브트리)에서 셀렉터로 요소를 찾아
+// element id를 돌려준다 — 좌표 산출 없음. 클릭은 element/click 엔드포인트로
+// UIA Invoke를 그대로 태운다 (2026-07-10 좌표 실행 금지).
+async function _findElement(sid, rootElId, selector) {
     try {
         const raw = selector.replace(/^['"]|['"]$/g, '');
         const using = raw.startsWith('~') ? 'accessibility id' : 'xpath';
@@ -1200,20 +1340,101 @@ async function getCenter(sid, rootElId, selector) {
             : \`/session/\${sid}/element\`;
         const el = await _appiumPost(path, { using, value });
         if (!el) return null;
-        const elId = el.ELEMENT || el['element-6066-11e4-a52e-4f735466cecf'];
-        // location+size (JSONWP) rather than /rect (W3C) — see getCenterSimple
-        // for why WinAppDriver's /rect support can't be relied on.
-        const locR = await (await fetch(\`\${_APPIUM}/session/\${sid}/element/\${elId}/location\`)).json();
-        const sizeR = await (await fetch(\`\${_APPIUM}/session/\${sid}/element/\${elId}/size\`)).json();
-        const loc = locR.value, size = sizeR.value;
-        if (!loc || !size) return null;
-        return { x: Math.round(loc.x + size.width / 2), y: Math.round(loc.y + size.height / 2) };
+        return el.ELEMENT || el['element-6066-11e4-a52e-4f735466cecf'] || null;
     } catch (e) {
-        console.warn('[getCenter] live resolve failed:', String(e.message || e).substring(0, 120));
+        console.warn('[findElement] lookup failed:', String(e.message || e).substring(0, 120));
         return null;
     }
 }
 
+// Diagnostic for a final row-lookup failure: dump the row names UIA actually
+// exposes under the dialog RIGHT NOW. Distinguishes list virtualization (the
+// target row exists but isn't UIA-exposed until scrolled into view) from a
+// name mismatch (row exposed under a different Name) from a dialog that never
+// repopulated — the three candidate causes that can't be told apart from a
+// bare no-such-element (2026-07-09: STEP 6 "hansung" lookup failed with no
+// way to see what the list actually contained).
+async function _dumpVisibleRows(s) {
+    try {
+        const path = s.rootElId
+            ? \`/session/\${s.sid}/element/\${s.rootElId}/elements\`
+            : \`/session/\${s.sid}/elements\`;
+        // Two queries, not an XPath union — WinAppDriver's XPath subset does
+        // not reliably support "|".
+        let els = await _appiumPost(path, { using: 'xpath', value: '//ListItem' });
+        if (!Array.isArray(els) || !els.length) els = await _appiumPost(path, { using: 'xpath', value: '//TreeItem' });
+        if (!Array.isArray(els)) { console.warn('[getCenter-diag] row query returned no array'); return; }
+        const names = [];
+        for (const el of els.slice(0, 20)) {
+            const elId = el.ELEMENT || el['element-6066-11e4-a52e-4f735466cecf'];
+            if (!elId) continue;
+            try {
+                const r = await (await _appiumFetch(\`/session/\${s.sid}/element/\${elId}/attribute/Name\`)).json();
+                if (typeof r.value === 'string') names.push(r.value);
+            } catch {}
+        }
+        console.warn(\`[getCenter-diag] UIA-exposed rows (\${els.length} total): \${names.join(' | ')}\`);
+    } catch (e) {
+        console.warn('[getCenter-diag] dump failed:', String(e.message || e).substring(0, 100));
+    }
+}
+
+// Named-element lookup with condition polling (waitUntil-style — no fixed
+// pause). A navigation click (e.g. selecting a drive in the "폴더 열기" nav
+// pane) repopulates the dialog's file list ASYNCHRONOUSLY; a zero-wait lookup
+// would give up before the list had refreshed (confirmed 2026-07-09: STEP 6
+// "hansung" no-such-element twice in a row). Polls once per second up to
+// timeoutMs; halfway through it invalidates the cached session/rootElId once
+// in case the cached dialog element itself went stale. Returns { elId, s }:
+// elId null on timeout (after dumping visible rows for diagnosis).
+async function _findScoped(title, selector, timeoutMs = 8000) {
+    const deadline = Date.now() + timeoutMs;
+    const refreshAt = Date.now() + timeoutMs / 2;
+    let refreshed = false;
+    for (;;) {
+        const s = await getWindowSession(title);
+        // Dialog window itself wasn't found (no hwnd, no matched element):
+        // a lookup would scan the ENTIRE desktop tree from Root at 10s+ per
+        // call. Drop the useless cache entry and fail fast.
+        if (!s.hwnd && !s.rootElId) {
+            delete _sessionIds[title];
+            console.warn(\`[findScoped] window "\${title}" not found — failing fast\`);
+            return { elId: null, s };
+        }
+        const elId = await _findElement(s.sid, s.rootElId, selector);
+        if (elId) return { elId, s };
+        if (Date.now() >= deadline) {
+            await _dumpVisibleRows(s);
+            return { elId: null, s };
+        }
+        if (!refreshed && Date.now() >= refreshAt) {
+            refreshed = true;
+            delete _sessionIds[title];
+        }
+        await new Promise(r => setTimeout(r, 1000));
+    }
+}
+
+// XPath-only click in the window's own session context (HWND 세그먼트).
+// element/click = UIA Invoke/기본 액션 — 창이 이동/리사이즈돼도 무관하고
+// 좌표는 어디에도 없다. doubleClick은 같은 요소에 클릭 2회 (WinAppDriver에
+// 요소 단위 doubleclick 엔드포인트가 없음 — 좌표 기반 moveto/doubleclick은
+// 금지 대상이라 쓰지 않는다). 실패는 _failures로 기록되어 _step()의
+// Fail-and-Recover(팝업 해제 후 1회 재시도)를 태운 뒤 최종 FAIL로 남는다.
+async function _clickScoped(title, selector, dbl = false) {
+    const { elId, s } = await _findScoped(title, selector);
+    if (!elId) {
+        _failures.push('click-not-found:' + String(selector).substring(0, 60));
+        return;
+    }
+    await _appiumPost(\`/session/\${s.sid}/element/\${elId}/click\`, {});
+    if (dbl) await _appiumPost(\`/session/\${s.sid}/element/\${elId}/click\`, {});
+}
+
+// Returns true on success, false on failure (never pushes to _failures itself
+// — WinAppDriver's element/value endpoint outright rejects some native edit
+// controls (confirmed 2026-07-08: Win11 Notepad's RichEditD2DPT Document
+// control), so the caller falls back to OS-level typing instead of failing).
 async function _typeScoped(sid, rootElId, selector, text) {
     try {
         const raw = selector.replace(/^['"]|['"]$/g, '');
@@ -1227,16 +1448,11 @@ async function _typeScoped(sid, rootElId, selector, text) {
         const elId = el.ELEMENT || el['element-6066-11e4-a52e-4f735466cecf'];
         await _appiumPost(\`/session/\${sid}/element/\${elId}/clear\`, {});
         await _appiumPost(\`/session/\${sid}/element/\${elId}/value\`, { text });
-    } catch (e) { _failures.push('type'); console.warn('[type] failed:', String(e.message || e).substring(0, 100)); }
+        return true;
+    } catch (e) { console.warn('[type] scoped sendKeys failed:', String(e.message || e).substring(0, 100)); return false; }
 }
 
-// ── Electron 웹 콘텐츠: 창-상대 OS 재생 ────────────────────────────────────
-// Electron 창은 NativeWindowHandle=0 → scoped UIA 세션도, live rect도 불가.
-// 대신 앱 창의 현재 rect를 PowerShell로 읽어 녹화된 창-상대 오프셋을 재생.
-// 창이 이동해도 좌표가 따라감.
-// No caching: recorded flows can include actions (e.g. maximize) that change
-// window geometry mid-replay. A cached rect would go stale after such a step
-// and every subsequent rel-offset click would land on the old origin.
+// ── HWND 추적 (창 세그먼팅) ────────────────────────────────────────────────
 // Title fragment → hwnd of the window launchApp actually created for this run.
 // Populated by launchApp via baseline/diff (see below). Once set, every
 // _resolveWinRect/normalizeWindow call for that fragment targets this exact
@@ -1296,6 +1512,25 @@ function _listWindowHwnds(frag) {
         return out.split(/\\r?\\n/).map(s => s.trim()).filter(Boolean).map(Number);
     } catch {
         return [];
+    }
+}
+
+// Owner hwnd of a window (0 = unowned). WinAppDriver rejects OWNED windows
+// as appTopLevelWindow ("X is not a top level window handle") only after
+// appium has burned its full WAD-spawn + retry budget — ~16s per attempt
+// (confirmed 2026-07-09: the "폴더 열기" dialog, owned by the VSCode main
+// window, cost 16226ms before failing). One cheap PS call up front lets
+// getWindowSession skip the doomed attempt entirely. Returns 0 on any
+// error so callers fall through to the normal attempt-then-blacklist path.
+function _windowOwner(hwndNum) {
+    try {
+        const out = execSync(
+            \`powershell -NoProfile -File "\${join(__dirname, 'osWindowRect.ps1')}" -hwnd \${hwndNum} -ownerOnly\`,
+            { stdio: 'pipe', timeout: 15000 }
+        ).toString().trim();
+        return Number(out) || 0;
+    } catch {
+        return 0;
     }
 }
 
@@ -1371,6 +1606,16 @@ async function launchApp(exePath, args, titleFrag, rect) {
     // 잡히지 않고 _failures에도 안 찍힌 채 20초 타임아웃만 나는 문제가 있었다.
     const isAumid = /!/.test(exePath) && !/[\\\/]/.test(exePath);
     const baseline = new Set(_listWindowHwnds(titleFrag));
+    // A content-dependent recorded title (e.g. Notepad's "*d - 메모장" — the
+    // dirty-flag/filename prefix only exists once text has been typed) never
+    // matches the fresh, clean window this launch creates ("제목 없음 - 메모장"),
+    // so the frag-diff below never fires and every later hwnd lookup falls
+    // through to a Root scan (confirmed 2026-07-08). Also snapshot/match on
+    // the stable tail token after the last " - " (app name, e.g. "메모장") as
+    // a fallback identity. No-op when titleFrag has no " - " (FDM's "Free
+    // Download Manager", VSCode's winFrag) since tailFrag === titleFrag then.
+    const tailFrag = (titleFrag || '').split(' - ').pop() || titleFrag;
+    const baselineTail = tailFrag !== titleFrag ? new Set(_listWindowHwnds(tailFrag)) : null;
     try {
         if (isAumid) {
             spawn('explorer.exe', ['shell:AppsFolder\\\\' + exePath], { detached: true, stdio: 'ignore' }).unref();
@@ -1392,6 +1637,12 @@ async function launchApp(exePath, args, titleFrag, rect) {
             if (fresh) {
                 _hwndCache[titleFrag] = fresh;
                 console.log(\`[launch] tracking new window hwnd=\${fresh}\`);
+            } else if (baselineTail) {
+                const freshTail = _listWindowHwnds(tailFrag).find(h => !baselineTail.has(h));
+                if (freshTail) {
+                    _hwndCache[titleFrag] = freshTail;
+                    console.log(\`[launch] adopted new window hwnd=\${freshTail} via tail fragment "\${tailFrag}" (recorded title "\${titleFrag}" not present at launch)\`);
+                }
             }
         }
         // A matched window with width/height 0 is a not-yet-rendered
@@ -1418,26 +1669,8 @@ async function launchApp(exePath, args, titleFrag, rect) {
     console.warn('[launch] window not detected within timeout');
 }
 
-function osClickRel(frag, relX, relY, absX, absY, button = 'left', clicks = 1) {
-    _ensureDialog(frag);
-    const r = _resolveWinRect(frag);
-    if (r) { osClick(r.left + relX, r.top + relY, button, clicks); }
-    else { _failures.push('absCoord-fallback'); osClick(absX, absY, button, clicks); }      // 창 못 찾으면 녹화 절대좌표로 폴백 — 실패로 기록
-}
-function osScrollRel(frag, relX, relY, absX, absY, delta) {
-    _ensureDialog(frag);
-    const r = _resolveWinRect(frag);
-    if (r) { osScroll(r.left + relX, r.top + relY, delta); }
-    else { _failures.push('absCoord-fallback'); osScroll(absX, absY, delta); }
-}
-function osDragRel(frag, relX1, relY1, relX2, relY2, absX1, absY1, absX2, absY2) {
-    _ensureDialog(frag);
-    const r = _resolveWinRect(frag);
-    if (r) { osDrag(r.left + relX1, r.top + relY1, r.left + relX2, r.top + relY2); }
-    else { _failures.push('absCoord-fallback'); osDrag(absX1, absY1, absX2, absY2); }
-}
-
-// Electron 입력: 직전 osClick이 포커스를 잡아둔 상태 → OS 키 주입.
+// OS 키 주입(SendKeys) — 좌표 실행이 아닌 키보드 폴백. _typeScoped가
+// 거부되는 컨트롤(예: RichEditD2DPT) 및 Electron 포커스 입력용.
 function osType(text) {
     try {
         const b64 = Buffer.from(text, 'utf8').toString('base64');
@@ -1451,15 +1684,22 @@ function osType(text) {
     }
 }
 
-// Fail-and-Recover popup dismissal (v1) — only called from _step() below,
+// Fail-and-Recover popup dismissal (v2) — only called from _step() below,
 // after a step has already failed, so the happy path pays zero cost.
 // Prefers the tracked hwnd for the main app window (_hwndCache[_mainTitleFrag],
 // set by launchApp) for deterministic owner-PID scoping; falls back to a
 // title-substring match when no hwnd was tracked (e.g. app already running).
+// Every hwnd the replay itself is driving (main window + dialogs tracked in
+// _hwndCache) is passed as -exclude — a "recovery" that closes the very
+// dialog the failed step is about to retry against guarantees the retry
+// fails too (confirmed 2026-07-09: dismisser closed the "폴더 열기" flow's
+// window, then the retry's Root scan found nothing and the run stalled).
 function osDismissPopup() {
     try {
         const hwnd = _hwndCache[_mainTitleFrag];
-        const args = hwnd ? \`-hwnd \${hwnd}\` : (_mainTitleFrag ? \`-titleLike "\${_mainTitleFrag}"\` : '');
+        let args = hwnd ? \`-hwnd \${hwnd}\` : (_mainTitleFrag ? \`-titleLike "\${_mainTitleFrag}"\` : '');
+        const tracked = [...new Set(Object.values(_hwndCache))].filter(Boolean);
+        if (tracked.length) args += \` -exclude "\${tracked.join(',')}"\`;
         const out = execSync(
             \`powershell -NoProfile -File "\${join(__dirname, 'osDismissPopup.ps1')}" \${args}\`,
             { stdio: 'pipe', timeout: 15000 }
@@ -1472,11 +1712,29 @@ function osDismissPopup() {
     }
 }
 
+// ESC fallback — see OS_ESCAPE_PS1. Called only when osDismissPopup() found
+// no known dismiss button (rename edit-box, open menu, etc).
+function osEscape() {
+    try {
+        execSync(
+            \`powershell -NoProfile -File "\${join(__dirname, 'osEscape.ps1')}"\`,
+            { stdio: 'pipe', timeout: 15000 }
+        );
+        return true;
+    } catch (e) {
+        console.warn('[osEscape] failed:', String(e.message || e).substring(0, 100));
+        return false;
+    }
+}
+
 // Wraps a single replay step: on the happy path (no exception, no new
 // _failures entry) this costs nothing extra. On failure, scans for and
 // dismisses a known-shape popup that didn't exist at recording time (e.g.
-// FDM's "file already exists"), then retries the step ONCE. If no popup was
-// found, the original failure/exception stands untouched.
+// FDM's "file already exists"), then retries the step ONCE. If no dismiss
+// button was found (e.g. an inline rename edit-box left open by a mistimed
+// double-click), falls back to osActivate + ESC to back out of whatever
+// modal input state grabbed focus, then retries once. If that still fails,
+// the original failure/exception stands untouched (no false PASSED).
 async function _step(label, fn) {
     console.log('[STEP] ' + label);
     const before = _failures.length;
@@ -1484,8 +1742,13 @@ async function _step(label, fn) {
     try { await fn(); } catch (e) { err = e; }
     if (!err && _failures.length === before) return;
     const dismissed = osDismissPopup();
-    if (!dismissed) { if (err) throw err; return; }
-    _warnings.push('popup-dismissed:' + label);
+    if (dismissed) {
+        _warnings.push('popup-dismissed:' + label);
+    } else {
+        osActivate('', _hwndCache[_mainTitleFrag]);
+        osEscape();
+        _warnings.push('esc-recovery:' + label);
+    }
     _failures.length = before;
     await fn();
 }
@@ -1499,7 +1762,7 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
   const pageName = `${base}Page${suffix}`;
   const selFn    = strategy === 'id' ? wdioSelectorById : wdioSelectorByClass;
 
-  const filtered     = filterEvents(eventList);
+  const filtered     = dedupeDoubleClicks(filterEvents(eventList));
   const pageMethods  = [];
   const testSteps    = [];
 
@@ -1522,6 +1785,41 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
     ? { left: _rectEvent.winLeft, top: _rectEvent.winTop, width: _rectEvent.winWidth, height: _rectEvent.winHeight }
     : (_sessionMeta?.initialWindow || null);
 
+  // 같은 창(rootHwndHex)의 이벤트는 최초 관측 제목으로 통일 — 콘텐츠에 따라 바뀌는
+  // 제목(예: 메모장의 "*a - 메모장" → "*asdf - 메모장")이 같은 창을 여러 개의
+  // "다이얼로그"로 쪼개, 재생 시점엔 이미 존재하지 않는 낡은 제목을 getWindowSession이
+  // 찾다 실패하는 문제를 막는다. 재생도 같은 텍스트를 입력하므로 창의 최초 제목은
+  // 첫 조회 시점엔 유효하고, 이후엔 _sessionIds/_hwndCache 캐시로 계속 추적된다.
+  const _firstTitleOfRoot = {};
+  for (const e of filtered) {
+    const r = e.rootHwndHex, t = e.element?.windowTitle || '';
+    if (r && t && !(r in _firstTitleOfRoot)) _firstTitleOfRoot[r] = t;
+  }
+  // rootHwndHex가 없는(구버전 캡처/좌표 폴백) 이벤트의 raw title이 알려진 그룹의
+  // 첫 제목과도 안 맞으면, 그건 새 창이 아니라 메인 창 제목이 다시 바뀐 순간일
+  // 가능성이 높다(confirmed 2026-07-08: Notepad "*asdf - 메모장"이 rootHwndHex 없이
+  // 캡처되어 별도 유령 다이얼로그로 취급되고, 재생 시 그 제목의 창이 없어 실패).
+  // 직전 이벤트가 풀린 그룹 제목을 그대로 승계해 같은 창으로 묶는다.
+  const _knownFirstTitles = new Set(Object.values(_firstTitleOfRoot));
+  const _groupTitles = [];
+  {
+    let last = '';
+    filtered.forEach(e => {
+      let t;
+      if (e.rootHwndHex && _firstTitleOfRoot[e.rootHwndHex]) {
+        t = _firstTitleOfRoot[e.rootHwndHex];
+      } else {
+        const raw = e.element?.windowTitle || '';
+        if (raw && _knownFirstTitles.has(raw)) t = raw;
+        else if (!e.rootHwndHex && raw) t = last || raw;
+        else t = raw;
+      }
+      if (t) last = t;
+      _groupTitles.push(t);
+    });
+  }
+  const groupTitle = (e, i) => _groupTitles[i];
+
   // 네이티브(비-Electron) 다이얼로그 title → 녹화 시점 창 기하. 재생 중 _ensureDialog가
   // 각 다이얼로그를 이 위치로 최초 1회 정규화한다 — 안 하면 rel 오프셋(relX/relY)이
   // 녹화 당시 창 기준이라 다이얼로그가 다른 위치/모니터에서 열릴 경우 어긋난다
@@ -1531,151 +1829,98 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
   const dialogRects = {};
   {
     let _lastT = '';
-    for (const e of filtered) {
-      const t = e.element?.windowTitle || _lastT;
-      if (e.element?.windowTitle) _lastT = e.element.windowTitle;
-      if (!t || (winFragOk && t.includes(winFrag))) continue;   // 메인 Electron 창 제외
-      if (t in dialogRects) continue;
+    filtered.forEach((e, i) => {
+      const gt = groupTitle(e, i);
+      const t = gt || _lastT;
+      if (gt) _lastT = gt;
+      if (!t || (winFragOk && t.includes(winFrag))) return;   // 메인 Electron 창 제외
+      if (t in dialogRects) return;
       if (Number.isInteger(e.winLeft) && Number.isInteger(e.winTop) &&
           Number.isInteger(e.winWidth) && Number.isInteger(e.winHeight)) {
         dialogRects[t] = { left: e.winLeft, top: e.winTop, width: e.winWidth, height: e.winHeight };
       }
-    }
+    });
   }
 
-  // 다이얼로그 내부의 "coordinate" 폴백 이벤트(agent.py가 element.windowTitle을
-  // 못 채운 경우)는 relX/relY/winLeft/winTop은 있지만 windowTitle이 빈 문자열이다.
-  // 직전에 관측된 실제 windowTitle을 이어받아 rel 재생(osClickRel/osScrollRel)이
-  // 가능하도록 한다 — 같은 다이얼로그 안에서 연속 캡처되므로 안전한 가정이다.
+  // windowTitle이 빈 문자열로 캡처된 이벤트(agent.py가 element.windowTitle을
+  // 못 채운 경우)는 직전에 관측된 실제 windowTitle을 이어받아 같은 창 세그먼트로
+  // 묶는다 — 같은 다이얼로그 안에서 연속 캡처되므로 안전한 가정이다.
   let lastWinTitle = '';
 
   filtered.forEach((e, i) => {
     const stepNum  = i + 1;
     const sel      = selFn(e.element);
     const isEdit   = EDITABLE_CONTROL_TYPES.has(e.element?.controlType);
-    const x        = e.x ?? 0;
-    const y        = e.y ?? 0;
-    const winTitle = e.element?.windowTitle || '';
-    const titleArg = escapeStr(winTitle);
-    const hasRel      = Number.isInteger(e.relX) && Number.isInteger(e.relY);
+    const winTitle = groupTitle(e, i);
     const relTitle    = winTitle || lastWinTitle;
     if (winTitle) lastWinTitle = winTitle;
     const electronCtx = winFragOk && relTitle.includes(winFrag);
 
     if (e.action === 'scroll') {
-      // WinAppDriver/Appium W3C Actions have no wheel primitive — replay via
-      // OS-level mouse_event(MOUSEEVENTF_WHEEL). WHEEL_DELTA=120 per notch;
-      // e.delta is the summed notch count captured by the agent.
-      const wheelDelta = (e.delta ?? 0) * 120;
-      if (hasRel && relTitle) {
-        const relFrag = electronCtx ? winFrag : relTitle;
+      // 프로그래매틱 스크롤 (2026-07-10 지시): 캡처 시점에 agent.py가 기록한
+      // 스크롤 컨테이너(scrollTarget — ScrollPattern 보유 조상)를 재생 시점에
+      // 대상 창 hwnd 아래에서 다시 찾아 ScrollPattern.Scroll() / PostMessage
+      // 휠로 스크롤한다. e.delta = 노치 수(agent가 합산), 픽셀 좌표 미사용.
+      // 구버전 캡처(scrollTarget 없음)는 이벤트 요소 셀렉터로 폴백 — 그래도
+      // 좌표는 쓰지 않는다 (셀렉터마저 없으면 창 루트에서 스크롤 가능 요소 탐색).
+      const notches = Number.isFinite(e.delta) ? e.delta : (parseInt(e.value, 10) || 0);
+      const st = e.scrollTarget || {};
+      const el = e.element || {};
+      const target = {
+        automationId: st.automationId || el.automationId || '',
+        className: st.className || el.className || '',
+        name: st.name || el.name || '',
+      };
+      if (useSession) {
         pageMethods.push(
 `    async scroll${stepNum}() {
-        osScrollRel('${escapeStr(relFrag)}', ${e.relX}, ${e.relY}, ${x}, ${y}, ${wheelDelta});
+        osScrollEl(_scrollHwnd('${escapeStr(relTitle)}'), ${JSON.stringify(target)}, ${notches});
     }`
         );
       } else {
         pageMethods.push(
 `    async scroll${stepNum}() {
-        osScroll(${x}, ${y}, ${wheelDelta});
+        osScrollEl(_appHwnd, ${JSON.stringify(target)}, ${notches});
     }`
         );
       }
       testSteps.push(
-`            await _step('${stepNum}:scroll delta=${wheelDelta}', () => page.scroll${stepNum}());`
+`            await _step('${stepNum}:scroll delta=${notches}', () => page.scroll${stepNum}());`
       );
       return;
     }
 
-    if (e.action === 'drag') {
-      // Press-hold-move-release (e.g. text selection). WinAppDriver/Appium's
-      // W3C Actions API has no pointer-move primitive (same limitation that
-      // rules out Actions for clicks), so this replays via OS-level injection
-      // like click/scroll. Same relFrag logic as click/scroll covers simple
-      // mode, session mode, and Electron windows uniformly.
-      const endX = e.endX ?? x;
-      const endY = e.endY ?? y;
-      const hasEndRel = Number.isInteger(e.endRelX) && Number.isInteger(e.endRelY);
-      if (hasRel && hasEndRel && relTitle) {
-        const relFrag = electronCtx ? winFrag : relTitle;
-        pageMethods.push(
-`    async drag${stepNum}() {
-        osDragRel('${escapeStr(relFrag)}', ${e.relX}, ${e.relY}, ${e.endRelX}, ${e.endRelY}, ${x}, ${y}, ${endX}, ${endY});
-    }`
-        );
-      } else {
-        pageMethods.push(
-`    async drag${stepNum}() {
-        osDrag(${x}, ${y}, ${endX}, ${endY});
-    }`
-        );
-      }
+    if (e.action === 'drag' || e.action === 'rightClick') {
+      // scope-out (2026-07-10 스테이크홀더 지시): 이벤트 스코프는
+      // Click / Type / DoubleClick / Scroll 4종. drag/rightClick은 캡처는
+      // 유지하되 재생하지 않는다 — 좌표 실행 전면 금지로 대체 경로도 없음.
       testSteps.push(
-`            await _step('${stepNum}:drag (${x},${y})->(${endX},${endY})', () => page.drag${stepNum}());`
+`            // [STEP ${stepNum}] ${e.action} scope-out — replay skipped (event scope: Click/Type/DoubleClick/Scroll, 2026-07-10)`
       );
       return;
     }
 
     if (e.action === 'type' && isEdit) {
       if (useSession && electronCtx) {
-        // Electron 입력 → UIA 세션 조회(45초 실패 경로) 제거, OS 키 주입.
+        // Electron 입력 → UIA 세션 조회(45초 실패 경로) 제거, OS 키 주입
+        // (SendKeys — 키보드 폴백, 좌표 실행 아님).
         pageMethods.push(
 `    async type${stepNum}(value) {
         osType(value);
     }`
         );
-      } else if (useSession && winTitle) {
+      } else if (useSession && relTitle) {
         const elSel = sel || `'//*[@Name="${escapeAttr(e.element?.name)}"]'`;
+        const relTitleArg = escapeStr(relTitle);
         pageMethods.push(
 `    async type${stepNum}(value) {
-        const s = await getWindowSession('${titleArg}');
-        await _typeScoped(s.sid, s.rootElId, ${elSel}, value);
-    }`
-        );
-      } else if (sel && isQtControl(e.element) && !useSession && trustLiveSelector(sel, e.element)) {
-        // A genuinely short, unique automationId (not a QML dotted path) —
-        // safe to trust getCenterSimple's live resolve first, recorded
-        // rel-offset as fallback. Activate first: SendKeys goes to whatever
-        // has OS focus, not the WebDriver session's window, and a click
-        // alone doesn't guarantee it.
-        const fallbackClick = hasRel && relTitle
-          ? `osClickRel(${JSON.stringify(relTitle)}, ${e.relX ?? 0}, ${e.relY ?? 0}, ${x}, ${y})`
-          : `osClick(${x}, ${y})`;
-        pageMethods.push(
-`    async type${stepNum}(value) {
-        osActivate(${JSON.stringify(relTitle || '')});
-        const c = await getCenterSimple(${sel});
-        if (c) osClick(c.x, c.y);
-        else ${fallbackClick};
-        osType(value);
-    }`
-        );
-      } else if (sel && isQtControl(e.element) && !useSession) {
-        // className-only (non-unique) selector: getCenterSimple's browser.$()
-        // only ever returns the FIRST match, which silently focuses the wrong
-        // field. Recorded rel-offset is unique per step, so use it directly
-        // and skip getCenterSimple entirely. If no rel data exists (older
-        // capture), don't click at all — a corner-click fallback like
-        // osClick(0, 0) steals focus from the target window and sends the
-        // keystrokes somewhere else entirely (confirmed 2026-07-06).
-        const clickStep = (hasRel && relTitle)
-          ? `osClickRel(${JSON.stringify(relTitle)}, ${e.relX}, ${e.relY}, ${x}, ${y});`
-          : `// no recorded coords — rely on osActivate focus, do NOT click (0,0)`;
-        pageMethods.push(
-`    async type${stepNum}(value) {
-        osActivate(${JSON.stringify(relTitle || '')});
-        ${clickStep}
-        osType(value);
-    }`
-        );
-      } else if (sel && isQtControl(e.element)) {
-        // useSession path — no osActivate/osClickRel available there.
-        pageMethods.push(
-`    async type${stepNum}(value) {
-        const c = await getCenterSimple(${sel});
-        if (c) osClick(c.x, c.y);
-        else osClick(${x}, ${y});
-        osType(value);
+        const s = await getWindowSession('${relTitleArg}');
+        const ok = await _typeScoped(s.sid, s.rootElId, ${elSel}, value);
+        if (!ok) {
+            console.warn('[type${stepNum}] scoped sendKeys failed — falling back to OS-level typing');
+            osActivate('${relTitleArg}', _hwndCache['${relTitleArg}']);
+            osType(value);
+        }
     }`
         );
       } else {
@@ -1685,10 +1930,17 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
         try {
             const el = await browser.$(${elSel});
             await el.waitForExist({ timeout: 8000 });
-            await el.setValue(value);
+            await el.addValue(value);
         } catch (e) {
-            _failures.push('type');
-            console.warn('[type${stepNum}] setValue failed:', String(e.message || e).substring(0, 100));
+            // WinAppDriver's element/value endpoint rejects some native edit
+            // controls outright (confirmed 2026-07-08: Win11 Notepad's
+            // RichEditD2DPT Document control returns "unknown error" in
+            // ~15ms, even after waitForExist/elementClear succeeded) — no
+            // amount of retrying helps, so fall back to real OS-level key
+            // injection instead of failing the step.
+            console.warn('[type${stepNum}] element sendKeys failed — falling back to OS-level typing:', String(e.message || e).substring(0, 100));
+            osActivate('');
+            osType(value);
         }
     }`
         );
@@ -1699,130 +1951,43 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
     } else if (e.action === 'type') {
       testSteps.push(`            // [STEP ${stepNum}] skip type on non-editable element`);
     } else {
-      // Click
-      // 우클릭/더블클릭 재생용 osClick 인자. doubleClick 앞에 agent가 동일 좌표의
-      // 단일 click 이벤트를 별도로 방출하는 경우가 있는데, 여기선 dedupe하지 않는다(스코프 외).
-      const btnArg = e.action === 'rightClick' ? `, 'right'`
-                   : e.action === 'doubleClick' ? `, 'left', 2`
-                   : '';
+      // Click / DoubleClick — XPath-only (2026-07-10: 좌표 재생 전면 금지).
+      // doubleClick 구성 클릭(agent가 동일 좌표에 별도로 방출하는 선행 click들)은
+      // dedupeDoubleClicks()가 filtered 생성 시점에 이미 걷어냈으므로, 여기
+      // 도달하는 doubleClick은 항상 단일 스텝이다.
+      const dbl = e.action === 'doubleClick';
+      if (!sel) {
+        // 셀렉터도 anchor도 없는 이벤트(예: light-dismiss 오버레이 레이스)는
+        // 재생 수단이 없다 — 조용히 건너뛰면 이후 플로우가 어긋난 채 PASSED로
+        // 남을 수 있으므로(거짓 통과), 명시적 실패로 기록한다.
+        testSteps.push(
+`            // [STEP ${stepNum}] ${e.action}: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
+            _failures.push('${stepNum}:${e.action}:no-selector');`
+        );
+        return;
+      }
       if (useSession) {
-        const nativeScoped = !e.isElectron && winTitle && sel;
-        if (nativeScoped) {
-          // Non-Electron native window: scoped session → getCenter → osClick.
-          // Gives current element coordinates even if window has moved.
-          pageMethods.push(
-`    async click${stepNum}() {
-        let s = await getWindowSession('${titleArg}');
-        let c = await getCenter(s.sid, s.rootElId, ${sel});
-        if (!c) {
-            delete _sessionIds['${titleArg}'];
-            s = await getWindowSession('${titleArg}');
-            c = await getCenter(s.sid, s.rootElId, ${sel});
-        }
-        if (!c) { _failures.push('click${stepNum}:coord-fallback'); }
-        c = c ?? { x: ${x}, y: ${y} };
-        osClick(c.x, c.y${btnArg});
-    }`
-          );
-        } else if (hasRel && relTitle) {
-          // 창-상대 좌표를 런타임 창 원점 기준으로 재생 (창 이동/다이얼로그 위치 변화 대응).
-          // Electron은 타이틀이 파일별로 바뀌므로 공통 부분문자열(winFrag)을,
-          // 네이티브 창(다이얼로그 포함)은 타이틀이 안정적이므로 relTitle(빈 경우 직전
-          // 타이틀 승계) 그대로 사용.
-          const relFrag = electronCtx ? winFrag : relTitle;
-          pageMethods.push(
-`    async click${stepNum}() {
-        osClickRel('${escapeStr(relFrag)}', ${e.relX}, ${e.relY}, ${x}, ${y}${btnArg});
-    }`
-          );
-        } else {
-          // 최후 폴백: 녹화 절대좌표.
-          pageMethods.push(
-`    async click${stepNum}() {
-        osClick(${x}, ${y}${btnArg});
-    }`
-          );
-        }
-      } else if (!useSession && hasRel && relTitle && trustLiveSelector(sel, e.element)) {
-        // A genuinely short, unique automationId (not a QML dotted path) —
-        // safe to trust getCenterSimple's live resolve first, with the
-        // recorded rel-offset (unique per step, window-move-safe) as fallback.
+        // HWND 세그먼트: 이 이벤트가 속한 창의 세션 컨텍스트로 전환한 뒤
+        // (getWindowSession — 필요 시 scoped 세션 생성/Root 폴백) 그 안에서
+        // 셀렉터를 라이브 조회해 element/click(UIA Invoke)한다.
         pageMethods.push(
 `    async click${stepNum}() {
-        const c = await getCenterSimple(${sel});
-        if (c) osClick(c.x, c.y${btnArg});
-        else osClickRel(${JSON.stringify(relTitle)}, ${e.relX ?? 0}, ${e.relY ?? 0}, ${x}, ${y}${btnArg});
+        await _clickScoped('${escapeStr(relTitle)}', ${sel}${dbl ? ', true' : ''});
     }`
         );
-      } else if (!useSession && hasRel && relTitle) {
-        // Qt/QML className-only (or any non-automationId) selectors are NOT
-        // unique within the window — getCenterSimple's browser.$() only ever
-        // returns the FIRST match, which silently clicks the wrong instance
-        // whenever the same class/xpath appears more than once (confirmed
-        // 2026-07-06: 4 different FreeDM clicks all resolved to the same
-        // BaseLabel_QMLTYPE_11 node). The recorded rel-offset is unique per
-        // step and shares osClick's coordinate space, so skip getCenterSimple
-        // entirely and use it as the PRIMARY path here, not a fallback.
-        pageMethods.push(
-`    async click${stepNum}() {
-        osClickRel(${JSON.stringify(relTitle)}, ${e.relX}, ${e.relY}, ${x}, ${y}${btnArg});
-    }`
-        );
-      } else if (sel && isQtControl(e.element)) {
-        // No recorded rel offset available (older capture) — fall back to
-        // live XPath resolve. NOTE: unsafe for non-unique selectors (see
-        // above), but there's no rel data to prefer instead.
-        pageMethods.push(
-`    async click${stepNum}() {
-        const c = await getCenterSimple(${sel});
-        if (c) osClick(c.x, c.y${btnArg});
-        else osClick(${x}, ${y}${btnArg});
-    }`
-        );
-      } else if (sel) {
-        // Simple mode: pure XPath click, no coordinates. getRect() (DPI-aware)
-        // fed into SetCursorPos (DPI-unaware) was producing off-target clicks
-        // whenever the window had moved since recording — dropping coordinates
-        // for a stable XPath selector removes that scaling error entirely.
-        // NOTE: no moveTo() before click() — WinAppDriver's Actions endpoint
-        // rejects mouse pointerMove ("only pen and touch pointer input source
-        // types are supported"), confirmed live 2026-07-06: every click paid a
-        // 3x-retry penalty then fell back to osClick anyway, silently
-        // defeating the XPath-only goal. el.click() (UIA Invoke) works fine
-        // for standard Win32/UWP controls (verified on Calculator); Qt/QML
-        // controls are routed to the branch above instead.
-        // If the xpath lookup or click() fails for any reason (stale
-        // selector), fall back to the recorded absolute coordinates and say
-        // so loudly.
-        const clickCall = e.action === 'rightClick'
-          ? `await el.click({ button: 'right' });`
-          : e.action === 'doubleClick'
-            ? `await el.click();\n            await el.click();`
-            : `await el.click();`;
-        {
-          const fallbackClick = !useSession && hasRel && relTitle
-            ? `osClickRel(${JSON.stringify(relTitle)}, ${e.relX ?? 0}, ${e.relY ?? 0}, ${x}, ${y}${btnArg})`
-            : `osClick(${x}, ${y}${btnArg})`;
-          pageMethods.push(
-`    async click${stepNum}() {
-        try {
-            const el = await browser.$(${sel});
-            await el.waitForExist({ timeout: 8000 });
-            ${clickCall}
-        } catch (e) {
-            console.warn('[click${stepNum}] xpath click failed, falling back:', String(e.message || e).substring(0, 100));
-            ${fallbackClick};
-        }
-    }`
-          );
-        }
       } else {
-        const fallbackClick = !useSession && hasRel && relTitle
-          ? `osClickRel(${JSON.stringify(relTitle)}, ${e.relX ?? 0}, ${e.relY ?? 0}, ${x}, ${y}${btnArg})`
-          : `osClick(${x}, ${y}${btnArg})`;
+        // Simple mode: pure XPath click via el.click() (UIA Invoke) — verified
+        // on Calculator (session 13). NOTE: no moveTo() before click() —
+        // WinAppDriver's Actions endpoint rejects mouse pointerMove ("only pen
+        // and touch pointer input source types are supported"). A lookup/click
+        // failure propagates to _step()'s Fail-and-Recover (popup dismiss +
+        // one retry) and then fails the test — no coordinate fallback exists.
+        const secondClick = dbl ? `\n        await el.click();` : '';
         pageMethods.push(
 `    async click${stepNum}() {
-        ${fallbackClick};
+        const el = await browser.$(${sel});
+        await el.waitForExist({ timeout: 8000 });
+        await el.click();${secondClick}
     }`
         );
       }
@@ -1838,8 +2003,16 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
             expect(_failures).toEqual([]);`;
 
   const header   = useSession ? SESSION_HEADER : SIMPLE_HEADER;
-  const launchCall = (useSession && exePath && winFragOk)
-    ? `        await launchApp(${JSON.stringify(exePath)}, ${JSON.stringify(newWindowArgsFor(exePath))}, ${JSON.stringify(winFrag)}, ${JSON.stringify(recordedRect)});\n`
+  // launchApp identifies the NEW window this run creates (baseline/diff on
+  // titleFrag) so replay targets it instead of a stale leftover window from
+  // a previous recording/run — previously this only fired for Electron
+  // (winFrag), so any native multi-window app (e.g. Notepad) replayed
+  // against whatever window with a matching title happened to still be
+  // open, title-content drift and all (confirmed 2026-07-08: Notepad replay
+  // reused the exact leftover hwnd from the prior recording session).
+  const launchFrag = winFragOk ? winFrag : groupTitle(filtered[0] || {}, 0);
+  const launchCall = (useSession && exePath && launchFrag)
+    ? `        await launchApp(${JSON.stringify(exePath)}, ${JSON.stringify(newWindowArgsFor(exePath))}, ${JSON.stringify(launchFrag)}, ${JSON.stringify(recordedRect)});\n`
     : '';
 
   // Simple mode has no launchApp/foreground step of its own — the freshly
@@ -1854,9 +2027,7 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
   // Best available fragment identifying the main app window, for
   // osDismissPopup()'s owner-PID scoping (session mode only — simple mode
   // uses _appHwnd directly, already resolved by initAppHwnd()).
-  const mainTitleFrag = useSession
-    ? (winFragOk ? winFrag : (filtered.find(e => e.element?.windowTitle)?.element?.windowTitle || ''))
-    : '';
+  const mainTitleFrag = useSession ? launchFrag : '';
 
   const beforeHook = useSession ? `
     beforeAll(async () => {
@@ -1873,7 +2044,7 @@ ${launchCall}    });
     afterAll(async () => {
         for (const { sid } of Object.values(_sessionIds)) {
             if (sid === browser.sessionId) continue;
-            try { await fetch(\`\${_APPIUM}/session/\${sid}\`, { method: 'DELETE' }); } catch {}
+            try { await _appiumFetch(\`/session/\${sid}\`, { method: 'DELETE' }, 5000); } catch {}
         }
     });
 ` : '';
@@ -2001,14 +2172,35 @@ function safeName(str) {
 
 // ── 파일 저장 ────────────────────────────────────────────────────────────────
 
+// 더 이상 생성하지 않는 좌표 주입 헬퍼(2026-07-10 좌표 실행 전면 금지) — 이전
+// 세대 generate가 남긴 파일이 폴더에 있으면 재생성 시점에 지운다.
+const OBSOLETE_FILES = ['osClick.ps1', 'osDrag.ps1'];
+
 function saveFiles(files, dir) {
   const savedPaths = [];
   let saveError;
   try {
     fs.mkdirSync(dir, { recursive: true });
+    for (const name of OBSOLETE_FILES) {
+      const fp = path.join(dir, name);
+      if (fs.existsSync(fp)) {
+        fs.unlinkSync(fp);
+        console.log('[saveFiles] removed obsolete', name);
+      }
+    }
     for (const f of files) {
       const fp = path.join(dir, f.filename);
-      fs.writeFileSync(fp, f.content, 'utf8');
+      // powershell -File reads a BOM-less file as the system ANSI codepage
+      // (CP949 here), not UTF-8 — mangling every Korean literal (e.g.
+      // osDismissPopup.ps1's '취소'/'아니요'/'닫기'/'확인'/'예' button names)
+      // into mojibake that breaks the PS parser outright (confirmed
+      // 2026-07-08: 2 parse errors, "Unexpected token" from a swallowed
+      // closing quote). A leading UTF-8 BOM makes PowerShell read it
+      // correctly; harmless no-op for the ASCII-only .ps1 helpers.
+      const content = f.filename.endsWith('.ps1') && !f.content.startsWith('﻿')
+        ? '﻿' + f.content
+        : f.content;
+      fs.writeFileSync(fp, content, 'utf8');
       savedPaths.push(fp);
     }
   } catch (e) {
@@ -2048,16 +2240,18 @@ app.post('/api/generate', (req, res) => {
 
     const confContent = buildWdioConf(exe || name, wdioFiles.map(f => f.filename), useSession);
     const confFile    = { filename: 'wdio.conf.js', content: confContent };
-    const ps1File     = { filename: 'osClick.ps1',  content: OS_CLICK_PS1 };
-    const dragPs1File   = { filename: 'osDrag.ps1',   content: OS_DRAG_PS1 };
+    // 좌표 주입 헬퍼(osClick.ps1/osDrag.ps1)는 더 이상 생성하지 않는다
+    // (2026-07-10 좌표 실행 전면 금지). osScroll.ps1은 ScrollPattern +
+    // PostMessage 휠 폴백의 프로그래매틱 스크롤로 교체됨.
     const scrollPs1File = { filename: 'osScroll.ps1', content: OS_SCROLL_PS1 };
     const winRectPs1File = { filename: 'osWindowRect.ps1', content: OS_WINRECT_PS1 };
     const moveWinPs1File = { filename: 'osMoveWindow.ps1', content: OS_MOVEWINDOW_PS1 };
     const typePs1File    = { filename: 'osType.ps1',       content: OS_TYPE_PS1 };
     const activatePs1File = { filename: 'osActivate.ps1',  content: OS_ACTIVATE_PS1 };
     const dismissPopupPs1File = { filename: 'osDismissPopup.ps1', content: OS_DISMISS_POPUP_PS1 };
+    const escapePs1File = { filename: 'osEscape.ps1', content: OS_ESCAPE_PS1 };
     const { savedPaths: wdioPaths, saveError: wdioErr } = saveFiles(
-      [...wdioFiles, confFile, ps1File, dragPs1File, scrollPs1File, winRectPs1File, moveWinPs1File, typePs1File, activatePs1File, dismissPopupPs1File], wdioOutDir
+      [...wdioFiles, confFile, scrollPs1File, winRectPs1File, moveWinPs1File, typePs1File, activatePs1File, dismissPopupPs1File, escapePs1File], wdioOutDir
     );
 
     const warnings = !exe ? ['exePath missing — launchApp will be skipped'] : [];

@@ -1,4 +1,4 @@
-param([string]$b64)
+﻿param([string]$b64)
 Add-Type -AssemblyName System.Windows.Forms
 $text = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($b64))
 $special = '+^%~(){}[]'
