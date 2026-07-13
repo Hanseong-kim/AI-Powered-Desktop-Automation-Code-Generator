@@ -1,4 +1,4 @@
-# 2026-07-10 PoC 결과 — 좌표 없는 UIA 자동화 기술 검증
+# PoC 결과 — 좌표 없는 UIA 자동화 기술 검증 (2026-07-10 실행, 07-12 ③ E2E 완주)
 
 3건의 PoC를 이 머신에서 직접 실행해 검증. 스크립트는 이 폴더에 보존.
 모두 **admin 권한 없이, WinAppDriver/Appium REST를 직접 호출**하는 standalone
@@ -70,8 +70,45 @@ switchToWindow" 대안은 WinAppDriver에서 지원 안 됨(실측 확인).**
   측 메커니즘의 한계를 추가로 규명한 것.
 - 다이얼로그를 실제로 열어 hwnd 전환까지 end-to-end로 트리거하는 부분은 Paint의
   WinUI3 메뉴가 `InvokePattern`으로 안 열려(`ExpandCollapsePattern` 등 별도
-  처리 필요) 이번 세션에서 완주하지 못함 — **미해결 잔여 항목**, 다음 세션에서
-  native 앱(PuTTY 등 전통적 Win32 메뉴) 대상으로 재시도 권장.
+  처리 필요) 이번 세션에서 완주하지 못함 — **→ 2026-07-12 완주 완료, 아래 섹션.**
+
+## PoC ③ E2E 완주 (2026-07-12 추가, `poc3_dialog_e2e.py`)
+
+```
+python poc/poc3_dialog_e2e.py     # admin 불필요, comtypes만 필요
+```
+
+**결과: 성공 — 보조 창 열기 → 고유 HWND 캡처 → 그 창 컨텍스트 격리 클릭까지
+전 구간 통과.** 실측 출력:
+
+```
+[1] explorer hwnd=0x1209fc class=CabinetWClass title='poc - 파일 탐색기'
+[2] found ListItem 'FINDINGS' — SetFocus + SelectionItemPattern.Select() (no coords)
+[3] opening Properties via Alt+Enter (keyboard — no coords)
+[4] NEW dialog hwnd=0x12d0b0a class=#32770 title='FINDINGS 속성'
+[5a] '취소' scoped to the EXPLORER window subtree: not found — isolation holds
+[5b] '취소' resolved INSIDE the captured dialog subtree — invoking via UIA
+     InvokePattern (element click, no coords)
+[5b] dialog closed after scoped click: YES
+```
+
+- 대상: Explorer(항상 비승격, 현대적 UIA — PoC ②와 동일 앱). 파일 항목을
+  **UIA `SelectionItemPattern`으로 선택**(요소 기반), Alt+Enter로 속성
+  다이얼로그 오픈, `EnumWindows` 차분으로 **새 `#32770` hwnd 캡처**, '취소'
+  버튼을 **캡처한 hwnd의 UIA 서브트리에만 스코프**해 발견·Invoke(요소 클릭).
+  같은 쿼리를 메인 창 서브트리에 스코프하면 미발견 — 격리 실증.
+  `SetCursorPos`/`mouse_event`/픽셀 좌표 0회.
+- 스택: **COM IUIAutomation(comtypes) — 프로덕션 `agent.py`와 동일**. .NET
+  `System.Windows.Automation`(managed UIA)로 먼저 시도했으나 MSAA 프록시가
+  약해 레거시 컨트롤 내부(리스트 행, 툴바 버튼)를 전혀 노출하지 못함을 실측
+  — managed 버전 스크립트는 폐기, COM이 정답(제품 스택 선택의 타당성 재확인).
+- **1차 대상이었던 `services.msc`(MMC)를 배제한 사유 (실측 2건)**:
+  ① 이 머신에서 `highestAvailable` 매니페스트로 **승격 실행**됨 → 비승격
+  스크립트의 UIA 자식 조회·키 주입이 UIPI에 전부 차단(PoC ①의 regedit 트랩과
+  동일 — `Stop-Process`도 Access denied). ② 승격을 떠나 가상(LVS_OWNERDATA)
+  `SysListView32`는 UIA 행 아이템 자체를 노출하지 않음(.NET/COM 공통).
+  → 레거시 MMC류는 자동화 대상으로 부적합; 스테이크홀더 권장 목록
+  (FileZilla/PuTTY/7-Zip — 모두 비승격 + 표준 컨트롤)과 정합적.
 
 ## 부작용 / 안전 관련 메모 (스테이크홀더 무관, 내부 기록용)
 
