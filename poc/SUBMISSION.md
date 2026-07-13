@@ -1,54 +1,58 @@
-# PoC 제출 — 좌표 없는 UIA 데스크톱 자동화 기술 검증 3건
+# PoC Submission — Technical Validation of 3 Coordinate-Free UIA Desktop Automation Capabilities
 
-제출일: 2026-07-12 · 상세 실측 기록: [`FINDINGS.md`](FINDINGS.md)
+Submitted: 2026-07-12 · Detailed measurement log: [`FINDINGS.md`](FINDINGS.md)
 
-요구된 3건 모두 이 저장소의 독립 실행 스크립트로 재현 가능하며, admin 권한
-없이 동작합니다. 전 과정에서 `SetCursorPos`/`mouse_event`/픽셀 좌표 사용 0회.
-
----
-
-## ① .exe 실행 → 요소 클릭 → AutomationId/ClassName 기반 clean XPath 캡처
-
-**결론: 가능 — 스크립트 실측 + 제품 파이프라인 GUI 통과로 이중 증명.**
-
-| 증거 | 내용 |
-|---|---|
-| `dumpUia.ps1` | `powershell -File poc/dumpUia.ps1 -ProcessName <이름>` — 실행 중인 앱의 UIA 트리를 덤프해 AutomationId/ClassName 노출을 확인. services.msc에서 native Win32 컨트롤의 숫자 AutomationId(`SysListView32` id=12786 등) 라이브 확인 |
-| 제품 E2E (2026-07-12) | 녹화→생성→재생 전체 파이프라인이 실제 GUI에서 통과: **Calculator 2 passed, Notepad 2 passed** (`npx wdio run`). 캡처된 clean XPath 예시 — `//Button[@ClassName="Button" and @Name="새 탭 추가"]`, `//MenuItem[@ClassName="Microsoft.UI.Xaml.Controls.MenuBarItem" and @Name="보기"]`, `~num7Button`(AutomationId). 수동 보정 없이 그대로 재생에 사용됨 |
-
-**Caveat**: 관리자 매니페스트 앱(regedit 등)은 비승격 프로세스에서 자식 노드가
-UIPI에 차단됨 — 도구 결함이 아닌 대상 앱 속성이며, 캡처 agent를 관리자로
-실행하는 현 운영 방식으로 해소됨.
+All 3 required items are reproducible via the standalone scripts in this
+repository, and all run without admin rights. Zero uses of
+`SetCursorPos`/`mouse_event`/pixel coordinates across the entire process.
 
 ---
 
-## ② UIA/InputSimulator로 픽셀 계산 없이 native 요소 스크롤
+## ① Launch .exe → click element → capture clean AutomationId/ClassName-based XPath
 
-**결론: 가능 — ScrollPattern 1차 + hwnd-scoped PostMessage 휠 폴백의 2단
-전략으로 실측 완료.**
+**Conclusion: possible — doubly proven via script measurement + product pipeline
+passing the GUI.**
 
-| 증거 | 내용 |
+| Evidence | Details |
 |---|---|
-| `uiaScrollExplorer.ps1` | `powershell -File poc/uiaScrollExplorer.ps1 -TitleSubstring <창제목>` — Explorer 리스트에서 `ScrollPattern.Scroll()` 호출, `VerticalScrollPercent` **0 → 0.374** 실측 변화. 픽셀 API 0회 |
-| 제품 반영 (osScroll.ps1) | 위 전략이 이미 프로덕션 재생 헬퍼로 구현됨 — 캡처 시점에 기록한 스크롤 컨테이너를 UIA로 재탐색 후 ScrollPattern 호출, 미지원 레거시 컨트롤만 `PostMessageW(WM_MOUSEWHEEL)` 폴백. Explorer 라이브 실측 통과(0→0.17) |
+| `dumpUia.ps1` | `powershell -File poc/dumpUia.ps1 -ProcessName <name>` — dumps the UIA tree of a running app to confirm AutomationId/ClassName exposure. Live-confirmed numeric AutomationIds on native Win32 controls in services.msc (`SysListView32` id=12786, etc.) |
+| Product E2E (2026-07-12) | The full record → generate → replay pipeline passed on the actual GUI: **Calculator 2 passed, Notepad 2 passed** (`npx wdio run`). Example clean XPaths captured — `//Button[@ClassName="Button" and @Name="새 탭 추가"]`, `//MenuItem[@ClassName="Microsoft.UI.Xaml.Controls.MenuBarItem" and @Name="보기"]`, `~num7Button` (AutomationId). Used as-is in replay with no manual correction |
 
-**Caveat(실측으로 발견)**: 레거시 컨트롤(MMC ListView, CharGrid)은 ScrollPattern
-미노출 → 폴백 필요. 폴백은 반드시 **PostMessage(비동기)** — 동기 `SendMessageW`는
-테스트 중 charmap.exe를 크래시시킴.
+**Caveat**: apps with an admin manifest (e.g. regedit) have their child nodes
+blocked by UIPI when run from a non-elevated process — this is a property of
+the target app, not a tool defect, and is resolved by the current operating
+practice of running the capture agent as admin.
 
 ---
 
-## ③ 보조 창/팝업 열기 → 고유 HWND 캡처 → 그 창 컨텍스트 안에서만 클릭 격리
+## ② Scroll a native element via UIA/InputSimulator without pixel math
 
-**결론: 가능 — E2E 전 구간 실측 통과 (2026-07-12).**
+**Conclusion: possible — verified with live measurements via the two-tier
+strategy of ScrollPattern first, hwnd-scoped PostMessage wheel fallback second.**
 
-| 증거 | 내용 |
+| Evidence | Details |
 |---|---|
-| `poc3_dialog_e2e.py` | `python poc/poc3_dialog_e2e.py` — ① 탐색기에서 파일 항목을 UIA `SelectionItemPattern`으로 선택(요소 기반), ② 속성 다이얼로그 오픈, ③ **새 최상위 `#32770` HWND를 EnumWindows 차분으로 캡처**, ④ '취소' 버튼 쿼리가 **메인 창 서브트리에선 미발견, 캡처한 HWND 서브트리에서만 발견** → UIA Invoke로 클릭 → 다이얼로그 닫힘 확인 |
-| `poc3_hwndSegment.ps1` | WinAppDriver 세션의 `window_handles`가 세션 생성 시점 hwnd 1개에 고정됨을 실측 — "새 창마다 새 scoped 세션" 방식(제품이 이미 채택)이 우회책이 아니라 WAD 제약상 필연적 설계임을 증명 |
-| 제품 반영 | 캡처 측 HWND 세그먼팅(새 hwnd 감지 → 이벤트 격리)과 재생 측 창별 scoped 세션은 이미 `agent.py`/`server.js`에 구현·GUI 검증됨(다중창 시나리오, 2026-07-08) |
+| `uiaScrollExplorer.ps1` | `powershell -File poc/uiaScrollExplorer.ps1 -TitleSubstring <window title>` — calls `ScrollPattern.Scroll()` on the Explorer list, measured `VerticalScrollPercent` change of **0 → 0.374**. Zero pixel APIs |
+| Product implementation (osScroll.ps1) | The above strategy is already implemented as the production replay helper — re-resolves the scroll container captured at record time via UIA, calls ScrollPattern, and only falls back to `PostMessageW(WM_MOUSEWHEEL)` for unsupported legacy controls. Passed a live measurement on Explorer (0→0.17) |
 
-실측 출력(발췌):
+**Caveat (found via measurement)**: legacy controls (MMC ListView,
+CharGrid) do not expose ScrollPattern → fallback required. The fallback must
+be **PostMessage (asynchronous)** — the synchronous `SendMessageW` crashed
+charmap.exe during testing.
+
+---
+
+## ③ Open a secondary window/popup → capture its unique HWND → isolate clicks to that window's context only
+
+**Conclusion: possible — full E2E measured and passed (2026-07-12).**
+
+| Evidence | Details |
+|---|---|
+| `poc3_dialog_e2e.py` | `python poc/poc3_dialog_e2e.py` — ① selects a file item in Explorer via UIA `SelectionItemPattern` (element-based), ② opens the Properties dialog, ③ **captures the new top-level `#32770` HWND via an EnumWindows diff**, ④ a query for the 'Cancel' button is **not found scoped to the main window's subtree, only found scoped to the captured HWND's subtree** → clicked via UIA Invoke → dialog close confirmed |
+| `poc3_hwndSegment.ps1` | Measured that a WinAppDriver session's `window_handles` is pinned to the single hwnd the session was created on — proving that the "new scoped session per new window" approach (already adopted by the product) is not a workaround but a necessary design given WAD's constraints |
+| Product implementation | HWND segmentation on the capture side (detect new hwnd → isolate events) and per-window scoped sessions on the replay side are already implemented and GUI-verified in `agent.py`/`server.js` (multi-window scenario, 2026-07-08) |
+
+Measured output (excerpt):
 
 ```
 [2] found ListItem 'FINDINGS' — SetFocus + SelectionItemPattern.Select() (no coords)
@@ -59,20 +63,23 @@ UIPI에 차단됨 — 도구 결함이 아닌 대상 앱 속성이며, 캡처 ag
 [5b] dialog closed after scoped click: YES
 ```
 
-**Caveat(실측으로 발견, 대상 앱 선정에 반영)**: MMC(services.msc)류 레거시
-앱은 ① 승격 실행(UIPI 차단), ② 가상 리스트뷰가 UIA 아이템 미노출로 자동화
-부적합 — 권장 테스트 앱 목록(FileZilla/PuTTY/7-Zip: 비승격 + 표준 컨트롤)이
-기술적으로도 올바른 선정임을 확인.
+**Caveat (found via measurement, reflected in target-app selection)**:
+legacy MMC-style apps (services.msc) are unsuitable for automation because
+① they run elevated (UIPI-blocked) and ② their virtual list views don't
+expose UIA items — confirming that the recommended test-app list
+(FileZilla/PuTTY/7-Zip: non-elevated + standard controls) is technically the
+right choice as well.
 
 ---
 
-## 종합
+## Summary
 
-| 요구 | 판정 | 핵심 증거 |
+| Requirement | Verdict | Key evidence |
 |---|---|---|
-| ① clean XPath 캡처 | **가능** | 제품 GUI 통과(Calculator/Notepad) + dumpUia.ps1 |
-| ② 픽셀 없는 스크롤 | **가능** | ScrollPattern 실측 0→0.374 + 프로덕션 osScroll.ps1 |
-| ③ HWND 격리 | **가능** | poc3_dialog_e2e.py E2E 통과 + WAD 제약 실증 |
+| ① Clean XPath capture | **Possible** | Passed on product GUI (Calculator/Notepad) + dumpUia.ps1 |
+| ② Pixel-free scroll | **Possible** | ScrollPattern measured 0→0.374 + production osScroll.ps1 |
+| ③ HWND isolation | **Possible** | poc3_dialog_e2e.py E2E passed + WAD constraint proven |
 
-세 기술 모두 독립 스크립트로 증명됐고, ①②③ 전부 이미 본 제품 파이프라인에
-반영되어 실제 GUI 테스트(Calculator/Notepad 2 passed)까지 통과한 상태입니다.
+All three techniques have been proven with independent scripts, and all of
+①②③ are already reflected in the product pipeline itself, which has passed
+actual GUI tests (Calculator/Notepad 2 passed).

@@ -1,31 +1,34 @@
-"""PoC 3 E2E — 보조 창(속성 다이얼로그) 열기 → 고유 HWND 캡처 → 그 창 컨텍스트
-안에서만 클릭 격리 (2026-07-12, 07-10 미완주분 완주).
+"""PoC 3 E2E — open a secondary window (Properties dialog) → capture its
+unique HWND → isolate clicks strictly within that window's context
+(2026-07-12, completes the part left unfinished on 07-10).
 
-대상: Windows 탐색기 (Explorer — 항상 비승격, 현대적 UIA 노출; PoC 2에서
-      ScrollPattern 실측에 사용한 것과 같은 앱)
-스택: COM IUIAutomation (comtypes) — 프로덕션 agent.py와 동일한 UIA 스택.
+Target: Windows Explorer (always non-elevated, modern UIA exposure; the same
+        app used for the ScrollPattern measurement in PoC 2)
+Stack: COM IUIAutomation (comtypes) — same UIA stack as production agent.py.
 
-흐름:
-  1. 탐색기로 이 저장소의 poc/ 폴더 열기 → CabinetWClass hwnd 확보
-     → 최상위 hwnd 베이스라인 스냅샷
-  2. 파일 목록에서 FINDINGS.md ListItem을 UIA로 찾아 SetFocus +
-     SelectionItemPattern.Select() (요소 기반 선택 — 좌표 0회)
-  3. Alt+Enter(키보드 가속기)로 속성 다이얼로그 오픈
-  4. EnumWindows 차분으로 새 최상위 #32770 hwnd 캡처
-  5. 격리 증명: '취소' 버튼 쿼리를 탐색기 창 서브트리에 스코프 → 미발견,
-     캡처한 다이얼로그 hwnd 서브트리에 스코프 → 발견 → UIA Invoke(요소
-     클릭) → 다이얼로그 닫힘 확인
-  6. 정리: 탐색기 창을 PostMessage(WM_CLOSE)로 종료
+Flow:
+  1. Open this repo's poc/ folder in Explorer → obtain the CabinetWClass hwnd
+     → take a baseline snapshot of top-level hwnds
+  2. Find the FINDINGS.md ListItem in the file list via UIA, then SetFocus +
+     SelectionItemPattern.Select() (element-based selection — zero coordinates)
+  3. Open the Properties dialog via Alt+Enter (keyboard accelerator)
+  4. Capture the new top-level #32770 hwnd via an EnumWindows diff
+  5. Prove isolation: scope a 'Cancel' button query to the Explorer window's
+     subtree → not found; scope it to the captured dialog hwnd's subtree →
+     found → UIA Invoke (element click) → confirm the dialog closes
+  6. Cleanup: close the Explorer window via PostMessage(WM_CLOSE)
 
-전 과정에서 SetCursorPos / mouse_event / 픽셀 좌표 사용 0회.
+Zero uses of SetCursorPos / mouse_event / pixel coordinates throughout.
 
-시도했다가 배제한 대상 (2026-07-12 실측, 제출문서에 기록):
-  - services.msc(MMC): 이 머신에서 highestAvailable 매니페스트로 승격 실행됨
-    → 비승격 스크립트에서 UIPI가 UIA 자식 조회/키 주입 모두 차단 (PoC 1의
-    regedit 트랩과 동일). 또한 가상(LVS_OWNERDATA) SysListView32는 승격을
-    떠나 UIA 행 아이템을 노출하지 않음.
+Targets attempted then excluded (measured 2026-07-12, recorded in the
+submission doc):
+  - services.msc (MMC): runs elevated on this machine per a highestAvailable
+    manifest → UIPI blocks all UIA child queries/key injection from a
+    non-elevated script (same as the regedit trap in PoC 1). Also, the
+    virtual (LVS_OWNERDATA) SysListView32 doesn't expose UIA row items,
+    elevation aside.
 
-실행: python poc/poc3_dialog_e2e.py   (admin 불필요)
+Run: python poc/poc3_dialog_e2e.py   (no admin required)
 """
 import ctypes
 import os

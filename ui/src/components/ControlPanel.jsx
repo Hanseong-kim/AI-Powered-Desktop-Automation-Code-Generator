@@ -9,6 +9,9 @@ const PRESETS = [
   // explorer shell:AppsFolder (avoids ACL/version/activation breakage).
   { label: 'Paint (UWP)',      appName: 'Paint',            exePath: 'Microsoft.Paint_8wekyb3d8bbwe!App' },
   { label: 'Registry Editor',  appName: 'RegistryEditor',   exePath: 'C:\\Windows\\regedit.exe' },
+  // 2026-07-10 스테이크홀더 권장 native 앱 (비승격 + 표준 Win32 컨트롤)
+  { label: 'PuTTY',            appName: 'PuTTY',            exePath: 'C:\\Program Files\\PuTTY\\putty.exe' },
+  { label: 'FileZilla',        appName: 'FileZilla',        exePath: 'C:\\Program Files\\FileZilla FTP Client\\filezilla.exe' },
   { label: 'IDM',              appName: 'IDM',              exePath: 'C:\\Program Files (x86)\\Internet Download Manager\\IDMan.exe' },
   // NOTE: LOCALAPPDATA is not available in CRA bundles; path uses "user" as default username.
   // If your Windows profile is not "user", select "Custom..." and enter the correct path.
