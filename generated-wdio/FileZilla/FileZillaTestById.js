@@ -300,88 +300,62 @@ async function _step(label, fn) {
     await fn();
 }
 
-class PuTTYPageByClass {
+class FileZillaPageById {
     async click1() {
-        const el = await browser.$('//TreeItem[@Name="Appearance"]');
+        const el = await browser.$('//TreeItem[@Name="Program Files (x86)"]');
         await el.waitForExist({ timeout: 8000 });
         await el.click();
     }
 
     async click2() {
-        const el = await browser.$('//TreeItem[@Name="Behaviour"]');
+        const el = await browser.$('//TreeItem[@Name="ProgramData"]');
         await el.waitForExist({ timeout: 8000 });
         await el.click();
     }
 
     async click3() {
-        const el = await browser.$('//TreeItem[@Name="Translation"]');
+        const el = await browser.$('//TreeItem[@Name="Recovery"]');
         await el.waitForExist({ timeout: 8000 });
         await el.click();
     }
 
     async click4() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"ISO-8859-4:1998 (Latin-4, North Europe)"}, {"automationId":"DropDown","className":"","name":""});
+        const el = await browser.$('//TreeItem[@Name="tools"]');
+        await el.waitForExist({ timeout: 8000 });
+        await el.click();
     }
 
     async click5() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"UTF-8"}, {"automationId":"DropDown","className":"","name":""});
+        osExpandCollapse(_appHwnd, {"automationId":"","className":"","name":"파일(F)"}, "편집(E)");
     }
 
     async click6() {
-        const el = await browser.$('//TreeItem[@Name="Serial"]');
-        await el.waitForExist({ timeout: 8000 });
-        await el.click();
+        osExpandCollapse(_appHwnd, {"automationId":"","className":"","name":"보기(V)"}, "전송(T)");
     }
 
     async click7() {
-        const el = await browser.$('//TreeItem[@Name="Proxy"]');
-        await el.waitForExist({ timeout: 8000 });
-        await el.click();
-    }
-
-    async click8() {
-        const el = await browser.$('~DropDown');
-        await el.waitForExist({ timeout: 8000 });
-        await el.click();
-    }
-
-    async click9() {
-        const el = await browser.$('//RadioButton[@ClassName="Button" and @Name="Auto"]');
-        await el.waitForExist({ timeout: 8000 });
-        await el.click();
-    }
-
-    async click10() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"SSH to proxy and invoke a subsystem"}, {"automationId":"DropDown","className":"","name":""});
-    }
-
-    async click11() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"None"}, {"automationId":"DropDown","className":"","name":""});
+        osExpandCollapse(_appHwnd, {"automationId":"","className":"","name":"서버(S)"}, null);
     }
 }
 
-describe('PuTTYTestByClass', () => {
+describe('FileZillaTestById', () => {
     beforeAll(async () => {
         _warmupPowerShell();
         await initAppHwnd();
-        normalizeWindowSimple({"left":651,"top":264,"width":618,"height":551});
+        normalizeWindowSimple({"left":360,"top":35,"width":1200,"height":950});
     });
 
     it('should replay recorded flow', async () => {
-        const page = new PuTTYPageByClass();
+        const page = new FileZillaPageById();
 
-            osActivate("PuTTY Configuration");
-            await _step('1:click Appearance', () => page.click1());
-            await _step('2:click Behaviour', () => page.click2());
-            await _step('3:click Translation', () => page.click3());
-            await _step('4:click ISO-8859-4:1998 (Latin-4, North Europe) (cross-window)', () => page.click4());
-            await _step('5:click UTF-8 (cross-window)', () => page.click5());
-            await _step('6:click Serial', () => page.click6());
-            await _step('7:click Proxy', () => page.click7());
-            await _step('8:click 닫기', () => page.click8());
-            await _step('9:click Auto', () => page.click9());
-            await _step('10:click SSH to proxy and invoke a subsystem (cross-window)', () => page.click10());
-            await _step('11:click None (cross-window)', () => page.click11());
+            osActivate("FileZilla");
+            await _step('1:click Program Files (x86)', () => page.click1());
+            await _step('2:click ProgramData', () => page.click2());
+            await _step('3:click Recovery', () => page.click3());
+            await _step('4:click tools', () => page.click4());
+            await _step('5:expandCollapse 파일(F) -> 편집(E)', () => page.click5());
+            await _step('6:expandCollapse 보기(V) -> 전송(T)', () => page.click6());
+            await _step('7:expandCollapse 서버(S)', () => page.click7());
 
             if (_warnings.length) console.warn('[replay-warnings]', _warnings);
             expect(_failures).toEqual([]);

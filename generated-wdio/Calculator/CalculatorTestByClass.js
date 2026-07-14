@@ -22,7 +22,7 @@ function _warmupPowerShell() {
     }
 }
 
-// 프로그래매틱 스크롤 — osScroll.ps1이 추적된 top-level hwnd 아래에서 녹화된
+// 프로그래매틱 스크롤 — osScroll.py가 추적된 top-level hwnd 아래에서 녹화된
 // 컨테이너를 UIA로 찾아 ScrollPattern.Scroll()을 호출하고, ScrollPattern
 // 미지원 레거시 컨트롤에만 hwnd-scoped WM_MOUSEWHEEL을 PostMessageW로
 // 전달한다. 픽셀 좌표/물리 커서 주입 없음 (2026-07-10 좌표 실행 금지 지시).
@@ -35,13 +35,80 @@ function osScrollEl(hwnd, target, delta) {
     try {
         const selB64 = Buffer.from(JSON.stringify(target || {}), 'utf8').toString('base64');
         const out = execSync(
-            `powershell -NoProfile -File "${join(__dirname, 'osScroll.ps1')}" -hwnd ${hwnd} -selB64 "${selB64}" -delta ${delta}`,
+            `python "${join(__dirname, 'osScroll.py')}" --hwnd ${hwnd} --sel-b64 "${selB64}" --delta ${delta}`,
             { stdio: 'pipe', timeout: 20000 }
         ).toString().trim();
         if (out) console.log(out);
     } catch (e) {
         _failures.push('osScroll');
         console.warn('[osScroll] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).substring(0, 200));
+    }
+}
+
+// ExpandCollapsePattern 재생 — ComboBox 드롭다운/메뉴바 MenuItem/트리 +- 토글은
+// 일반 클릭(InvokePattern)만으로 재현 안 됨(2026-07-13 진단, poc/diag_expandcollapse.py
+// 실측: PuTTY ComboBox는 드롭다운이 안 열리고, FileZilla 메뉴바는 Expand()는
+// 성공해도 하위 항목이 새 최상위 팝업 창에 생겨 원래 서브트리에서 안 보임).
+// WinAppDriver REST를 거치지 않고 COM UIA로 직접 처리(osExpandCollapse.py —
+// comtypes, 레거시 SysTreeView32 TreeItem까지 보임; 2026-07-14 .NET managed UIA
+// 맹점 수정). 세션이 새 팝업 창을 못 보는 제약도 우회. itemName이 있으면 펼친
+// 뒤 그 항목을 찾아 Invoke, 없으면 펼치기/접기 자체만(트리 +- 토글).
+function osExpandCollapse(hwnd, target, itemName) {
+    if (!hwnd) {
+        _failures.push('osExpandCollapse:no-hwnd');
+        console.warn('[osExpandCollapse] no window hwnd — cannot expand without a window handle');
+        return;
+    }
+    try {
+        const selB64 = Buffer.from(JSON.stringify(target || {}), 'utf8').toString('base64');
+        const itemArg = itemName ? `--item-name-b64 "${Buffer.from(itemName, 'utf8').toString('base64')}"` : '';
+        const out = execSync(
+            `python "${join(__dirname, 'osExpandCollapse.py')}" --hwnd ${hwnd} --sel-b64 "${selB64}" ${itemArg}`,
+            { stdio: 'pipe', timeout: 20000 }
+        ).toString().trim();
+        if (out) console.log(out);
+    } catch (e) {
+        _failures.push('osExpandCollapse');
+        console.warn('[osExpandCollapse] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).substring(0, 200));
+    }
+}
+
+// 창-교차 클릭 재생 — 이벤트의 캡처 시점 창 크기/위치가 이 앱의 메인 창과
+// 다르면(2026-07-13, PuTTY "Remote character set:" 콤보박스 조사: 옆
+// "DropDown" 버튼 클릭으로 열리는 목록이 별도 최상위 창(Win32 클래스
+// "ComboLBox")으로 뜸 — FileZilla 메뉴 팝업과 같은 부류) 그 대상은
+// WinAppDriver 세션(메인 창에 스코프) 밖에 있다. osScopedInvoke.py가
+// COM UIA로 메인 창 → 그 외 모든 최상위 창 순으로 직접 찾아 Invoke.
+// triggerTarget이 있으면(버튼 클릭으로 여는 경우) 같은 스크립트 실행 안에서
+// 그 트리거를 먼저 클릭한 뒤 곧바로 항목을 검색한다 — 트리거 클릭과 항목
+// 검색을 별도 스텝(별도 프로세스)으로 쪼개면 그 사이 지연 동안 드롭다운이
+// 자동으로 닫혀버림을 실측으로 확인(2026-07-13 재현) — 한 프로세스 실행
+// 안에서 끊김 없이 처리해 그 레이스를 없앤다.
+function osScopedInvoke(hwnd, target, triggerTarget) {
+    if (!hwnd) {
+        _failures.push('osScopedInvoke:no-hwnd');
+        console.warn('[osScopedInvoke] no window hwnd — cannot search without a window handle');
+        return;
+    }
+    try {
+        const selB64 = Buffer.from(JSON.stringify(target || {}), 'utf8').toString('base64');
+        const triggerArg = triggerTarget
+            ? `--trigger-sel-b64 "${Buffer.from(JSON.stringify(triggerTarget), 'utf8').toString('base64')}"`
+            : '';
+        const out = execSync(
+            `python "${join(__dirname, 'osScopedInvoke.py')}" --hwnd ${hwnd} --sel-b64 "${selB64}" ${triggerArg}`,
+            { stdio: 'pipe', timeout: 20000 }
+        ).toString().trim();
+        if (out) console.log(out);
+    } catch (e) {
+        _failures.push('osScopedInvoke');
+        // stdout carries any WARN lines (e.g. trigger-not-found) written before
+        // the script's final Write-Error — surface both so the WARN isn't lost
+        // behind the terminal error (2026-07-14: this WARN is what pinpoints
+        // "dropdown never opened" vs. other reasons the item search failed).
+        const stdoutMsg = (e.stdout && e.stdout.toString().trim()) || '';
+        if (stdoutMsg) console.log(stdoutMsg);
+        console.warn('[osScopedInvoke] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).substring(0, 200));
     }
 }
 
@@ -173,14 +240,30 @@ function osEscape() {
     }
 }
 
+// Current foreground window handle (user32!GetForegroundWindow via a base64
+// -EncodedCommand — no quote-escaping, read-only). _step() uses it to decide
+// whether an ESC would land on a real popup or on the main dialog itself.
+function osForegroundHwnd() {
+    try {
+        const out = execSync(
+            `powershell -NoProfile -EncodedCommand QQBkAGQALQBUAHkAcABlACAAQAAiAAoAdQBzAGkAbgBnACAAUwB5AHMAdABlAG0AOwAKAHUAcwBpAG4AZwAgAFMAeQBzAHQAZQBtAC4AUgB1AG4AdABpAG0AZQAuAEkAbgB0AGUAcgBvAHAAUwBlAHIAdgBpAGMAZQBzADsACgBwAHUAYgBsAGkAYwAgAGMAbABhAHMAcwAgAEYAZwAgAHsAIABbAEQAbABsAEkAbQBwAG8AcgB0ACgAIgB1AHMAZQByADMAMgAuAGQAbABsACIAKQBdACAAcAB1AGIAbABpAGMAIABzAHQAYQB0AGkAYwAgAGUAeAB0AGUAcgBuACAASQBuAHQAUAB0AHIAIABHAGUAdABGAG8AcgBlAGcAcgBvAHUAbgBkAFcAaQBuAGQAbwB3ACgAKQA7ACAAfQAKACIAQAAgAC0ARQByAHIAbwByAEEAYwB0AGkAbwBuACAAUwBpAGwAZQBuAHQAbAB5AEMAbwBuAHQAaQBuAHUAZQAKAFsARgBnAF0AOgA6AEcAZQB0AEYAbwByAGUAZwByAG8AdQBuAGQAVwBpAG4AZABvAHcAKAApAC4AVABvAEkAbgB0ADYANAAoACkA`,
+            { stdio: 'pipe', timeout: 15000 }
+        ).toString().trim();
+        const m = out.match(/-?\d+/);
+        return m ? (parseInt(m[0], 10) || 0) : 0;
+    } catch (e) {
+        console.warn('[osForegroundHwnd] failed:', String(e.message || e).substring(0, 100));
+        return 0;
+    }
+}
+
 // Wraps a single replay step: on the happy path (no exception, no new
 // _failures entry) this costs nothing extra. On failure, scans for and
 // dismisses a known-shape popup that didn't exist at recording time (e.g.
 // FDM's "file already exists"), then retries the step ONCE. If no dismiss
-// button was found (e.g. an inline rename edit-box left open by a mistimed
-// double-click), falls back to osActivate + ESC to back out of whatever
-// modal input state grabbed focus, then retries once. If that still fails,
-// the original failure/exception stands untouched (no false PASSED).
+// button was found, it may ESC to back out of a transient modal state — but
+// only when a real popup (not the main dialog) holds the foreground; see below.
+// If recovery still fails, the original failure/exception stands (no false PASSED).
 async function _step(label, fn) {
     console.log('[STEP] ' + label);
     const before = _failures.length;
@@ -191,9 +274,27 @@ async function _step(label, fn) {
     if (dismissed) {
         _warnings.push('popup-dismissed:' + label);
     } else {
-        osActivate('');
-        osEscape();
-        _warnings.push('esc-recovery:' + label);
+        // No known popup button found. On a dialog-based main window (PuTTY
+        // Configuration) ESC == Cancel == close the app, so an unconditional
+        // ESC here nukes the whole run on the first failed step (confirmed
+        // 2026-07-14: the old osActivate('')+ESC closed PuTTY every time). Only
+        // ESC when a DIFFERENT top-level window (a real popup/dropdown) holds
+        // the foreground; if OUR main window is foreground there is nothing to
+        // dismiss and ESC would only kill the app — skip it.
+        const fg = osForegroundHwnd();
+        if (_appHwnd && fg === _appHwnd) {
+            _warnings.push('esc-skipped-main-foreground:' + label);
+        } else {
+            osEscape();
+            // Backstop: if ESC did land on a dialog-based window and closed the
+            // app, surface the ORIGINAL failure cleanly instead of a misleading
+            // no-such-window cascade (2026-07-13).
+            if (_appHwnd && !_resolveWinRect('')) {
+                _failures.push('esc-recovery-closed-app:' + label);
+                throw new Error(`ESC recovery closed the app window during step: ${label}`);
+            }
+            _warnings.push('esc-recovery:' + label);
+        }
     }
     _failures.length = before;
     await fn();

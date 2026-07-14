@@ -302,14 +302,99 @@ class UIAInspector:
                     aid = parent.CurrentAutomationId or ""
                 except Exception:
                     aid = ""
-                # 안정적 anchor 조건: 비어있지 않고, 런타임 슬롯 인덱스(순수
-                # 숫자)도 QML dotted path도 아닌 AutomationId.
-                if aid and not aid.isdigit() and "." not in aid:
+                # 안정적 anchor 조건: 비어있지 않고, QML dotted path가 아닌
+                # AutomationId. 순수 숫자 AutomationId는 부모가 가상화 리스트/
+                # 트리 아이템(런타임 슬롯 인덱스, 스크롤 시 값이 바뀜)일 때만
+                # 거부 — Win32 다이얼로그 컨트롤의 숫자 리소스 ID는 재시작해도
+                # 고정이라 anchor로 신뢰 가능 (2026-07-13, server.js
+                # SLOT_INDEX_CONTROL_TYPES와 동일 기준).
+                parent_ct = None
+                try:
+                    parent_ct = UIA_CONTROL_TYPES.get(parent.CurrentControlType)
+                except Exception:
+                    pass
+                is_slot_index = aid.isdigit() and parent_ct in ("ListItem", "TreeItem", "DataItem")
+                if aid and "." not in aid and not is_slot_index:
                     return aid, "".join(reversed(steps))
                 cur = parent
         except Exception:
             pass
         return None
+
+    # UIA_ExpandCollapsePatternId — ComboBox 드롭다운/메뉴바 MenuItem/트리 +-
+    # 토글 판별용. 2026-07-13 진단(poc/diag_expandcollapse.py)으로 실측:
+    # 셋 다 이 패턴을 지원하며, 일반 클릭(InvokePattern)만으로는 ComboBox
+    # 드롭다운이 안 열리거나(PuTTY) 하위 항목이 별도 최상위 팝업 창에 생겨
+    # 원래 요소 서브트리에서 안 보임(FileZilla 메뉴바, #32768 클래스).
+    EXPAND_COLLAPSE_PATTERN_ID = 10005
+
+    def has_expand_collapse(self, elem):
+        try:
+            return elem.GetCurrentPattern(self.EXPAND_COLLAPSE_PATTERN_ID) is not None
+        except Exception:
+            return False
+
+    # ControlType=Tree / TreeItem UIA constants.
+    CT_TREE = 50023
+    CT_TREE_ITEM = 50024
+
+    def tree_item_at_row(self, tree_elem, y):
+        """When a click lands in a TreeItem row's indent/glyph area (outside
+        every item's own label rect, so element_at() falls all the way back
+        to the whole Tree control), prefer the specific row whose vertical
+        band contains the click's y over the bare Tree — replaying a click
+        on the Tree's center is a wrong node depending on what's currently
+        painted there (confirmed 2026-07-13: PuTTY's Window +/- toggle fell
+        back to the whole 'Category:' Tree). Scans all TreeItem descendants
+        (not just direct children) since nested category rows are present in
+        the UIA tree regardless of visual expand state (2026-07-11 anchor
+        capture already relies on this)."""
+        try:
+            items = tree_elem.FindAll(4, self._uia.CreateTrueCondition())  # TreeScope_Descendants
+        except Exception:
+            return None
+        for i in range(items.Length):
+            it = items.GetElement(i)
+            try:
+                if it.CurrentControlType != self.CT_TREE_ITEM:
+                    continue
+                r = it.CurrentBoundingRectangle
+                if r.top <= y <= r.bottom:
+                    return it
+            except Exception:
+                continue
+        return None
+
+    def resolve_root_hwnd(self, elem, max_up=15):
+        """Walk ControlView ancestors from `elem` until one with its own
+        NativeWindowHandle is found, and return that hwnd (0 if none).
+
+        describe()'s windowTitle currently trusts elem's OWN hwnd only, and
+        falls back to GetForegroundWindow() when it's 0 (the common case for
+        UIA leaf elements) — that fallback can silently produce a *correct*
+        windowTitle for a *wrong* element (confirmed 2026-07-13: a PuTTY
+        capture's very first click resolved to an unrelated 'Calculator' Edit
+        element — bounding rect entirely outside the PuTTY window — while
+        windowTitle still read 'PuTTY Configuration' because that happened to
+        be the real foreground window at the time). This walk lets the caller
+        verify the element's ACTUAL owning window against target_hwnds
+        instead of trusting the foreground-window coincidence."""
+        try:
+            walker = self._uia.ControlViewWalker
+            cur = elem
+            for _ in range(max_up):
+                if cur is None:
+                    return 0
+                try:
+                    h = cur.CurrentNativeWindowHandle
+                    if h:
+                        return h
+                except Exception:
+                    pass
+                cur = walker.GetParent(cur)
+        except Exception:
+            pass
+        return 0
 
     # UIA_IsScrollPatternAvailablePropertyId — 스크롤 컨테이너 판별용.
     IS_SCROLL_PATTERN_AVAILABLE = 30034
@@ -797,7 +882,31 @@ class Recorder:
                     self.target_hwnds.add(fg)
                     log(f"[target] lazy frame {fg} hosts CoreWindow {core} — added (keyboard)")
                     return True
+            # Ordinary Win32 sibling/child dialog belonging to a tracked PID
+            # (e.g. a freshly-opened Site Manager/Quickconnect dialog) — self
+            # -heal immediately via PID match instead of waiting on
+            # _watch_windows()'s 0.5s poll, which can otherwise drop every
+            # keystroke typed in that window during the gap (2026-07-13).
+            if pid_of_hwnd(fg) in self._target_pids():
+                self.target_hwnds.add(fg)
+                self._popup_hwnds.add(fg)
+                log(f"[target] lazy PID-match {fg} — added (keyboard, "
+                    "pre-empts 0.5s watcher poll)")
+                return True
         return False
+
+    def _target_pids(self):
+        """PIDs already known to own a tracked hwnd, plus the launch PID —
+        shared by _watch_windows()'s background poll and
+        _foreground_is_target()'s immediate self-heal check so both agree on
+        what counts as "belongs to this recording"."""
+        launch_pid = self.proc.pid if self.proc else None
+        pids = {launch_pid} if launch_pid else set()
+        for hwnd in list(self.target_hwnds):
+            p = pid_of_hwnd(hwnd)
+            if p:
+                pids.add(p)
+        return pids
 
     def _discover_target_windows(self):
         """Poll up to DISCOVER_TIMEOUT for the window(s) the launched app opens.
@@ -906,15 +1015,9 @@ class Recorder:
         process PIDs and auto-add them to target_hwnds. Fixes the bug where
         popup/child windows opened after recording started were silently
         filtered by _point_is_target()."""
-        launch_pid = self.proc.pid if self.proc else None
-
         while not self._stop_flag.is_set():
             try:
-                target_pids = {launch_pid} if launch_pid else set()
-                for hwnd in list(self.target_hwnds):
-                    p = pid_of_hwnd(hwnd)
-                    if p:
-                        target_pids.add(p)
+                target_pids = self._target_pids()
                 for hwnd in visible_toplevel_windows():
                     if hwnd in self.target_hwnds:
                         continue
@@ -1141,6 +1244,48 @@ class Recorder:
             elem = ins.element_at(x, y)
             info = ins.describe(elem)
             light_dismiss = info.get("automationId") == "Light Dismiss"
+            # Resolved element belongs to a window this recording isn't
+            # tracking at all (confirmed 2026-07-13: a PuTTY capture's very
+            # first click — right after window discovery — resolved to an
+            # unrelated 'Calculator' Edit element whose bounding rect sat
+            # entirely outside the PuTTY window; describe()'s windowTitle
+            # still read 'PuTTY Configuration' only because that happened to
+            # be the real foreground window at that instant, masking the
+            # wrong-element capture). The Win32-level window-under-point
+            # check (_point_is_target/top_window_at) that gates whether this
+            # event gets emitted at all is a SEPARATE mechanism from this
+            # UIA-level ElementFromPoint call, and the two can disagree.
+            # Cross-check the element's own owning hwnd (walking ancestors,
+            # not the click point) against target_hwnds/_popup_hwnds — drop
+            # the selector like an unresolvable light-dismiss hit rather than
+            # emit a selector for a control the recording was never tracking.
+            if not light_dismiss and elem is not None:
+                elem_hwnd = ins.resolve_root_hwnd(elem)
+                if (elem_hwnd and elem_hwnd not in self.target_hwnds
+                        and elem_hwnd not in self._popup_hwnds):
+                    log(f"[inspect] element hwnd={elem_hwnd} not a tracked "
+                        f"window (name={info.get('name')!r} "
+                        f"rect={info.get('rect')!r}) — dropping selector")
+                    light_dismiss = True
+            # Adopted element's own bounding rect doesn't contain the click
+            # point (confirmed 2026-07-13: PuTTY capture picked the
+            # 'Selection' TreeItem with rect left=567 for a click at x=557 —
+            # 10px into the tree's indent margin). A real physical click
+            # there is a no-op in most native tree/list controls (nothing
+            # under the cursor to hit), but replaying via UIA Invoke always
+            # lands dead-center on whatever element was recorded, silently
+            # producing a state change (selection swap) recording never had.
+            # Treat exactly like an unresolvable light-dismiss hit: drop the
+            # selector entirely rather than emit an anchor path that would
+            # just re-target the same wrong node through a different XPath.
+            if (not light_dismiss and elem is not None
+                    and isinstance(info.get("rect"), tuple)):
+                left, top, right, bottom = info["rect"]
+                if not (left <= x <= right and top <= y <= bottom):
+                    log(f"[inspect] pt=({x},{y}) outside adopted rect={info['rect']} "
+                        f"(id={info.get('automationId')!r} name={info.get('name')!r}) "
+                        "— dropping selector")
+                    light_dismiss = True
             if light_dismiss:
                 # The click raced a menu/flyout opening: by the time this hit
                 # test ran, the XAML light-dismiss overlay (a full-window,
@@ -1168,11 +1313,27 @@ class Recorder:
                     # Still nothing usable — coordinate replay is forbidden
                     # (2026-07-10), so codegen will surface this event as an
                     # explicit failing step.
-                    log(f"[inspect] light-dismiss overlay at ({x},{y}) — dropping selector")
+                    log(f"[inspect] no resolvable element at ({x},{y}) — dropping selector")
                     for k in ("name", "automationId", "className", "controlType"):
                         info[k] = ""
                     info["locatorStrategy"] = "coordinate"
                     info["locatorValue"] = ""
+            # Fallback resolved to the whole Tree control (its center-click
+            # semantics at replay depend on whatever's currently painted
+            # there) — prefer the specific TreeItem row the click's y lines
+            # up with, e.g. a +/- toggle glyph click (2026-07-13).
+            treeitem_glyph_fallback = False
+            if (not light_dismiss and elem is not None
+                    and info.get("controlType") == "Tree"):
+                row = ins.tree_item_at_row(elem, y)
+                if row is not None:
+                    row_info = ins.describe(row)
+                    if row_info.get("name") or row_info.get("automationId"):
+                        info = row_info
+                        elem = row
+                        treeitem_glyph_fallback = True
+                        log(f"[inspect] Tree-center fallback narrowed to row "
+                            f"TreeItem name={info.get('name')!r}")
             # 유니크 id/name이 없는 요소 → anchor 기반 relative XPath 캡처
             # (2026-07-10: 좌표 재생 금지 — anchor XPath가 유일한 재생 수단).
             # light-dismiss 오버레이는 전체 창을 덮는 요소라 anchor가 무의미.
@@ -1185,6 +1346,30 @@ class Recorder:
                     info["locatorValue"] = f'//*[@AutomationId="{a[0]}"]{a[1]}'
                     info["xpath"] = info["locatorValue"]
                     log(f"[inspect] anchor XPath for id/name-less element: {info['xpath']}")
+            # ExpandCollapsePattern 태깅 — 2026-07-13 진단(poc/diag_expandcollapse.py)으로
+            # ComboBox/메뉴바 MenuItem은 일반 클릭만으로 "펼치기"가 재현 안
+            # 됨을 실증했지만, **ExpandCollapsePattern "지원 여부"만으로
+            # 판단하면 안 된다** — 재녹화 실측(2026-07-13, FileZilla 폴더
+            # 트리+주소창 breadcrumb)에서 TreeItem/Edit 등 거의 모든 컨트롤이
+            # 이 패턴을 구현하고 있어 정상적으로 잘 동작하던 클릭(폴더 탐색,
+            # breadcrumb 이동)까지 전부 "펼치기 전용" 호출로 가로채 실제 클릭이
+            # 통째로 사라지는 회귀를 유발했다(전부 rect 안쪽의 정상 클릭이었음
+            # — pt-밖-rect 폴백이 아님). ComboBox/MenuItem은 그 자체가 펼치기
+            # 외의 다른 상호작용이 없는 컨트롤이라 항상 태깅하지만, TreeItem은
+            # 위 glyph 폴백(pt가 항목 자체 rect 밖이라 행 단위로 재해석된 경우)
+            # 에서만 태깅 — 그 외 컨트롤 타입은 지원 여부와 무관하게 절대 태깅
+            # 안 함(일반 클릭이 이미 정상 동작).
+            EXPAND_COLLAPSE_ALWAYS = ("ComboBox", "MenuItem")
+            ct = info.get("controlType")
+            wants_expand_collapse = (
+                ct in EXPAND_COLLAPSE_ALWAYS
+                or (ct == "TreeItem" and treeitem_glyph_fallback)
+            )
+            if (not light_dismiss and elem is not None and wants_expand_collapse
+                    and ins.has_expand_collapse(elem)):
+                info["expandCollapse"] = True
+                log(f"[inspect] ExpandCollapsePattern available on "
+                    f"{info.get('controlType')!r} name={info.get('name')!r}")
             # locatorFallback mirrors locatorStrategy for backwards compat
             if info.get("locatorStrategy") == "coordinate":
                 info["locatorFallback"] = "coordinate"
@@ -1472,6 +1657,10 @@ class Recorder:
                 "anchorId": elem.get("anchorId", ""),
                 "anchorPath": elem.get("anchorPath", ""),
                 "rect": elem.get("rect"),   # DIAGNOSTIC — see UIAInspector.describe()
+                # ComboBox 드롭다운/메뉴바 MenuItem/트리 +- 토글 판별
+                # (2026-07-13, UIAInspector.has_expand_collapse) — codegen이
+                # 일반 클릭 대신 osExpandCollapse.ps1 경로를 taken다.
+                "expandCollapse": bool(elem.get("expandCollapse", False)),
             },
             "timestamp": time.time(),
             "app": self.session.get("appName", ""),
@@ -1590,14 +1779,33 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
 
+def _enable_per_monitor_dpi_awareness():
+    """Raise this process to per-monitor DPI awareness. Unaware (default)
+    processes get coordinates auto-scaled by the OS to the primary monitor's
+    DPI, which desyncs pynput's raw cursor position from the UIA element
+    rects hit-tested at capture time (confirmed 2026-07-13 on a 125%-scaled
+    PuTTY capture: consistent ~1.25x pynput/cursor deltas on every click).
+    Must run before any window/DC is created by this process — main() is the
+    first thing that runs, so this call sits at its very top."""
+    try:
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (Win10 1703+)
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+        return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+    except Exception as e:
+        log(f"[diag-dpi] failed to set per-monitor DPI awareness: {e}")
+
+
 def main():
+    _enable_per_monitor_dpi_awareness()
     is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
     log(f"Capture agent listening on http://localhost:{AGENT_PORT}")
     log(f"Administrator rights: {'YES' if is_admin else 'NO  <-- element properties will be EMPTY!'}")
     if not is_admin:
         log("Re-run from an Administrator PowerShell for full element inspection.")
-    # DIAGNOSTIC (A vs B investigation): 0=unaware 1=system-aware 2=per-monitor-aware.
-    # Measurement only — no SetProcessDpiAwareness call here.
     try:
         awareness = ctypes.c_int()
         ctypes.windll.shcore.GetProcessDpiAwareness(0, ctypes.byref(awareness))
