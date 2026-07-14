@@ -17,6 +17,23 @@ screen coordinates**.
   routine that dismisses unexpected popups (e.g. "file already exists") and
   retries once before failing honestly.
 
+## Verified Targets
+
+GUI-confirmed with `npx wdio run <AppName>/wdio.conf.js` (both `ById` and
+`ByClass` specs passing):
+
+| App | Type | Notes |
+|---|---|---|
+| Calculator | UWP | simple mode |
+| Notepad | UWP | simple mode |
+| PuTTY | native Win32 dialog | category tree nav, ComboBox dropdowns (same-window and cross-window popup), tree +/- toggle, proxy radio buttons |
+| FileZilla | native Win32 | folder tree nav, menu bar navigation via ExpandCollapsePattern |
+
+Other presets in the UI (Paint, Registry Editor, IDM, VSCode, GitHub Desktop,
+Free Download Manager, Claude Desktop) are wired up but not currently
+GUI-verified end to end — see **Known Limitations** below for the specific
+app classes (Electron/Chromium, QML) that are out of scope for now.
+
 ## Architecture
 
 ```
@@ -128,7 +145,14 @@ generated-wdio/<AppName>/
 ├── <AppName>TestById.js       # selectors prefer AutomationId (~id / XPath)
 ├── <AppName>TestByClass.js    # selectors prefer ClassName+Name XPath
 ├── wdio.conf.js               # per-app config (Appium service, capabilities)
-├── osScroll.ps1               # UIA ScrollPattern scroll (PostMessage wheel fallback)
+├── osScroll.py                # UIA ScrollPattern scroll (PostMessage wheel fallback)
+├── osScopedInvoke.py          # click an item that opened in a SEPARATE top-level
+│                              #   window (native ComboBox dropdown / menu popup) —
+│                              #   the WinAppDriver session can't see it, so this
+│                              #   goes straight through COM UIA instead
+├── osExpandCollapse.py        # ExpandCollapsePattern replay (ComboBox dropdowns,
+│                              #   menu bar items, tree +/- toggles) — plain
+│                              #   click()/InvokePattern doesn't open these
 ├── osType.ps1                 # OS-level SendKeys fallback for stubborn edit controls
 ├── osActivate.ps1             # bring the app window to the foreground
 ├── osWindowRect.ps1           # read window geometry (hwnd-first)
@@ -140,10 +164,16 @@ generated-wdio/<AppName>/
 The two test files are alternative locator strategies for the same recording —
 if `ById` fails on an app whose ids are unstable, try `ByClass`.
 
-> The `.ps1` helpers are **not** coordinate injection: they handle keyboard
-> input, window management, and popup recovery. Element targeting is always
-> selector-based. Do not edit generated files — they are overwritten on every
-> Generate; fix `server/server.js` templates instead.
+> None of these helpers do coordinate injection: they handle keyboard input,
+> window management, popup recovery, and pattern-based (Expand/Scroll/Invoke)
+> element interaction — always selector-based, never screen pixels. The `.py`
+> helpers use **COM IUIAutomation (comtypes)**, the same stack as
+> `agent/agent.py`; earlier `.ps1` versions of `osScroll`/`osScopedInvoke`/
+> `osExpandCollapse` used .NET managed UIA (`System.Windows.Automation`), which
+> cannot see legacy Win32 controls (list rows, toolbar buttons, `SysTreeView32`
+> tree items) and were replaced for exactly that reason. Do not edit generated
+> files — they are overwritten on every Generate; fix `server/server.js`
+> templates instead.
 
 ---
 
@@ -189,6 +219,25 @@ Scrolling never uses pixels: the recorded scroll container is re-found via UIA
 and scrolled with `ScrollPattern.Scroll()`; legacy controls that lack
 ScrollPattern get an hwnd-scoped `WM_MOUSEWHEEL` via `PostMessageW`.
 
+**Native ComboBox/menu popups** (Win32 dropdowns, menu bar items) often render
+in a **separate top-level window** rather than inside the app's main window —
+a plain WinAppDriver session, scoped to the window it was created against,
+can't see that popup at all. Two codegen-time mechanisms handle this
+(both replay via COM UIA directly, bypassing the WinAppDriver session):
+
+- **`osExpandCollapse`** — for controls exposing `ExpandCollapsePattern`
+  (ComboBox, menu bar `MenuItem`, tree `+`/`-` toggles): expands the control,
+  then searches for the target item first in the main window, then in any
+  newly-appeared top-level window (native `TrackPopupMenu`-style popups).
+- **`osScopedInvoke`** — for a plain `Button` (no ExpandCollapsePattern) that
+  opens a dropdown list rendered as its own top-level window: the trigger
+  click and the subsequent item search run **in one process**, so there's no
+  gap in which the dropdown can auto-close before the item is found.
+
+Recording captures the click(s) that open + select from these controls as
+separate events; `server/server.js` merges them at codegen time into a single
+call so the open→search happens without a step boundary in between.
+
 ---
 
 ## 4. Regression Testing (no agent, no admin, no GUI)
@@ -199,16 +248,23 @@ cd server; node server.js
 
 # Terminal 2
 python agent/mock_events.py
-# expect: 115/115 checks passed
+# expect: 148/148 checks passed
 ```
 
-`mock_events.py` POSTs a synthetic recording to the live server, generates
-code for both the simple and session (multi-window) paths, and asserts on the
-output: XPath-only invariants (no `osClick(`/`osDrag(`/`osClickRel(` anywhere),
-anchor-XPath rendering, double-click dedupe, Fail-and-Recover wiring, ps1
-helper contents (ScrollPattern present, `SetCursorPos` absent), and that stale
-coordinate helpers left by older versions are removed from the output folder
-on regenerate.
+`mock_events.py` POSTs synthetic recordings to the live server — including a
+simple single-window app, a multi-window (session-mode) app, and a native
+Win32 dialog scenario exercising numeric-AutomationId handling, ExpandCollapse
+merging, and cross-window scoped invoke — generates code for every path, and
+asserts on the output: XPath-only invariants (no `osClick(`/`osDrag(`/
+`osClickRel(` anywhere), anchor-XPath rendering, double-click dedupe,
+Fail-and-Recover wiring (including that ESC recovery never fires against the
+app's own foreground main window), helper file contents (ScrollPattern
+present, `SetCursorPos` absent, COM `comtypes` used instead of managed UIA),
+and that stale coordinate/managed-UIA helpers left by older versions are
+removed from the output folder on regenerate. The two mock apps it generates
+into (`generated-wdio/MockMulti/`, `generated-wdio/MockNative/`) are
+regression-gate fixtures, not real recordings — they're git-ignored and safe
+to delete; re-running the gate recreates them.
 
 ---
 
@@ -248,6 +304,20 @@ on regenerate.
   (`{"Edit", "Document", "ComboBox"}`). If typing into a new app type is
   silently dropped, the target control's type needs to be added in
   `agent/agent.py` (`INPUT_CONTROL_TYPES`).
+- **Numeric AutomationIds can be non-unique in classic Win32 dialogs.** Some
+  apps (e.g. PuTTY's category panels) reuse the same numeric resource ID
+  across multiple controls in different panels. Selector resolution tries an
+  AND of every captured field (id + name + className) before falling back to
+  a single field, to avoid matching the wrong same-id control.
+- **A Korean-Windows titlebar's Close (X) button is a UIA `Button` named
+  "닫기"** — the same accessible name a Win32 ComboBox dropdown arrow can
+  carry. A dropdown-arrow element is always resolved by its AutomationId
+  (`~DropDown`), never by a bare `//Button[@Name="닫기"]`, so it can never
+  accidentally match window chrome.
+- **.NET managed UIA (`System.Windows.Automation`) cannot see legacy Win32
+  controls** (list rows, toolbar buttons, `SysTreeView32` tree items) — every
+  replay helper that needs to reach those controls uses COM `IUIAutomation`
+  (comtypes) instead, matching the stack `agent/agent.py` already uses.
 
 ## Project Layout
 
@@ -257,5 +327,6 @@ server/         Express bridge + template-based code generator
 ui/             React dashboard (Vite)
 generated-wdio/ Generated test suites (one folder per app) + shared npm deps
 recorded-events/  JSON backups of every recording session (git-ignored)
-poc/            Standalone PowerShell PoCs (XPath click, ScrollPattern, HWND scoping)
+poc/            Standalone PoCs (PowerShell + Python COM UIA) — XPath click,
+                ScrollPattern, HWND scoping, ExpandCollapsePattern diagnostics
 ```
