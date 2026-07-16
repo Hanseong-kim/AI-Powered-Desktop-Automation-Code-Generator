@@ -734,6 +734,14 @@ def step_wdio_generate_session():
             "Site Manager dialog never opening during replay)",
         )
         check(
+            f"  {fname} actually DEFINES osExpandCollapse() (not just calls it)",
+            "function osExpandCollapse(hwnd, target, itemName)" in content,
+            "SESSION_HEADER never defined this helper — calling it threw "
+            "'osExpandCollapse is not defined' at replay time even after the "
+            "call-site gate was fixed (2026-07-16, caught on real FileZilla "
+            "GUI run — the call-site check above alone didn't catch this)",
+        )
+        check(
             f"  {fname} merges the File-menu trigger+item into one osExpandCollapse call",
             "Site Manager" in content,
             "expected the merged item name 'Site Manager' to appear as the "

@@ -1930,6 +1930,33 @@ function _scrollHwnd(title) {
     return 0;
 }
 
+// ExpandCollapsePattern 재생 (SIMPLE_HEADER의 동일 함수와 동일 구현 —
+// 2026-07-16, session 모드에도 필요해짐: FileZilla처럼 "파일(F) 메뉴 열기 →
+// 사이트 관리자(S) 항목 선택"으로 두 번째 창을 여는 앱은 session 모드로
+// 코드생성되는데, 이 함수 자체가 SESSION_HEADER에 없어서 재생 시
+// "osExpandCollapse is not defined"로 즉시 죽었다 — mergeExpandCollapseClicks()가
+// 병합한 이벤트를 재생하는 분기(generateWdio)가 useSession 여부와 무관하게
+// 이 함수를 호출하므로, 두 헤더 템플릿 모두에 정의돼 있어야 한다.
+function osExpandCollapse(hwnd, target, itemName) {
+    if (!hwnd) {
+        _failures.push('osExpandCollapse:no-hwnd');
+        console.warn('[osExpandCollapse] no window hwnd — cannot expand without a window handle');
+        return;
+    }
+    try {
+        const selB64 = Buffer.from(JSON.stringify(target || {}), 'utf8').toString('base64');
+        const itemArg = itemName ? \`--item-name-b64 "\${Buffer.from(itemName, 'utf8').toString('base64')}"\` : '';
+        const out = execSync(
+            \`python "\${join(__dirname, 'osExpandCollapse.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${itemArg}\`,
+            { stdio: 'pipe', timeout: 20000 }
+        ).toString().trim();
+        if (out) console.log(out);
+    } catch (e) {
+        _failures.push('osExpandCollapse');
+        console.warn('[osExpandCollapse] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).substring(0, 200));
+    }
+}
+
 // 창-교차 클릭 재생 (SIMPLE_HEADER의 동일 함수와 동일 구현 — 2026-07-15,
 // 세션 모드에도 필요해짐: 같은 리터럴 타이틀을 쓰는 다이얼로그+메인 창(예:
 // 7-Zip — 파일 목록 창도, "압축 대상 추가" 다이얼로그도 둘 다 그냥 "7-Zip")은
