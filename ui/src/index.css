@@ -152,6 +152,19 @@ tbody td { padding: 6px 12px; font-size: 12px; }
   border-radius: 8px; overflow: hidden;
 }
 
+.saved-banner {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px;
+  padding: 8px 12px; font-size: 12px; color: var(--green);
+  background: rgba(34,197,94,.08); border-bottom: 1px solid var(--border);
+}
+.saved-banner code {
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  background: rgba(0,0,0,.15); padding: 1px 5px; border-radius: 3px;
+  color: var(--text);
+}
+.saved-banner .run-cmd { display: flex; align-items: center; gap: 6px; color: var(--text); }
+.saved-banner .copy-btn { padding: 2px 8px; font-size: 11px; }
+
 .tab-bar {
   display: flex; align-items: center; gap: 4px;
   padding: 8px 12px; border-bottom: 1px solid var(--border);

@@ -19,7 +19,7 @@ export default function App() {
   const [form, setForm] = useState(DEFAULT_FORM);
   const [status, setStatus] = useState({ agentOnline: false, isAdmin: null, recording: false });
   const [events, setEvents] = useState([]);
-  const [genState, setGenState] = useState({ generating: false, files: null, error: null });
+  const [genState, setGenState] = useState({ generating: false, files: null, error: null, folder: null, runCommand: null });
   const [toasts, setToasts] = useState([]);
   const dismissTimers = useRef({});
 
@@ -139,13 +139,16 @@ export default function App() {
         platform: form.platform || undefined,
       });
       if (res.ok) {
-        setGenState({ generating: false, files: res.files, error: null });
+        setGenState({
+          generating: false, files: res.files, error: null,
+          folder: res.folder || null, runCommand: res.runCommand || null,
+        });
         if (res.savedPaths?.length) {
           addToast('info', `Files saved to generated-wdio/${res.folder || ''}`);
         }
       } else {
         // SSE 'generation:error' event already fires addToast; only update state here
-        setGenState({ generating: false, files: null, error: res.message });
+        setGenState({ generating: false, files: null, error: res.message, folder: null, runCommand: null });
       }
     } catch (e) {
       setGenState((prev) => ({ ...prev, files: null, error: e.message }));
@@ -174,7 +177,7 @@ export default function App() {
           eventCount={events.length}
         />
         <EventTable events={events} onDeleteEvent={handleDeleteEvent} />
-        <CodeViewer files={genState.files} error={genState.error} />
+        <CodeViewer files={genState.files} error={genState.error} folder={genState.folder} runCommand={genState.runCommand} />
       </main>
       <Toast toasts={toasts} dismiss={removeToast} />
     </div>
