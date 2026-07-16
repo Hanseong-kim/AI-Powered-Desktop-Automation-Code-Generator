@@ -1033,6 +1033,14 @@ UIA_ClassNameProperty = 30012
 UIA_InvokePatternId = 10000
 UIA_SelectionItemPatternId = 10010
 TreeScope_Descendants = 4
+# Element(1)|Children(2)|Descendants(4) — TreeScope_Descendants alone can
+# never match the root element being searched from (UIA standard behavior),
+# so a captured click whose target IS the window itself (e.g. a dialog's own
+# className="#32770" root, no automationId) is structurally unfindable with
+# Descendants-only scope. Confirmed 2026-07-16 (FileZilla Site Manager
+# dialog click failing "target not found" despite the window genuinely
+# being open) — use Subtree everywhere a target might be a window root.
+TreeScope_Subtree = 7
 
 user32 = ctypes.windll.user32
 
@@ -1120,7 +1128,7 @@ def main():
         if trigger_cond is not None:
             trigger = None
             try:
-                trigger = root.FindFirst(TreeScope_Descendants, trigger_cond)
+                trigger = root.FindFirst(TreeScope_Subtree, trigger_cond)
             except Exception:
                 trigger = None
             if trigger:
@@ -1131,9 +1139,11 @@ def main():
                 # 남긴다 (2026-07-14, 침묵 스킵이 진단을 어렵게 만든 것을 확인).
                 print(f"[osScopedInvoke] WARN trigger not found (sel={args.trigger_sel_b64}) — dropdown likely never opened")
 
-    # (a) 메인 창 서브트리.
+    # (a) 메인 창 서브트리. Subtree = 창 자기 자신(root)도 포함해 검색한다 —
+    #     Descendants만 쓰면 캡처된 타겟이 창 자체(예: className="#32770")인
+    #     경우 구조적으로 못 찾는다(2026-07-16 FileZilla 다이얼로그 클릭 확인).
     try:
-        item = root.FindFirst(TreeScope_Descendants, item_cond)
+        item = root.FindFirst(TreeScope_Subtree, item_cond)
     except Exception:
         item = None
     if item and invoke_item(mod, item):
@@ -1163,7 +1173,7 @@ def main():
             other_root = uia.ElementFromHandle(h)
             if not other_root:
                 continue
-            item = other_root.FindFirst(TreeScope_Descendants, item_cond)
+            item = other_root.FindFirst(TreeScope_Subtree, item_cond)
             if item and invoke_item(mod, item):
                 print(f"[osScopedInvoke] invoked under other top-level window hwnd={h}")
                 sys.exit(0)
@@ -2804,24 +2814,32 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       );
     } else if (e.action === 'type') {
       testSteps.push(`            // [STEP ${stepNum}] skip type on non-editable element`);
-    } else if (e.element?.expandCollapse && !useSession) {
+    } else if (e.element?.expandCollapse) {
       // ExpandCollapsePattern 재생 (ComboBox 드롭다운/메뉴바 MenuItem/트리 +-
       // 토글) — 2026-07-13 진단(poc/diag_expandcollapse.py)으로 실증: 일반
       // 클릭(InvokePattern)만으로는 재현 안 됨. osExpandCollapse.py(COM UIA)가
       // WinAppDriver REST를 거치지 않고 직접 처리 —
       // mergeExpandCollapseClicks()가 병합한 expandItemName이 있으면 펼친 뒤
       // 그 항목을 찾아 Invoke, 없으면(트리 +- 토글 등) 펼치기/접기 자체만.
-      // 세션 모드는 대상 밖(osExpandCollapse.py는 hwnd 직접 조작이라 세션
-      // 스코프 개념과 안 맞음) — 기존 _clickScoped 경로 그대로.
+      // 세션 모드도 포함(2026-07-16, FileZilla GUI 재검증에서 발견) —
+      // osExpandCollapse.py는 --hwnd를 직접 받아 COM으로 동작해 WinAppDriver
+      // 세션이 아예 필요 없으므로, cross-window/ListItem 분기와 동일하게
+      // session 모드에서도 문제없이 쓸 수 있다. 예전엔 이 분기가 SIMPLE_HEADER
+      // 전용 변수 _appHwnd를 하드코딩해서 session 모드에 걸면 ReferenceError가
+      // 나 !useSession으로 막아뒀던 것뿐 — 그래서 FileZilla처럼 session 모드로
+      // 코드생성되는 앱은 "파일 메뉴 열기"까지만 재생되고 그 안의 메뉴 항목
+      // 선택 자체가 통째로 스킵됐다(Site Manager 다이얼로그가 재생 중 한 번도
+      // 실제로 열리지 않았던 근본 원인).
       const target = {
         automationId: e.element.automationId || '',
         className: e.element.className || '',
         name: e.element.name || '',
       };
       const itemName = e.expandItemName || '';
+      const hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
       pageMethods.push(
 `    async click${stepNum}() {
-        osExpandCollapse(_appHwnd, ${JSON.stringify(target)}, ${itemName ? JSON.stringify(itemName) : 'null'});
+        osExpandCollapse(${hwndArg}, ${JSON.stringify(target)}, ${itemName ? JSON.stringify(itemName) : 'null'});
     }`
       );
       testSteps.push(

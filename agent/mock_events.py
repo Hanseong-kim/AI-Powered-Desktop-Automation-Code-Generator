@@ -165,6 +165,24 @@ SESSION_EVENTS = [
                window_title="Main Window", app_name=SESSION_APP, x=150, y=120, index=5,
                rootHwndHex="A1B2",
                winLeft=0, winTop=0, winWidth=1024, winHeight=768),
+    # ExpandCollapsePattern + session mode (2026-07-16, bug B fix): opening a
+    # File-menu-style MenuItem and selecting an item within it must still
+    # replay via osExpandCollapse() even in session mode, where _appHwnd
+    # doesn't exist (must use _hwndCache[_mainTitleFrag] instead) — this was
+    # silently skipped entirely before the fix (FileZilla GUI repro: File
+    # menu opened but the target menu item was never actually clicked, so
+    # the Site Manager dialog never opened during replay). Same window as
+    # the revisit event above (A1B2) so it doesn't add a new segment-boundary
+    # switch — the switch-count assertions elsewhere in this scenario stay
+    # valid (still exactly 3: A1B2 -> C3D4 -> A1B2).
+    make_event("click", name="File", automation_id="menuFile", class_name="MenuItem",
+               control_type="MenuItem", window_title="Main Window", app_name=SESSION_APP,
+               x=50, y=20, index=6, rootHwndHex="A1B2", expand_collapse=True,
+               winLeft=0, winTop=0, winWidth=1024, winHeight=768),
+    make_event("click", name="Site Manager", automation_id="menuSiteManager", class_name="MenuItem",
+               control_type="MenuItem", window_title="Main Window", app_name=SESSION_APP,
+               x=60, y=45, index=7, rootHwndHex="A1B2",
+               winLeft=0, winTop=0, winWidth=1024, winHeight=768),
 ]
 
 # Title-collision scenario (2026-07-16, multi-window segmenting fix) — two
@@ -706,6 +724,20 @@ def step_wdio_generate_session():
             "_step('switch to window:" in content,
             "switch step isn't wrapped in _step() with a visible label — "
             "window1/window2 grouping won't show up in the replay log",
+        )
+        check(
+            f"  {fname} replays expandCollapse via osExpandCollapse() even in session mode",
+            "osExpandCollapse(_hwndCache[_mainTitleFrag]" in content,
+            "session-mode expandCollapse events must not be silently skipped — "
+            "FileZilla-style File-menu navigation never actually selected the "
+            "target menu item in session mode (2026-07-16, root cause of the "
+            "Site Manager dialog never opening during replay)",
+        )
+        check(
+            f"  {fname} merges the File-menu trigger+item into one osExpandCollapse call",
+            "Site Manager" in content,
+            "expected the merged item name 'Site Manager' to appear as the "
+            "itemName argument to osExpandCollapse()",
         )
 
 
