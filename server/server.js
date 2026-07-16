@@ -2685,20 +2685,23 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
     if (winTitle) lastWinTitle = winTitle;
     const electronCtx = winFragOk && relTitle.includes(winFrag);
 
-    // 명시적 윈도우 전환 스텝 (2026-07-16) — 이전 스텝과 다른 창(hwnd)으로
-    // 넘어가는 경계에서, 리플레이 로그/스텝 리스트에 "switch to window: X"를
-    // 별도 스텝으로 남겨 window1/window2 액션이 실제로 구분되어 보이게 한다
-    // (기존엔 getWindowSession() 내부에서만 암묵적으로 전환돼 리뷰 피드백대로
-    // "다음 화면 액션이 안 보인다"는 인상을 줬다). 세션 모드에서만 의미가
-    // 있다 — simple 모드는 창이 하나뿐이라 전환 개념이 없다.
+    // 명시적 윈도우 전환 스텝 경계 감지 (2026-07-16) — 이전 스텝과 다른 창
+    // (hwnd)으로 넘어가는지만 여기서 판정하고 기록한다. 실제 스텝 삽입은
+    // 아래에서 하지 않는다 — cross-window click(osScopedInvoke)/ListItem
+    // click(osScopedInvoke)/scroll(_scrollHwnd)은 애초에 getWindowSession()을
+    // 안 거치므로, 여기서 무조건 삽입하면 그 스텝들 앞에서 실제로는 쓰이지도
+    // 않는 getWindowSession()의 Root-세션 EnumWindows/XPath 스캔(못 찾으면
+    // 10~20초+)이 매번 실행돼 순수 낭비였다(2026-07-16 FileZilla GUI
+    // 재검증에서 "switch to window: 사이트 관리자"가 20초 걸리고도 아무 효과가
+    // 없었던 게 이 버그였음 — 뒤이은 스텝들은 전부 osScopedInvoke 경로).
+    // 실제로 getWindowSession()을 호출하는 두 분기(아래 type-via-session,
+    // click-via-session)에서만 segBoundary를 보고 스텝을 삽입한다.
     const segBoundary = useSession && relTitle &&
       (e.newWindowSegment || (e.rootHwndHex && e.rootHwndHex !== prevSegHwnd));
     if (e.rootHwndHex) prevSegHwnd = e.rootHwndHex;
-    if (segBoundary) {
-      testSteps.push(
-`            await _step('switch to window: ${escapeStr(relTitle)}', async () => { await _switchWindow('${escapeStr(relTitle)}'); });`
-      );
-    }
+    const switchWindowStep = segBoundary
+      ? `            await _step('switch to window: ${escapeStr(relTitle)}', async () => { await _switchWindow('${escapeStr(relTitle)}'); });\n`
+      : '';
 
     if (e.action === 'scroll') {
       // 프로그래매틱 스크롤 (2026-07-10 지시): 캡처 시점에 agent.py가 기록한
@@ -2745,6 +2748,12 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
     }
 
     if (e.action === 'type' && isEdit) {
+      // switchWindowStep is only prepended for the getWindowSession()-calling
+      // branch below (useSession && relTitle && !electronCtx) — the Electron
+      // (osType) and simple-mode (browser.$) branches never touch a window
+      // session, so inserting the switch step ahead of them would be dead
+      // weight (see the segBoundary comment above).
+      let usesGetWindowSession = false;
       if (useSession && electronCtx) {
         // Electron 입력 → UIA 세션 조회(45초 실패 경로) 제거, OS 키 주입
         // (SendKeys — 키보드 폴백, 좌표 실행 아님).
@@ -2754,6 +2763,7 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
     }`
         );
       } else if (useSession && relTitle) {
+        usesGetWindowSession = true;
         const elSel = sel || `'//*[@Name="${escapeAttr(e.element?.name)}"]'`;
         const relTitleArg = escapeStr(relTitle);
         pageMethods.push(
@@ -2790,7 +2800,7 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
         );
       }
       testSteps.push(
-`            await _step('${stepNum}:type ${escapeStr(e.value)}', () => page.type${stepNum}('${escapeStr(e.value)}'));`
+`${usesGetWindowSession ? switchWindowStep : ''}            await _step('${stepNum}:type ${escapeStr(e.value)}', () => page.type${stepNum}('${escapeStr(e.value)}'));`
       );
     } else if (e.action === 'type') {
       testSteps.push(`            // [STEP ${stepNum}] skip type on non-editable element`);
@@ -2938,7 +2948,7 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
         );
       }
       testSteps.push(
-`            await _step('${stepNum}:${e.action} ${escapeStr(e.element?.name || '')}', () => page.click${stepNum}());`
+`${useSession ? switchWindowStep : ''}            await _step('${stepNum}:${e.action} ${escapeStr(e.element?.name || '')}', () => page.click${stepNum}());`
       );
     }
   });
