@@ -12,7 +12,7 @@ Re: Review huddle 2026-07-16 — (1) PowerShell/Python helper files,
 | # | Your feedback | Status |
 |---|---|---|
 | 1 | Why do PowerShell/Python files exist? Can we avoid the copy-paste step? | **Answered below** — files are necessary (justification + evidence attached), and the "copy-paste" friction is now fixed at the UI level |
-| 2 | Screen-2 actions don't replay; window1/window2 actions should be visibly grouped | **Implemented** (code-level, see below) — pending your GUI re-test |
+| 2 | Screen-2 actions don't replay; window1/window2 actions should be visibly grouped | **Fixed and GUI-verified** on FileZilla (2 consecutive passing runs) — see below |
 | 3 | Is screen-2 element capture itself dropping events? | **Still open** — needs a real re-recording session with logs before I touch the capture code (see below for why) |
 
 ---
@@ -64,13 +64,28 @@ session:
   this was causing exactly the kind of "second window doesn't replay"
   symptom you saw on FileZilla.
 
-**What's still needed:** this is verified at the code level (an
-extended automated regression suite passes, 157/157 checks), but not
-yet re-verified against a real recording on my end — I need to
-re-record a real two-window session (e.g. FileZilla or 7-Zip with a
-dialog) and confirm the replay actually shows the window-switch steps
-and clicks land correctly. I'll do that and report back before our
-next sync.
+**Update — GUI-verified on FileZilla today.** Re-ran the actual
+FileZilla flow (File menu → Site Manager → new site → cancel → new
+tab → back to the main window and click controls). Both generated
+test variants passed twice in a row. The replay log shows exactly
+what I described above working live: menu navigation actually selects
+the target item now (`[osExpandCollapse] invoked 'Site Manager...'`),
+cross-window clicks land correctly
+(`[osScopedInvoke] invoked under main window subtree`), and the
+window-switch step shows up in the step list exactly once, only when
+actually needed (`[STEP] switch to window: FileZilla`) — no wasted
+time on windows that don't need a session. Along the way I found and
+fixed three more bugs this surfaced (two pre-existing, one from my own
+fix) — happy to share the detailed log if useful, but the short
+version is: this is real now, not just passing an automated
+regression suite.
+
+**Still open on this item:** the specific case where two different
+windows share the exact same literal title (e.g. a main window and
+its own dialog both just titled "FileZilla" or "7-Zip") is fixed in
+code and covered by the regression suite, but hasn't come up in an
+actual recording yet to confirm live — I'll re-check with a 7-Zip-style
+app next.
 
 ## 3. Screen-2 element capture
 
@@ -90,8 +105,7 @@ that specific cause — I'll have this alongside the #2 re-verification.
 ## Bottom line
 
 #1 has a real answer (attached) plus an actual UX fix already shipped.
-#2 is implemented and just needs a real-world re-test on my end. #3
-needs one more recording session with logging before I can say what's
-actually happening — I'd rather tell you that honestly now than claim
-it's fixed before I've confirmed it. Will follow up with re-test
-results and the demo video.
+#2 is fixed and GUI-verified on a real app today. #3 needs one more
+recording session with logging before I can say what's actually
+happening — I'd rather tell you that honestly now than claim it's
+fixed before I've confirmed it. Will follow up with the demo video.
