@@ -489,6 +489,141 @@ managed-UIA 맹점 / ESC 앱종료 (코드 레벨 완료, GUI 미검증)**
   closed-app 없음, `[cross-window-merge] ... (dropped intervening scroll)` 로그) +
   Calculator/Notepad 회귀 확인.
 
+**2026-07-15: 7-Zip 첫 e2e — 독립적인 버그 5건 발견·수정 + 실제 재녹화로 GUI 검증**
+7-Zip을 새 native 타겟으로 추가한 뒤 첫 녹화→재생에서 연쇄로 5개 버그 발견, 전부
+실측(COM UIA/WinAppDriver 프로브, 레지스트리 확인)으로 확정 후 수정. 상세 →
+`daily/2026-07-15.md`.
+- **버그1 (agent.py)**: `_inspect()`의 "untracked window" 판정이 `_watch_windows()`의
+  ~0.5s 폴링과 레이스 — 정상 팝업 요소를 드롭. `_foreground_is_target()`의 PID
+  self-heal 패턴을 클릭 경로에도 적용. **GUI 검증됨** (`[inspect] PID self-heal ...`
+  발동 확인, 2/2 PASSED).
+- **버그2 (server.js)**: 세션 모드에서 메인 창과 다이얼로그가 리터럴로 같은
+  타이틀("7-Zip")을 쓰면 `getWindowSession(title)`의 title-키 캐시가 둘을 구분 못 해
+  다이얼로그의 죽은 세션을 메인 창 클릭에도 재사용 → click-not-found. Cross-window
+  이벤트는 세션 모드에서도 hwnd 기반 `osScopedInvoke`를 타도록 `!useSession` 게이트
+  제거 + SESSION_HEADER에 `osScopedInvoke` wrapper 추가.
+- **버그3 (server.js)**: `dedupeDoubleClicks()`가 위치/타이밍만 보고 병합 —
+  리스트가 클릭 위치 아래서 갱신되면(예: "컴퓨터"→"C:") 관련 없는 선행 클릭까지
+  같은 픽셀이라는 이유로 삼켜버림. 병합 run 안 요소 이름(name) 불일치 시 중단하는
+  가드 추가. **(2차, 실제 재녹화 검증 중 재발견)**: name만 추적하는 가드는
+  automationId만 있고 name은 빈 더블클릭(리스트 컨테이너 자체, 예: "1001")엔
+  무력 — targetName이 끝까지 안 채워져 뒤이은 무관한 실제 클릭("hansung" 폴더
+  진입)까지 통과시켜 삼켜버림. `targetAid`(automationId)도 함께 추적, 후보가
+  name/automationId 중 하나라도 값이 있으면 이미 확립된 식별자와 일치해야
+  병합 허용하도록 강화(양쪽 다 완전히 빈 후보만 통과, 2026-07-08 원래 취지).
+- **버그4 (agent.py + server.js)**: WinAppDriver의 `element/click`이 7-Zip 리스트
+  행에서 조용히 무반응(실측: 직접 COM UIA Invoke는 즉시 목록 갱신, 완전히 동일
+  요소에 WAD REST click은 클릭 전/후 상태 동일). 근본 원인은 `agent.py` 캡처 —
+  리스트 행의 "Edit" 타입 서로게이트가 이미 올바른 Name을 갖고 있어 row-climb
+  가드(`not aid and not name`)를 통과 못 해 실제 `ListItem`으로 안 올라감(VSCode의
+  "이름 없는" 서로게이트, 2026-07-08, 의 반대 변종). `element_at()` 가드에
+  `not aid and controlType==Edit` 케이스 추가 + `server.js`가 캡처된
+  `controlType==='ListItem'` 클릭/더블클릭을 `osScopedInvoke`(직접 Invoke)로 재생.
+- **부수 발견(코드 버그 아님)**: 7-Zip이 마지막 방문 폴더를
+  `HKCU\Software\7-Zip\FM\PanelPath0`에 영속화 — 다음 실행이 "컴퓨터" 루트가
+  아니라 그 폴더로 곧장 열려 캡처가 가정한 시작 상태와 어긋남. `KNOWN_APP_STATE_RESET`
+  맵(`newWindowArgsFor`와 같은 앱별 특례 패턴) + `wdio.conf.js`의 `onWorkerStart`
+  훅(스펙별 워커가 자기 앱을 띄우기 직전, **`onPrepare` 아님** — 처음 `onPrepare`로
+  넣었다가 두 번째 스펙이 재오염된 상태로 실패하는 것으로 이 타이밍 버그를 발견)으로
+  각 워커 launch 직전에 리셋.
+- **검증 방법 (1단계)**: agent.py는 관리자 권한 필요해 이 세션에서 재시작 불가 —
+  사용자의 원본 캡처를 파이썬으로 `controlType: 'Edit'→'ListItem'`(agent.py
+  재시작 후 캡처했을 값) 패치한 사본으로 `/api/events/restore`→`/api/generate`→
+  `npx wdio run` 반복 검증. **SevenzipTestById.js + SevenzipTestByClass.js
+  둘 다 PASSED (2 passed, 2 total)**.
+- **검증 방법 (2단계, 실제 재녹화)**: 사용자가 관리자 터미널에서 agent.py를
+  직접 재시작하고 더 깊은 흐름(컴퓨터→C:→$Recycle.Bin→hansung→목록→west→목록,
+  전부 더블클릭 포함)으로 재녹화 — 캡처 확인 결과 `controlType`이 실제로
+  `'ListItem'`/`'List'`로 찍힘(버그4 agent.py 수정 라이브 확인). 1차 실행에서
+  버그3(2차) 발견(STEP5 "click hansung" 소실), 수정 후 재실행:
+  STEP1,2,4,5,6,7,8 전부 `osScopedInvoke`로 성공, **STEP3("click C:")만
+  실패** — 1단계와 동일한 부류의 실제 중복 클릭(같은 자리 재클릭)이 이번
+  재녹화에도 재현된 것으로 확인, 파이프라인 결함 아님. `mock_events.py`
+  **148/148** 유지(버그3 2차 수정 반영 후 최종 확인).
+- **정정(3차)**: STEP3 "click C:"를 "STEP2 진단이 틀렸다"고 재정정했다가
+  그 재정정 자체가 틀렸음을 확인 — 근거로 쓴 JSON `"timestamp"`가 물리적
+  클릭 시각이 아니라 `agent.py:1565`의 `time.time()`(워커 스레드 처리 시각).
+  `agent.py:_emit_click_from_press()`(1430행) 추적 결과 더블클릭 페어링 자체가
+  이미 위치+시간만으로 결정되며(대상 identity 무시) 원본 데이터에 이미 모호성이
+  내재 — 재수정 계획(간격 500ms 축소 + earliest 채택)을 대입하면 오늘 오전
+  고친 "click 컴퓨터 삼켜짐" 버그가 재발함을 확인해 **구현하지 않고 철회**.
+  결론: 오전 배포된 dedupe 가드가 맞고, STEP3는 원래 진단대로 진짜 중복
+  클릭(파이프라인 버그 아님). 상세 → `daily/2026-07-15.md`.
+- **버그6 (server.js, 실측 확정·수정 완료)**: 위 재검토 중 `osScopedInvoke`의
+  창-교차 (b) 폴백이 완전히 무관한 실제 창(사용자의 파일 탐색기
+  `explorer.exe`/`CabinetWClass`, VS Code `Code.exe`)을 클릭하고 "성공"으로
+  잘못 보고하는 것을 실측으로 확정 — 거짓 PASSED + 사용자 창에 실제 부작용.
+  `OS_SCOPEDINVOKE_PY`의 (b) 단계를 `GetWindowThreadProcessId`로 메인 창과
+  같은 PID인 창만 검사하도록 한정(PuTTY/FileZilla 같은 원래 의도된 케이스는
+  영향 없음). 재검증: `click hansung`/`click west`가 이제 정직하게
+  `target not found`로 실패(수정 전 위장 성공 제거), `컴퓨터`/`C:`/
+  `$Recycle.Bin`은 `invoked under main window subtree` 유지. `mock_events.py`
+  **148/148**(회귀 없음).
+- **미검증**: `hansung`/`west`가 메인 창 서브트리에서도 못 찾는 근본 원인
+  (가상화 리스트 `SysListView32`/`LVS_OWNERDATA` 가설, `ItemContainerPattern.
+  FindItemByProperty` 등 검토 필요) + 더블클릭 사이 UI 안정 대기를 두고
+  재녹화한 최종 `npx wdio run` **2 passed** 확인. Calculator/Notepad/PuTTY/
+  FileZilla 회귀 재확인도 안 됨(오늘 수정은 전부 가산적 게이트라 예상상
+  안전하나 저장 캡처 없어 재생성 불가).
+
+**2026-07-16: 리뷰 피드백(Hamza) 대응 — 멀티윈도우 세그먼팅 구현 (코드 레벨 완료, GUI 미검증)**
+2026-07-16 리뷰 허들 피드백 3건 중 코드로 대응 가능한 멀티윈도우 관련 2건에 착수.
+CLAUDE.md에 2026-07-10부터 "설계는 됐지만 구현 안 됨"으로 남아있던 "다중창 =
+HWND 세그먼팅"을 실제로 구현. 근본 원인이 처음 가정(캡처 드롭)과 실제로는
+다른 곳에 있었음이 테스트 작성 중 드러남 — 상세 아래.
+- **agent.py**: `_emit()`에 `event["newWindowSegment"]` 신호 추가
+  (`_last_emitted_hwnd_hex` 인스턴스 상태로 직전 이벤트와 `rootHwndHex` 비교) —
+  codegen이 title 비교가 아니라 hwnd 기반의 확실한 세그먼트 경계를 받는다.
+  필드 없는 구버전 캡처는 server.js가 hwnd-diff 폴백을 그대로 쓴다.
+- **server.js `_switchWindow()` 추가**: 세그먼트 경계마다 `_sessionIds[title]`/
+  `_hwndCache[title]`를 무효화하고 `getWindowSession()`을 강제 재조회한다.
+  다이얼로그가 닫히고 같은 리터럴 타이틀의 메인 창으로 돌아왔을 때(예:
+  7-Zip) 죽은 세션/hwnd를 계속 재사용하던 2026-07-15 "버그2"를 cross-window-
+  trigger 경로뿐 아니라 일반 `getWindowSession` 경로에서도 고친다. 녹화 시점
+  hwnd 값은 재생 시 재사용 불가(창마다 매번 새로 배정)하므로 복합 키가 아니라
+  "경계 통과 시 강제 재조회" 방식을 택함.
+- **생성 JS에 명시적 `switch to window:` 스텝 삽입**: codegen 이벤트 순회
+  루프에서 세그먼트 경계 감지 시 `_step('switch to window: ...', ...)`을
+  별도 스텝으로 삽입 — 기존엔 `getWindowSession()` 내부에서만 암묵적으로
+  전환돼 리플레이 로그에 안 보이던 것을, Hamza가 요구한 "window1/window2
+  액션 구분 리스트업"이 실제로 보이도록 표면화.
+- **근본 원인 정정(테스트 작성 중 발견)**: 타이틀 충돌 회귀 케이스를 만들어
+  검증하던 중, 위 3개 수정을 다 반영해도 여전히 전환이 0회로 나오는 현상
+  발견 — `needsSessionSwitching()`이 `roots.size!==1`일 때도 `titles.size>1`을
+  추가로 요구해, **서로 다른 두 창이 리터럴로 동일한 타이틀을 쓰면
+  세션 모드 자체가 발동 안 함**(창 전환 로직이 통째로 미실행)이 진짜 근본
+  원인이었음을 확인. `getWindowSession`의 캐시 키 문제는 실재하지만 이보다
+  하위 증상이었음. `needsSessionSwitching()`을 rootHwndHex를 title보다 우선하는
+  ground truth로 수정(`roots.size>1`이면 title 무관하게 즉시 세션 모드,
+  `roots.size===1`이면 title 무관하게 즉시 simple 모드, rootHwndHex가 아예
+  없는 구버전 캡처만 title 비교로 폴백).
+- **회귀 게이트 148→157**: `mock_events.py` `SESSION_EVENTS`에 왕복 재방문
+  케이스(hwnd A1B2→C3D4→A1B2) 추가 + 신규 `MockCollision` 시나리오(동일
+  리터럴 타이틀 "7-Zip", 다른 hwnd E1E1→F2F2→E1E1) 추가. `_switchWindow()`
+  존재, 세그먼트 경계마다 정확한 횟수의 전환 스텝 생성, 타이틀 충돌에도
+  전환이 억제되지 않음을 확인하는 체크 9건 추가. **157/157 통과**
+  (`node --check server/server.js`, `python -m py_compile agent/agent.py`,
+  실제 서버 기동 후 `python agent/mock_events.py` 재확인 — 서버 재시작 필요,
+  최초 1회는 편집 전 뜬 stale 프로세스에 요청이 가 실패했다가 재시작 후 통과).
+- **PowerShell/Python 헬퍼 파일 필요성(리뷰 피드백 1번)**: 코드 변경 없음 —
+  기존 `poc/FINDINGS.md`/`poc/SUBMISSION.md`/§5 UIA Stack Fragmentation에
+  이미 실증된 근거(WinAppDriver REST에 스크롤 API 없음, 세션이 생성 시점
+  hwnd 1개 고정이라 새 팝업 창을 못 봄, managed UIA가 레거시 Win32 컨트롤을
+  못 봄) + 인라인화(`-EncodedCommand`) 가능성 조사 결과(파라미터 있는 스크립트는
+  매 호출 재인코딩 필요 + 생성 파일마다 수백 줄 중복 + 디버깅 시 파일 없어
+  에러 스택 불투명 → `osForegroundHwnd()`가 파라미터 없는 6줄짜리에만
+  안전하게 적용된 이유)를 정리해 서면 응답 근거로 삼음. 응답 자체(Slack 전송)는
+  사용자 몫.
+- **미검증(GUI 필요, agent.py 재시작 필수 — `newWindowSegment` 필드 추가가
+  agent.py 쪽 변경이라 관리자 터미널에서 재시작해야 반영됨, 이번 세션은
+  관리자 권한이 없어 직접 재시작 불가)**: 실제 2창 앱(7-Zip 메인+다이얼로그 등) 재녹화 →
+  Generate → `npx wdio run` 실행 → 콘솔/스텝 로그에 `switch to window:`
+  스텝이 창 전환마다 뜨는지, 화면2 요소들이 실제로 클릭/타이핑되는지 확인
+  필요. "2차 화면 요소 캡처 자체가 누락되는지"(리뷰 피드백 3번)는 이번
+  세션에서 별도로 재현/확정하지 못함 — agent.py의 `_watch_windows()` 폴링
+  타이밍/PID 범위 문제일 가능성이 있으나 실제 GUI 재녹화 로그 없이는 확정
+  불가(추측성 수정 금지, 다음 세션에서 로그 기반으로 진행).
+
 **Next actions (2026-07-13 이후):**
 1. **PuTTY GUI 재검증 (2026-07-14 RC-A/B/C 수정 반영)**: server.js 재시작 후
    PuTTY 재-Generate(재녹화 불필요 — 최신 캡처 restore 후 Generate) →
@@ -507,14 +642,30 @@ managed-UIA 맹점 / ESC 앱종료 (코드 레벨 완료, GUI 미검증)**
 4. **anchor/scrollTarget 실캡처 확인**: id 없는 요소 클릭 시 `[inspect] anchor XPath ...`
    로그, 스크롤 시 `[scroll] container ...` 로그가 실캡처에서 뜨는지 확인
    (07-12 재녹화에서는 해당 케이스 미발생 — light-dismiss 경로만 검증됨).
-5. 7-Zip 등 나머지 native 앱으로 녹화→생성→`npx wdio run` end-to-end 검증.
-   7-Zip은 현재 미설치 — 설치 필요 (2026-07-12 확인).
+5. **7-Zip 재녹화 검증 (2026-07-15 이어서)**: agent.py 재시작(관리자) → 동일 흐름
+   재녹화(컴퓨터→C: 더블클릭→$Recycle.Bin 더블클릭→파일 더블클릭, 더블클릭 직후
+   같은 자리 재클릭 주의) → Generate → `npx wdio run Sevenzip/wdio.conf.js`
+   **2 passed** 확인 + `[inspect] ... climbed`류 신호로 신규 row-climb 조건
+   발동 확인. 코드 수정 자체는 수동 패치 캡처로 이미 2/2 검증됨(§4 2026-07-15).
+   그 뒤 다른 native 앱(WinRAR 등)으로 확장.
 6. Check `INPUT_CONTROL_TYPES` if typing in new apps is silently dropped
    (current set: `{"Edit", "Document", "ComboBox"}`).
 7. session 모드 doubleClick = 요소 클릭 2회 근사 — 탐색기류 행에서 rename 오발 여부
    GUI로 확인 필요(문제 시 WAD legacy moveto/doubleclick 엔드포인트 검토 — 단 좌표
    금지 원칙과의 정합 검토 선행). SESSION_HEADER의 ExpandCollapsePattern 지원도
    이번 스코프 밖이라 함께 검토 필요.
+
+8. **멀티윈도우 세그먼팅 GUI 검증 (2026-07-16 구현 이어서)**: agent.py 재시작
+   (관리자) → 실제 2창 앱(7-Zip 메인+"압축 대상 추가" 다이얼로그 등, 리터럴
+   타이틀 충돌 케이스 포함) 재녹화 → Generate → `npx wdio run` 실행. 확인할 것:
+   ① 콘솔/스텝 로그에 `switch to window: ...`가 창 전환마다 별도 스텝으로
+   보이는지, ② 화면2(다이얼로그)의 클릭/타이핑이 실제로 반영되는지, ③ 다이얼로그가
+   닫히고 메인 창(동일 타이틀)으로 돌아왔을 때도 click-not-found 없이 계속
+   진행되는지. 이 과정에서 `[watcher]`/`[inspect]`/`PID self-heal` 로그를 남겨
+   "2차 화면 요소 캡처 누락"(리뷰 피드백 3번)이 실제로 재현되는지, 재현된다면
+   PID 범위 문제인지 타이밍 문제인지 구분 — 로그 없이는 `_watch_windows()`를
+   추측성으로 고치지 않는다(2026-07-16 세션에서도 같은 원칙으로 이 항목을
+   보류함).
 
 *(보류됨 — 07-10 피드백으로 우선순위 강등: VSCode GUI 재검증 3종, FreeDM 드래그
 재녹화, FreeDM/ClaudeDesktop 실행 기록. Electron 제외 지시 + Drag 스코프 아웃.)*

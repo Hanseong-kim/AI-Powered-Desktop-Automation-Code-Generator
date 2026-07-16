@@ -175,7 +175,27 @@ class UIAInspector:
         try:
             aid = elem.CurrentAutomationId if elem is not None else ""
             name = elem.CurrentName if elem is not None else ""
-            if elem is not None and (aid in self.GENERIC_CELL_AUTOMATION_IDS or (not aid and not name)):
+            # 7-Zip's SysListView32 rows expose an inner "Edit"-typed surrogate
+            # cell that already carries the correct row Name (unlike VSCode's
+            # blank/misleading "이름" surrogate, 2026-07-08) — so the
+            # (not aid and not name) guard above never fires, and the capture
+            # keeps the surrogate. Confirmed 2026-07-15 (probe_wad.cjs):
+            # WinAppDriver's REST element/click on that surrogate is a
+            # silent no-op (list unchanged before/after), while a direct COM
+            # InvokePattern.Invoke() on the parent ListItem genuinely
+            # navigates. Climb whenever the leaf is an unlabeled-id Edit,
+            # regardless of whether its own Name looks fine — a real
+            # standalone Edit field (not inside a list row) has no
+            # ListItem/TreeItem ancestor, so _nearest_row_ancestor returns
+            # None there and this is a no-op for it.
+            is_unlabeled_edit = False
+            if elem is not None and not aid:
+                try:
+                    is_unlabeled_edit = elem.CurrentControlType == 50004  # Edit
+                except Exception:
+                    pass
+            if elem is not None and (aid in self.GENERIC_CELL_AUTOMATION_IDS
+                                      or (not aid and not name) or is_unlabeled_edit):
                 row = self._nearest_row_ancestor(elem)
                 if row is not None:
                     return row
@@ -732,6 +752,11 @@ class Recorder:
         # press-hold-move-release gesture can be told apart from a plain
         # click (drag support) — see _on_click/_handle/_emit_click_from_press.
         self._pending_press = None
+        # rootHwndHex of the last emitted event — lets _emit() flag a
+        # window-segment boundary (newWindowSegment) from ground-truth hwnd
+        # identity instead of codegen re-deriving it from title diffing
+        # downstream (2026-07-16, multi-window replay fix).
+        self._last_emitted_hwnd_hex = ""
 
     # ---------------- control ----------------
     def start(self, app_name, exe_path, platform):
@@ -742,6 +767,7 @@ class Recorder:
         self.target_hwnds = set()
         self._popup_hwnds = set()
         self._probed_skip = False
+        self._last_emitted_hwnd_hex = ""
 
         # Snapshot visible top-level windows BEFORE launching, so discovery can
         # diff to find the new window(s) the target opens (locale-independent).
@@ -1263,10 +1289,28 @@ class Recorder:
                 elem_hwnd = ins.resolve_root_hwnd(elem)
                 if (elem_hwnd and elem_hwnd not in self.target_hwnds
                         and elem_hwnd not in self._popup_hwnds):
-                    log(f"[inspect] element hwnd={elem_hwnd} not a tracked "
-                        f"window (name={info.get('name')!r} "
-                        f"rect={info.get('rect')!r}) — dropping selector")
-                    light_dismiss = True
+                    # _watch_windows() only registers new popup hwnds on its
+                    # ~0.5s poll — a dialog can appear and get hit-tested here
+                    # before that poll catches up (confirmed 2026-07-15: 7-Zip
+                    # "확인" button on a freshly-opened overwrite dialog was
+                    # correctly resolved but dropped as "untracked", losing a
+                    # selector that then hard-failed replay). Mirror
+                    # _foreground_is_target()'s PID self-heal (2026-07-13)
+                    # instead of only trusting the watcher's snapshot — a real
+                    # unrelated window (different PID, e.g. the Calculator
+                    # cross-contamination bug fixed 2026-07-13) still gets
+                    # rejected below.
+                    if pid_of_hwnd(elem_hwnd) in self._target_pids():
+                        self.target_hwnds.add(elem_hwnd)
+                        self._popup_hwnds.add(elem_hwnd)
+                        log(f"[inspect] PID self-heal hwnd={elem_hwnd} "
+                            f"(name={info.get('name')!r}) — accepted "
+                            "(pre-empts 0.5s watcher poll)")
+                    else:
+                        log(f"[inspect] element hwnd={elem_hwnd} not a tracked "
+                            f"window (name={info.get('name')!r} "
+                            f"rect={info.get('rect')!r}) — dropping selector")
+                        light_dismiss = True
             # Adopted element's own bounding rect doesn't contain the click
             # point (confirmed 2026-07-13: PuTTY capture picked the
             # 'Selection' TreeItem with rect left=567 for a click at x=557 —
@@ -1708,6 +1752,16 @@ class Recorder:
                 if end is not None:
                     event["endRelX"] = max(0, int(end[0]) - win_left)
                     event["endRelY"] = max(0, int(end[1]) - win_top)
+
+        # 명시적 윈도우 세그먼트 경계 신호 (2026-07-16) — codegen이 title diff가
+        # 아니라 hwnd 기반의 확실한 경계를 받도록 소스에서 태깅. 같은 창이
+        # 연속되면(hex 불변) 안 붙음 — 구버전 레코딩과의 하위호환을 위해 이
+        # 필드가 없는 이벤트는 server.js가 기존 rootHwndHex diff 폴백을 쓴다.
+        cur_hwnd_hex = event.get("rootHwndHex", "")
+        if cur_hwnd_hex and cur_hwnd_hex != self._last_emitted_hwnd_hex:
+            event["newWindowSegment"] = True
+        if cur_hwnd_hex:
+            self._last_emitted_hwnd_hex = cur_hwnd_hex
 
         # screenId: sanitized window title — groups events by UI context
         raw_title = event["element"].get("windowTitle", "") or self.session.get("appName", "")

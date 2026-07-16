@@ -155,6 +155,46 @@ SESSION_EVENTS = [
                control_type="Pane", window_title="Settings Dialog", app_name=SESSION_APP,
                value="-2", delta=-2, x=400, y=350, index=4, rootHwndHex="C3D4",
                scrollTarget={"automationId": "optionList", "className": "ScrollViewer", "name": "", "controlType": "Pane"}),
+    # Revisit case (2026-07-16, multi-window segmenting fix): the dialog
+    # closes and the next click lands back on the ORIGINAL window (hwnd
+    # A1B2) — the segment-boundary detector must fire again on the way
+    # back, not just on the one-way A1B2->C3D4 transition (Hamza review
+    # feedback: "actions after navigating back should still be grouped
+    # under the right window").
+    make_event("click", name="Cancel", automation_id="btnCancel", class_name="Button",
+               window_title="Main Window", app_name=SESSION_APP, x=150, y=120, index=5,
+               rootHwndHex="A1B2",
+               winLeft=0, winTop=0, winWidth=1024, winHeight=768),
+]
+
+# Title-collision scenario (2026-07-16, multi-window segmenting fix) — two
+# DIFFERENT windows sharing the exact same literal title text (confirmed
+# real-world case, 2026-07-15 "버그2": 7-Zip's main file-list window and its
+# "압축 대상 추가" dialog are BOTH just titled "7-Zip"). getWindowSession()'s
+# title-keyed cache can't tell them apart by title alone; the switch-step's
+# _switchWindow() must force a fresh lookup on every hwnd-boundary crossing
+# even when the title string is identical, or replay silently reuses a dead
+# session/hwnd from the wrong window (STEP N+ click-not-found).
+COLLISION_APP = "MockCollision"
+COLLISION_EXE = "C:\\mock\\collision.exe"
+COLLISION_EVENTS = [
+    make_event("click", name="Extract", automation_id="btnExtract", class_name="Button",
+               window_title="7-Zip", app_name=COLLISION_APP, x=100, y=100, index=1,
+               rootHwndHex="E1E1",
+               winLeft=0, winTop=0, winWidth=1024, winHeight=768),
+    make_event("click", name="OK", automation_id="btnOk", class_name="Button",
+               window_title="7-Zip", app_name=COLLISION_APP, x=400, y=300, index=2,
+               rootHwndHex="F2F2",
+               winLeft=200, winTop=150, winWidth=600, winHeight=400),
+    # Back to the main window — SAME literal title ("7-Zip") as event 1, and
+    # the SAME hwnd (E1E1) as event 1, but a DIFFERENT hwnd than the
+    # immediately preceding event (F2F2). Must still trigger a switch. Plain
+    # Button (not ListItem) so this goes through the ordinary _clickScoped
+    # path that getWindowSession()/_switchWindow() actually govern.
+    make_event("click", name="Refresh", automation_id="btnRefresh", class_name="Button",
+               window_title="7-Zip", app_name=COLLISION_APP,
+               x=120, y=200, index=3, rootHwndHex="E1E1",
+               winLeft=0, winTop=0, winWidth=1024, winHeight=768),
 ]
 
 # Native Win32 dialog scenario (2026-07-13, PuTTY GUI failure follow-up) —
@@ -642,6 +682,66 @@ def step_wdio_generate_session():
             "expect(_failures).toEqual([])" in content,
             "missing _failures assert",
         )
+        # 2026-07-16 multi-window segmenting fix: an explicit, separately
+        # logged "switch to window" step must appear at every hwnd boundary
+        # (Hamza review feedback — window1/window2 actions must visibly be
+        # grouped, not just implicitly work via getWindowSession()).
+        check(
+            f"  {fname} has a _switchWindow() helper (evicts stale title-keyed cache)",
+            "async function _switchWindow(" in content,
+            "missing _switchWindow — general getWindowSession(title) path has "
+            "no defense against reusing a dead session/hwnd for a revisited "
+            "same-titled window (2026-07-15 'bug 2', general path unpatched)",
+        )
+        switch_count = content.count("await _switchWindow('")
+        check(
+            f"  {fname} emits a switch-to-window step at each of the 3 hwnd boundaries "
+            "(A1B2 -> C3D4 -> A1B2 revisit)",
+            switch_count == 3,
+            f"expected 3 '_switchWindow(' calls (initial + dialog-open + "
+            f"revisit-main), got {switch_count}",
+        )
+        check(
+            f"  {fname} labels the switch step visibly in the step list",
+            "_step('switch to window:" in content,
+            "switch step isn't wrapped in _step() with a visible label — "
+            "window1/window2 grouping won't show up in the replay log",
+        )
+
+
+def step_wdio_generate_window_collision():
+    print("\n[9b] Multi-window title-collision — same literal title, different hwnd")
+    request("DELETE", "/api/events")
+    for ev in COLLISION_EVENTS:
+        request("POST", "/api/events", ev)
+
+    status, body = request("POST", "/api/generate", {
+        "appName": COLLISION_APP,
+        "exePath": COLLISION_EXE,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (collision) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped collision checks)", False, body.get("message", ""))
+        return
+    files = body.get("files", [])
+    for f in files:
+        fname = f.get("filename", "")
+        content = f.get("content", "")
+        # All 3 events share the literal title "7-Zip" but cross hwnd
+        # boundaries E1E1 -> F2F2 -> E1E1 — a naive "already switched to
+        # this title" cache would collapse this to 1 switch (or 0 after the
+        # first), silently reusing the dead dialog session/hwnd for the
+        # revisit (exactly the real 7-Zip STEP 6+ click-not-found bug,
+        # 2026-07-15). Must still fire on every hwnd change.
+        switch_count = content.count("await _switchWindow('7-Zip')")
+        check(
+            f"  {fname} switches window 3 times despite identical title text "
+            "(E1E1 -> F2F2 -> E1E1)",
+            switch_count == 3,
+            f"expected 3 '_switchWindow('7-Zip')' calls (title collision must "
+            f"not suppress hwnd-boundary detection), got {switch_count}",
+        )
 
 
 def step_wdio_generate_native():
@@ -834,6 +934,7 @@ def main():
     step_post_events()
     step_wdio_generate()
     step_wdio_generate_session()
+    step_wdio_generate_window_collision()
     step_wdio_generate_native()
 
     passed = sum(_results)

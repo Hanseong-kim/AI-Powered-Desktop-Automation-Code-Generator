@@ -1140,12 +1140,24 @@ def main():
         print("[osScopedInvoke] invoked under main window subtree")
         sys.exit(0)
 
-    # (b) 메인 창을 제외한 다른 모든 최상위 창 서브트리 — 이미 열려 있는
-    #     팝업/드롭다운(예: ComboLBox)을 잡는다. 새로 뜬 창인지 여부는
-    #     따지지 않는다(트리거가 이미 직전 스텝에서 실행됐으므로 baseline
-    #     diff 불필요).
+    # (b) 메인 창과 같은 프로세스(PID)가 소유한 다른 최상위 창 서브트리 — 이미
+    #     열려 있는 팝업/드롭다운(예: PuTTY의 ComboLBox, FileZilla 메뉴)을
+    #     잡는다. 새로 뜬 창인지 여부는 따지지 않는다(트리거가 이미 직전
+    #     스텝에서 실행됐으므로 baseline diff 불필요). PID로 반드시 한정한다 —
+    #     PID 무관하게 데스크톱 전체를 뒤지면 완전히 남남인 창을 잘못 클릭할
+    #     수 있음을 실측으로 확인(2026-07-15: 7-Zip에서 "hansung"/"project" 등
+    #     사용자의 실제 폴더명을 검색하다가 (a)에서 못 찾자 사용자가 실제로
+    #     열어둔 탐색기 창(explorer.exe, class=CabinetWClass)과 VS Code
+    #     창(Code.exe)에서 우연히 같은 이름을 찾아 그 창을 대신 클릭 — 거짓
+    #     성공으로 로그에 "invoked" 찍힘 + 사용자 창에 실제 부작용).
+    main_pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(main_h, ctypes.byref(main_pid))
     for h in top_windows():
         if h == main_h:
+            continue
+        cand_pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(h, ctypes.byref(cand_pid))
+        if cand_pid.value != main_pid.value:
             continue
         try:
             other_root = uia.ElementFromHandle(h)
@@ -1203,7 +1215,14 @@ function filterEvents(eventList) {
 // "폴더 열기" 다이얼로그에서 확인). 코드 생성 시점에 doubleClick 구성 클릭(직전 최대
 // 2개의 click, 같은 좌표+근접 타임스탬프)을 걷어내 doubleClick 스텝 하나만 남긴다.
 const DEDUPE_RADIUS = 6;       // px — agent.py DOUBLE_CLICK_RADIUS와 동일
-const DEDUPE_MAX_GAP_MS = 1500; // ms — 방출 시각 비교라 캡처 창(500ms)보다 여유 있게
+// ms — agent.py의 DOUBLE_CLICK_INTERVAL(0.5s)과 동일하게 맞춘다. 이 값을
+// 1500으로 느슨하게 두면, 물리적 더블클릭과 무관한 "그 전의 의도적 단일
+// 클릭"이 우연히 같은 좌표에 있을 때 함께 병합돼 사라진다. JSON의
+// timestamp는 press 시각이 아니라 워커 스레드 처리 시각이라 약간의 지터가
+// 섞이지만, 실측(2026-07-15 7-Zip 캡처 4개 트리오)에서 트리오 내부 간격은
+// 13~187ms로 500ms 안에 충분히 들어오고 트리오 사이는 738ms로 확실히
+// 벌어진다.
+const DEDUPE_MAX_GAP_MS = 500;
 
 function dedupeDoubleClicks(events) {
   const out = [];
@@ -1211,7 +1230,31 @@ function dedupeDoubleClicks(events) {
     let e = raw;
     if (e.action === 'doubleClick') {
       let merged = 0;
-      let donorElement = null;
+      // 트리오([click, click, doubleClick])에서 어느 이벤트의 element를
+      // 정답으로 삼을 것인가 — **가장 이른 구성 click**이다.
+      //
+      // agent.py는 물리적 더블클릭 1회를 click+click+doubleClick 3개로 방출하는데,
+      // 각 이벤트의 element는 워커 스레드가 그 시점에 hit-test한 결과다. 문제는
+      // 폴더 진입 같은 화면 전환이 **2번째 press에서 일어난다**는 것: 2번째
+      // click과 doubleClick의 hit-test는 이미 전환이 끝난 뒤 실행돼, 사용자가
+      // 실제로 누른 대상이 아니라 **전환 후 그 좌표에 새로 놓인 행**을 가리킨다.
+      // 즉 트리오 중 **첫 click만 pre-navigation**이라 유일하게 신뢰할 수 있다.
+      //
+      // 실측 확정(2026-07-15, 7-Zip 캡처 `SevenZip_...T21-09-03`): 사용자는
+      // 컴퓨터→C:→hansung→west를 더블클릭 4번 했는데, 캡처는
+      // [click 컴퓨터, click C:, dblClick C:] / [click C:, click $Recycle.Bin,
+      // dblClick $Recycle.Bin] / ... 로 남았다 — 각 트리오 안에서 windowTitle이
+      // 이미 `7-Zip`→`컴퓨터\`, `컴퓨터\`→`C:\`로 바뀐 것이 결정적 증거.
+      // **$Recycle.Bin은 사용자가 한 번도 건드린 적 없는 유령**(C:\ 진입 순간
+      // 커서 밑에 있던 첫 행)인데, 이전 로직은 이 유령을 실제 스텝으로 만들어
+      // 재생 때 보호된 시스템 폴더로 들어가버렸고 이후 모든 스텝이 무너졌다.
+      // earliest 채택 시 4개 트리오 → dblClick 컴퓨터/C:/hansung/west =
+      // 사용자 의도와 정확히 일치(녹화 최종 상태 `C:\hansung\west\`와도 일치).
+      //
+      // 이 규칙은 2026-07-08 VSCode 케이스(doubleClick 자신은 element가 비고
+      // 구성 click에만 셀렉터가 있던 상황)의 기존 donor 로직도 그대로 포섭한다
+      // — 그때도 정답은 "가장 이른 구성 click"이었다.
+      let earliestElement = null;
       while (merged < 2 && out.length > 0) {
         const prev = out[out.length - 1];
         if (prev.action !== 'click') break;
@@ -1221,22 +1264,22 @@ function dedupeDoubleClicks(events) {
         if (dx > DEDUPE_RADIUS || dy > DEDUPE_RADIUS || dt > DEDUPE_MAX_GAP_MS) break;
         out.pop();
         merged++;
-        // 두 번째 press 시점의 hit-test는 (더블클릭 도중 UI가 전환되는 타이밍이라)
-        // 자주 빈 요소를 반환한다(confirmed 2026-07-08: VSCode 폴더 다이얼로그의
-        // doubleClick 이벤트 3개 전부 automationId/name/className 없음) — 걷어낸
-        // 구성 click 중 셀렉터를 가진 것이 있으면 doubleClick에 승계해 좌표만
-        // 재생하는 대신 이름 기반 셀렉터를 쓸 수 있게 한다.
-        if (!donorElement && (prev.element?.automationId || prev.element?.name || prev.element?.className)) {
-          donorElement = prev.element;
+        // 뒤에서 앞으로 pop하므로 마지막에 남는 값이 가장 이른 구성 click이다.
+        if (prev.element?.automationId || prev.element?.name || prev.element?.className) {
+          earliestElement = prev.element;
         }
       }
       if (merged > 0) {
         console.log(`[dedupe] merged ${merged} click(s) into doubleClick @(${e.x},${e.y})`);
       }
-      const own = e.element || {};
-      if (!own.automationId && !own.name && !own.className && donorElement) {
-        console.log(`[dedupe] doubleClick @(${e.x},${e.y}) had no element data — adopted selector from constituent click`);
-        e = { ...e, element: donorElement };
+      if (earliestElement) {
+        const own = e.element || {};
+        const ownKey = own.name || own.automationId || '';
+        const newKey = earliestElement.name || earliestElement.automationId || '';
+        if (ownKey !== newKey) {
+          console.log(`[dedupe] doubleClick @(${e.x},${e.y}) retargeted ${JSON.stringify(ownKey)} -> ${JSON.stringify(newKey)} (post-navigation hit-test corrected to the pre-navigation one)`);
+        }
+        e = { ...e, element: earliestElement };
       }
     }
     out.push(e);
@@ -1473,11 +1516,19 @@ function needsSessionSwitching(eventList) {
   const filtered = filterEvents(eventList);
   const hasElectron = filtered.some(e => e.isElectron === true);
   if (hasElectron) return true;
-  // 콘텐츠에 따라 타이틀이 바뀌는 단일 창(예: Win11 메모장의 "*a - 메모장" →
-  // "*asdfasdfasdf - 메모장")을 여러 창으로 오인해 세션 전환 모드로 빠지는 것을 방지.
-  // rootHwndHex는 agent.py가 이벤트마다 emit하는 실제 top-level 창 핸들 — 전부
-  // 동일하면 창은 하나뿐이므로 titles.size는 무시하고 simple 모드로 강제한다.
+  // rootHwndHex(agent.py가 이벤트마다 emit하는 실제 top-level 창 핸들)를 title
+  // 텍스트보다 우선하는 ground truth로 쓴다 — 양방향 모두: (a) 콘텐츠에 따라
+  // 타이틀이 바뀌는 단일 창(예: Win11 메모장의 "*a - 메모장" → "*asdfasdfasdf -
+  // 메모장")을 여러 창으로 오인해 세션 전환 모드로 잘못 빠지는 것을 막고, (b)
+  // 반대로 서로 다른 두 창이 리터럴로 동일한 타이틀을 쓰는 경우(2026-07-15
+  // "버그2" 실측 — 7-Zip 메인 창과 "압축 대상 추가" 다이얼로그가 둘 다 그냥
+  // "7-Zip")도 놓치지 않는다: title만 보면 titles.size===1이라 세션 모드
+  // 자체가 발동 안 해 창 전환 로직이 통째로 미실행되는 게 실제 근본 원인이었다
+  // (2026-07-16 확인 — getWindowSession의 캐시 키 문제 이전에, 애초에 세션
+  // 모드 진입 조건에서 걸러지고 있었다). rootHwndHex가 아예 없는 구버전
+  // 캡처만 title 비교로 폴백한다.
   const roots = new Set(filtered.map(e => e.rootHwndHex).filter(Boolean));
+  if (roots.size > 1) return true;
   if (roots.size === 1) return false;
   const titles = new Set(filtered.map(e => e.element?.windowTitle || '').filter(Boolean));
   return titles.size > 1;
@@ -1869,6 +1920,39 @@ function _scrollHwnd(title) {
     return 0;
 }
 
+// 창-교차 클릭 재생 (SIMPLE_HEADER의 동일 함수와 동일 구현 — 2026-07-15,
+// 세션 모드에도 필요해짐: 같은 리터럴 타이틀을 쓰는 다이얼로그+메인 창(예:
+// 7-Zip — 파일 목록 창도, "압축 대상 추가" 다이얼로그도 둘 다 그냥 "7-Zip")은
+// getWindowSession(title)의 title-키 캐시가 두 창을 구분 못 해 다이얼로그가
+// 닫힌 뒤에도 그 죽은 세션을 계속 재사용한다(확인됨: STEP 6+ 메인 창 더블클릭이
+// 전부 click-not-found). osScopedInvoke.py는 hwnd로 메인 창 서브트리 → 그 외
+// 모든 최상위 창 순으로 직접 찾아 Invoke하므로 title 충돌 자체가 없다 —
+// 다이얼로그 내부의 개별 클릭들(트리거 병합과 무관하게 각자 cross-window로
+// 캡처됨)도 이 경로로 독립적으로 처리된다.
+function osScopedInvoke(hwnd, target, triggerTarget) {
+    if (!hwnd) {
+        _failures.push('osScopedInvoke:no-hwnd');
+        console.warn('[osScopedInvoke] no window hwnd — cannot search without a window handle');
+        return;
+    }
+    try {
+        const selB64 = Buffer.from(JSON.stringify(target || {}), 'utf8').toString('base64');
+        const triggerArg = triggerTarget
+            ? \`--trigger-sel-b64 "\${Buffer.from(JSON.stringify(triggerTarget), 'utf8').toString('base64')}"\`
+            : '';
+        const out = execSync(
+            \`python "\${join(__dirname, 'osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${triggerArg}\`,
+            { stdio: 'pipe', timeout: 20000 }
+        ).toString().trim();
+        if (out) console.log(out);
+    } catch (e) {
+        _failures.push('osScopedInvoke');
+        const stdoutMsg = (e.stdout && e.stdout.toString().trim()) || '';
+        if (stdoutMsg) console.log(stdoutMsg);
+        console.warn('[osScopedInvoke] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).substring(0, 200));
+    }
+}
+
 // Window session pool: title → Appium sessionId.
 // global browser (Root session) used ONCE per new windowTitle for hwnd discovery;
 // a fast scoped appTopLevelWindow session is then opened via Appium REST API.
@@ -2047,6 +2131,21 @@ async function getWindowSession(title) {
     _warnings.push('session-fallback:' + title);
     _sessionIds[title] = { sid: browser.sessionId, rootElId: matchedEl ? matchedEl.elementId : null, hwnd: 0 };
     return _sessionIds[title];
+}
+
+// 윈도우 세그먼트 경계에서 호출 (2026-07-16, 멀티윈도우 세그먼팅) — 이 title로
+// 캐시된 세션/hwnd가 있으면 무조건 버리고 getWindowSession()이 새로 스캔하게
+// 한다. 캐시를 그대로 믿으면, 다이얼로그가 닫히고 같은 리터럴 타이틀의 메인
+// 창으로 돌아왔을 때(예: 7-Zip — 메인 창도 다이얼로그도 전부 그냥 "7-Zip")
+// 이미 닫힌 다이얼로그의 죽은 세션/hwnd를 계속 재사용해 click-not-found가
+// 반복된다(2026-07-15 "버그2" — cross-window-trigger 경로는 hwnd 기반
+// osScopedInvoke로 패치됐지만 이 일반 getWindowSession 경로는 미패치였음).
+// 녹화 시점 hwnd 값 자체는 재생 시 재사용할 수 없으므로(창마다 매번 새
+// hwnd가 배정됨) 복합 키가 아니라 "세그먼트 전환 시 강제 재조회"로 고친다.
+async function _switchWindow(title) {
+    delete _sessionIds[title];
+    delete _hwndCache[title];
+    return await getWindowSession(title);
 }
 
 // 스코프 세션(또는 Root 폴백의 rootElId 서브트리)에서 셀렉터로 요소를 찾아
@@ -2572,6 +2671,10 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
   // 못 채운 경우)는 직전에 관측된 실제 windowTitle을 이어받아 같은 창 세그먼트로
   // 묶는다 — 같은 다이얼로그 안에서 연속 캡처되므로 안전한 가정이다.
   let lastWinTitle = '';
+  // 이전 이벤트의 rootHwndHex — 세그먼트 경계(창 전환) 감지용
+  // (2026-07-16 멀티윈도우 세그먼팅). agent.py가 event.newWindowSegment를
+  // 직접 신호하면 그걸 우선 쓰고, 없으면(구버전 캡처) hwnd-diff로 폴백한다.
+  let prevSegHwnd = null;
 
   filtered.forEach((e, i) => {
     const stepNum  = i + 1;
@@ -2581,6 +2684,21 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
     const relTitle    = winTitle || lastWinTitle;
     if (winTitle) lastWinTitle = winTitle;
     const electronCtx = winFragOk && relTitle.includes(winFrag);
+
+    // 명시적 윈도우 전환 스텝 (2026-07-16) — 이전 스텝과 다른 창(hwnd)으로
+    // 넘어가는 경계에서, 리플레이 로그/스텝 리스트에 "switch to window: X"를
+    // 별도 스텝으로 남겨 window1/window2 액션이 실제로 구분되어 보이게 한다
+    // (기존엔 getWindowSession() 내부에서만 암묵적으로 전환돼 리뷰 피드백대로
+    // "다음 화면 액션이 안 보인다"는 인상을 줬다). 세션 모드에서만 의미가
+    // 있다 — simple 모드는 창이 하나뿐이라 전환 개념이 없다.
+    const segBoundary = useSession && relTitle &&
+      (e.newWindowSegment || (e.rootHwndHex && e.rootHwndHex !== prevSegHwnd));
+    if (e.rootHwndHex) prevSegHwnd = e.rootHwndHex;
+    if (segBoundary) {
+      testSteps.push(
+`            await _step('switch to window: ${escapeStr(relTitle)}', async () => { await _switchWindow('${escapeStr(relTitle)}'); });`
+      );
+    }
 
     if (e.action === 'scroll') {
       // 프로그래매틱 스크롤 (2026-07-10 지시): 캡처 시점에 agent.py가 기록한
@@ -2699,7 +2817,7 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       testSteps.push(
 `            await _step('${stepNum}:expandCollapse ${escapeStr(e.element?.name || '')}${itemName ? ' -> ' + escapeStr(itemName) : ''}', () => page.click${stepNum}());`
       );
-    } else if (!useSession && e.action === 'click' && isCrossWindowEvent(e, recordedRect)
+    } else if (e.action === 'click' && isCrossWindowEvent(e, recordedRect)
         && (e.element?.name || e.element?.automationId)) {
       // 창-교차 클릭 (2026-07-13, PuTTY "Remote character set:" 콤보박스
       // 조사) — 이 이벤트가 캡처된 창 크기/위치가 메인 창과 다름 → 클릭
@@ -2709,6 +2827,13 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       // 병합한 경우 — 예: "DropDown" 버튼) 같은 호출 안에서 그 트리거도 함께
       // 클릭한다 — 트리거 클릭과 항목 검색을 별도 스텝으로 쪼개면 그 사이
       // 지연 동안 드롭다운이 자동으로 닫혀버림을 실측으로 확인(2026-07-13).
+      // 세션 모드도 포함(2026-07-15) — 메인 창과 그 창이 여는 다이얼로그가
+      // 리터럴로 동일한 타이틀 텍스트를 쓰는 앱(예: 7-Zip, 전부 그냥 "7-Zip")은
+      // getWindowSession(title)의 title-키 세션 캐시가 둘을 구분 못 해
+      // 다이얼로그가 닫힌 뒤에도 그 죽은 세션을 재사용하는 버그가 있었다
+      // (확인됨: STEP 6+ 메인 창 더블클릭이 전부 click-not-found). hwnd로
+      // 직접 찾는 osScopedInvoke는 title 충돌 자체가 없어 세션 모드에도
+      // 안전하게 적용된다.
       const target = {
         automationId: e.element.automationId || '',
         className: e.element.className || '',
@@ -2731,13 +2856,45 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
         className: trig.className || '',
         name: trig.automationId ? '' : (trig.name || ''),
       } : null;
+      // 메인 창 hwnd 변수: SIMPLE_HEADER는 _appHwnd(initAppHwnd()가 채움),
+      // SESSION_HEADER는 _hwndCache[_mainTitleFrag](launchApp의 baseline-diff가
+      // beforeAll에서 채움) — 둘 다 osScopedInvoke 호출 전에 이미 준비돼 있다.
+      const hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
       pageMethods.push(
 `    async click${stepNum}() {
-        osScopedInvoke(_appHwnd, ${JSON.stringify(target)}${triggerTarget ? `, ${JSON.stringify(triggerTarget)}` : ''});
+        osScopedInvoke(${hwndArg}, ${JSON.stringify(target)}${triggerTarget ? `, ${JSON.stringify(triggerTarget)}` : ''});
     }`
       );
       testSteps.push(
 `            await _step('${stepNum}:click ${escapeStr(e.element?.name || '')} (cross-window)', () => page.click${stepNum}());`
+      );
+    } else if ((e.action === 'click' || e.action === 'doubleClick')
+        && e.element?.controlType === 'ListItem'
+        && (e.element?.name || e.element?.automationId)) {
+      // 네이티브 ListView 행(예: 7-Zip 파일 목록의 드라이브/폴더 행) — WinAppDriver의
+      // element/click(REST)이 이 컨트롤에서는 신뢰 불가로 실측 확인(2026-07-15):
+      // COM UIA로 직접 InvokePattern.Invoke()를 호출하면 즉시 폴더 진입(트리 갱신,
+      // "C:" 등 새 행 노출)하지만, 완전히 동일한 세션·타이밍에서 WAD의
+      // browser.$(sel).click()은 요소를 찾아 클릭 자체는 에러 없이 끝나면서도
+      // 목록을 전혀 갱신시키지 않았다(클릭 전/후 노출된 이름 목록이 글자 그대로
+      // 동일 — diagnostic script로 직접 확인). InvokePattern은 이 프로젝트의
+      // 다른 COM 경로(osScopedInvoke/osExpandCollapse)와 같은 "기본 동작 실행"이라
+      // doubleClick도 별도 처리 없이 Invoke() 1회로 충분(실측: "컴퓨터" 단일 클릭
+      // 캡처가 Invoke() 1회로 이미 폴더 진입까지 완료). 좌표는 어디에도 안 씀 —
+      // osScopedInvoke.py가 hwnd 서브트리에서 셀렉터로 직접 찾아 Invoke.
+      const target = {
+        automationId: e.element.automationId || '',
+        className: e.element.className || '',
+        name: e.element.name || '',
+      };
+      const hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
+      pageMethods.push(
+`    async click${stepNum}() {
+        osScopedInvoke(${hwndArg}, ${JSON.stringify(target)});
+    }`
+      );
+      testSteps.push(
+`            await _step('${stepNum}:${e.action} ${escapeStr(e.element?.name || '')}', () => page.click${stepNum}());`
       );
     } else {
       // Click / DoubleClick — XPath-only (2026-07-10: 좌표 재생 전면 금지).
@@ -2889,15 +3046,76 @@ function resolveAppCap(exePath) {
   return (exePath || '').replace(/\\/g, '\\\\');
 }
 
+// Some apps persist last-navigated state across launches (registry, not a
+// file the generated test controls), so a fresh process for THIS run can
+// silently start somewhere other than where the recording began — no
+// selector/click bug involved, the app itself just isn't stateless between
+// runs. Confirmed 2026-07-15: 7-Zip File Manager writes its last-opened
+// folder to HKCU\Software\7-Zip\FM\PanelPath0/1 and reopens there on next
+// launch — after a run that navigated into C:\$Recycle.Bin\..., the NEXT
+// run's fresh 7zFM.exe opened directly into C:\$Recycle.Bin\ instead of the
+// "컴퓨터" (My Computer) root the capture assumed, so every subsequent
+// selector lookup failed against content that was never there. Reset any
+// known app's persisted navigation state once per test run, before the
+// session (and the app process) is created — same "generic app support"
+// pattern as KNOWN_UWP_STUB_AUMID, keyed by exe basename, no-op for apps
+// not in the map.
+// NOTE the `-ErrorAction Stop` + `exit 0` shape: `-ErrorAction
+// SilentlyContinue` suppresses the error MESSAGE but still leaves `$?`
+// false, and powershell.exe then exits 1 — which makes execSync throw, so
+// the reset silently never runs (confirmed 2026-07-15: the first version
+// used SilentlyContinue and threw on EVERY invocation, whether or not the
+// values existed; the run that "passed" only did so because the registry
+// happened to already be clean from a manual delete). Promote to a
+// terminating error, swallow it in catch, and force a success exit code so
+// the hook is a genuine no-op when there is nothing to delete.
+const KNOWN_APP_STATE_RESET = {
+  '7zfm.exe': `try { Remove-ItemProperty -Path 'HKCU:\\Software\\7-Zip\\FM' -Name PanelPath0,PanelPath1 -ErrorAction Stop } catch {}; exit 0`,
+};
+
+// -EncodedCommand (base64 UTF-16LE) sidesteps quote-escaping entirely when
+// embedding a PowerShell one-liner inside a JS template string inside a JS
+// string inside a shell command — the same technique already used for
+// OS_FOREGROUND_ENCODED (see SIMPLE_HEADER) rather than fighting nested
+// quote levels (confirmed 2026-07-15: a single-quoted registry path inside
+// a single-quoted execSync(...) string broke the generated wdio.conf.js
+// with "missing ) after argument list").
+function buildAppStateResetHook(exePath) {
+  const base = path.basename(exePath || '').toLowerCase();
+  const psCmd = KNOWN_APP_STATE_RESET[base];
+  if (!psCmd) return '';
+  const encoded = Buffer.from(psCmd, 'utf16le').toString('base64');
+  // onWorkerStart (not onPrepare) — onPrepare fires exactly ONCE, before any
+  // worker spawns, but each spec file (ById/ByClass) launches its OWN fresh
+  // app instance in its OWN later worker. With onPrepare, only the FIRST
+  // worker's launch saw a clean registry; by the second worker's turn the
+  // first worker's run had already re-polluted it, and that spec's STEP1
+  // failed exactly like before the fix (confirmed 2026-07-15: ById passed,
+  // ByClass — running second — failed on the identical "target not found").
+  // onWorkerStart runs once per worker, right before that worker creates
+  // its own session/launches its own app instance.
+  return `
+  onWorkerStart: function () {
+    try {
+      execSync('powershell -NoProfile -EncodedCommand ${encoded}', { stdio: 'pipe', timeout: 10000 });
+    } catch (e) {
+      console.warn('[onWorkerStart] app-state reset failed (non-fatal):', String(e.message || e).substring(0, 150));
+    }
+  },`;
+}
+
 function buildWdioConf(exePath, specFiles, useSession) {
   const specsArr = (specFiles && specFiles.length)
     ? specFiles.map(f => `'./${f}'`).join(', ')
     : `'./*.js'`;
 
+  const stateResetHook = buildAppStateResetHook(exePath);
+  const execImport = stateResetHook ? `import { execSync } from 'child_process';\n\n` : '';
+
   if (useSession) {
     // Multi-window / Electron: Root session as global browser for hwnd discovery.
     // Tests open scoped appTopLevelWindow sessions themselves via Appium REST API.
-    return `export const config = {
+    return `${execImport}export const config = {
   runner: 'local',
   specs: [${specsArr}],
   exclude: ['./wdio.conf.js'],
@@ -2916,13 +3134,13 @@ function buildWdioConf(exePath, specFiles, useSession) {
   reporters: ['spec'],
   services: ['appium'],
   appium: { command: 'appium', args: ['--allow-insecure', 'winappdriver'] },
-  injectGlobals: true,
+  injectGlobals: true,${stateResetHook}
 };`;
   }
 
   // Single-window Win32/UWP: direct app launch, classic browser.$() style.
   const appCap = resolveAppCap(exePath);
-  return `export const config = {
+  return `${execImport}export const config = {
   runner: 'local',
   specs: [${specsArr}],
   exclude: ['./wdio.conf.js'],
@@ -2942,7 +3160,7 @@ function buildWdioConf(exePath, specFiles, useSession) {
   reporters: ['spec'],
   services: ['appium'],
   appium: { command: 'appium', args: ['--allow-insecure', 'winappdriver'] },
-  injectGlobals: true,
+  injectGlobals: true,${stateResetHook}
 };`;
 }
 
