@@ -19,6 +19,8 @@ recorded-events/
 generated-wdio/MockMulti/
 generated-wdio/MockNative/
 generated-wdio/MockCollision/
+generated-wdio/MockDelayedHwnd/
+generated-wdio/MockExpandRedundant/
 
 Claude code task server token opt.md
 Claude code task v2.md
@@ -36,3 +38,11 @@ server/_out3.log
 server/_out4.log
 server/_out5.log
 server/_out6.log
+
+# server/ 밑에 디버깅 중 생기는 언더스코어 접두사 스크래치/진단 파일
+# (예: _dump_events.txt, _gen3.json, _diag_rootscan.mjs, _t5.out/.err) —
+# 실제 소스 파일은 언더스코어로 시작하지 않으므로 안전하게 전부 제외
+server/_*
+
+# 루트에서 mock_events.py 등을 돌릴 때 생기는 스크래치 로그
+/_mock_run.log
