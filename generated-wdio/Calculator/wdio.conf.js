@@ -17,6 +17,6 @@ export const config = {
   jasmineOpts: { defaultTimeoutInterval: 60000 },
   reporters: ['spec'],
   services: ['appium'],
-  appium: { command: 'appium', args: ['--allow-insecure', 'winappdriver'] },
+  appium: { command: 'appium', args: ['--allow-insecure', '*:winappdriver'] },
   injectGlobals: true,
 };

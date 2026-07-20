@@ -1,6 +1,7 @@
-import { execSync } from 'child_process';
+import { execSync, spawn } from 'child_process';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { homedir } from 'os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -13,13 +14,176 @@ const _warnings = [];
 // budget was getting eaten by PowerShell's own process-spawn + Add-Type JIT
 // cost on the FIRST call of a run (confirmed 2026-07-07 — VSCode multi-window
 // osClick timeouts under concurrent PowerShell spawns). Absorbing that cost
-// once in beforeAll keeps every real step's timeout budget for the actual work.
+// once up front keeps every real step's timeout budget for the actual work.
 function _warmupPowerShell() {
     try {
         execSync('powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms"', { stdio: 'pipe', timeout: 30000 });
     } catch (e) {
         console.warn('[warmup] powershell warm-up failed (non-fatal):', String(e.message || e).substring(0, 100));
     }
+}
+
+// Fixed local Appium endpoint — this file starts its own Appium instance
+// (see ensureAppium below), so there is no WDIO config to read a
+// host/port from anymore.
+const _APPIUM = 'http://127.0.0.1:4723';
+let _spawnedAppium = null;
+// Root-session id (multi-window replay) / single-app-session id (simple
+// replay) — set once in run()'s startup, consumed everywhere below.
+let _rootSid = null;
+let _appSid = null;
+
+// Starts Appium if nothing is already listening on _APPIUM, otherwise
+// reuses whatever is already running there (e.g. a dev Appium left up from
+// a previous run). Spawned via the shared generated-wdio/node_modules
+// install (one `npm install` for the whole generated-wdio/ tree, not per
+// app) so no per-app setup step is required before `node <file>.js`.
+async function ensureAppium() {
+    try {
+        const r = await fetch(`${_APPIUM}/status`, { signal: AbortSignal.timeout(2000) });
+        if (r.ok) { console.log(`[appium] reusing already-running Appium at ${_APPIUM}`); return; }
+    } catch {}
+    console.log('[appium] starting Appium...');
+    // node_modules/appium's package.json declares bin: { appium: 'index.js' } —
+    // target that documented entry point directly rather than build/lib/main.js
+    // (an internal build artifact that only works via an explicitly-documented
+    // backwards-compat shim, confirmed 2026-07-17 by reading the installed
+    // package; index.js is the stable contract across appium versions).
+    const appiumBin = join(__dirname, '..', 'node_modules', 'appium', 'index.js');
+    // '*:winappdriver' not bare 'winappdriver' — Appium 3.x's insecure-feature
+    // validator requires '<automationName-or-*>:<featureName>' and throws on
+    // a bare name (confirmed 2026-07-17 against the installed appium@3.5.2:
+    // "The full feature name must include both the destination automation
+    // name or the '*' wildcard ... Got 'winappdriver' instead"). This was a
+    // pre-existing latent bug shared with wdio.conf.js's identical args —
+    // just never hit because nothing had actually spawned Appium with these
+    // exact CLI args end-to-end this session before ensureAppium() did.
+    _spawnedAppium = spawn(process.execPath, [appiumBin, '--allow-insecure', '*:winappdriver', '--port', '4723'], { stdio: 'pipe' });
+    _spawnedAppium.on('error', (e) => console.warn('[appium] spawn error:', String(e.message || e).substring(0, 150)));
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+        try {
+            const r = await fetch(`${_APPIUM}/status`, { signal: AbortSignal.timeout(2000) });
+            if (r.ok) { console.log('[appium] ready'); return; }
+        } catch {}
+        await new Promise(res => setTimeout(res, 1000));
+    }
+    throw new Error('Appium did not become ready within 30s');
+}
+
+function _killSpawnedAppium() {
+    if (_spawnedAppium) {
+        try { _spawnedAppium.kill(); } catch {}
+        _spawnedAppium = null;
+    }
+}
+
+// Hard timeout on every Appium HTTP call — WinAppDriver can block internally
+// on a POST /session for a hwnd whose window is mid-close (confirmed
+// 2026-07-09: STEP replay hung forever inside _createSession with no
+// "failed" log ever printed, because the fetch neither resolved nor
+// rejected). Without this, getWindowSession's existing catch-and-fall-back-
+// to-Root-scan path never runs, since a promise that never settles never
+// reaches a catch block.
+async function _appiumFetch(path, opts = {}, timeoutMs = 20000) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+        return await fetch(`${_APPIUM}${path}`, { ...opts, signal: ctrl.signal });
+    } catch (e) {
+        if (e.name === 'AbortError') throw new Error(`Appium request timed out after ${timeoutMs}ms: ${opts.method || 'GET'} ${path}`);
+        throw e;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+async function _appiumPost(path, body, timeoutMs = 20000) {
+    const r = await _appiumFetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    }, timeoutMs);
+    return (await r.json()).value;
+}
+
+async function _createSession(app) {
+    const isHwnd = /^0x[0-9a-f]+$/i.test(app);
+    const cap = isHwnd
+        ? { platformName: 'Windows', 'appium:automationName': 'Windows', 'appium:appTopLevelWindow': app, 'appium:newCommandTimeout': 60000, 'appium:createSessionTimeout': 15000 }
+        : { platformName: 'Windows', 'appium:automationName': 'Windows', 'appium:app': app, 'appium:newCommandTimeout': 60000, 'appium:createSessionTimeout': 15000 };
+    const v = await _appiumPost('/session', { capabilities: { alwaysMatch: cap } }, 30000);
+    if (!v?.sessionId) throw new Error(`Appium session failed for "${app}": ${JSON.stringify(v)}`);
+    return v.sessionId;
+}
+
+async function _isSessionAlive(sid) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 1500);
+    try {
+        const r = await fetch(`${_APPIUM}/session/${sid}`, { signal: ctrl.signal });
+        if (!r.ok) return false;
+        const j = await r.json();
+        return !!j?.value;
+    } catch {
+        return false;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// 셀렉터로 요소를 찾아 element id를 돌려준다 — 좌표 산출 없음 (2026-07-10
+// 좌표 실행 금지). sid/rootElId만 받는 일반형이라 세션 모드(title-keyed
+// 캐시)와 simple 모드(단일 _appSid) 양쪽에서 그대로 재사용된다.
+async function _findElement(sid, rootElId, selector) {
+    try {
+        const raw = selector.replace(/^['"]|['"]$/g, '');
+        const using = raw.startsWith('~') ? 'accessibility id' : 'xpath';
+        const value = raw.startsWith('~') ? raw.slice(1) : raw;
+        const path = rootElId
+            ? `/session/${sid}/element/${rootElId}/element`
+            : `/session/${sid}/element`;
+        const el = await _appiumPost(path, { using, value });
+        if (!el) return null;
+        return el.ELEMENT || el['element-6066-11e4-a52e-4f735466cecf'] || null;
+    } catch (e) {
+        console.warn('[findElement] lookup failed:', String(e.message || e).substring(0, 120));
+        return null;
+    }
+}
+
+// XPath-only click by raw session id — element/click = UIA Invoke, no
+// coordinates anywhere. Used by simple mode (single _appSid, no title
+// cache needed); session mode uses the title-keyed _clickScoped instead.
+async function _clickBySid(sid, rootElId, selector, dbl = false) {
+    const elId = await _findElement(sid, rootElId, selector);
+    if (!elId) {
+        _failures.push('click-not-found:' + String(selector).substring(0, 60));
+        return;
+    }
+    await _appiumPost(`/session/${sid}/element/${elId}/click`, {});
+    if (dbl) await _appiumPost(`/session/${sid}/element/${elId}/click`, {});
+}
+
+// Returns true on success, false on failure (never pushes to _failures itself
+// — WinAppDriver's element/value endpoint outright rejects some native edit
+// controls (confirmed 2026-07-08: Win11 Notepad's RichEditD2DPT Document
+// control), so the caller falls back to OS-level typing instead of failing).
+async function _typeScoped(sid, rootElId, selector, text) {
+    try {
+        const raw = selector.replace(/^['"]|['"]$/g, '');
+        const using = raw.startsWith('~') ? 'accessibility id' : 'xpath';
+        const value = raw.startsWith('~') ? raw.slice(1) : raw;
+        const path = rootElId
+            ? `/session/${sid}/element/${rootElId}/element`
+            : `/session/${sid}/element`;
+        const el = await _appiumPost(path, { using, value });
+        if (!el) throw new Error('element not found');
+        const elId = el.ELEMENT || el['element-6066-11e4-a52e-4f735466cecf'];
+        await _appiumPost(`/session/${sid}/element/${elId}/clear`, {});
+        await _appiumPost(`/session/${sid}/element/${elId}/value`, { text });
+        return true;
+    } catch (e) { console.warn('[type] scoped sendKeys failed:', String(e.message || e).substring(0, 100)); return false; }
 }
 
 // 프로그래매틱 스크롤 — osScroll.py가 추적된 top-level hwnd 아래에서 녹화된
@@ -125,7 +289,9 @@ let _appHwnd = 0;
 
 async function initAppHwnd() {
     try {
-        const h = await browser.getWindowHandle();   // e.g. "0x00061D2C"
+        const r = await _appiumFetch(`/session/${_appSid}/window`);
+        const j = await r.json();
+        const h = j.value;   // e.g. "0x00061D2C"
         _appHwnd = parseInt(h, 16);
         console.log(`[hwnd] session window hwnd=${_appHwnd} (0x${_appHwnd.toString(16)})`);
     } catch (e) {
@@ -302,34 +468,23 @@ async function _step(label, fn) {
 
 class CalculatorPageByClass {
     async click1() {
-        const el = await browser.$('//Button[@ClassName="Button" and @Name="Five"]');
-        await el.waitForExist({ timeout: 8000 });
-        await el.click();
+        await _clickBySid(_appSid, null, '//Button[@ClassName="Button" and @Name="Five"]');
     }
 
     async click3() {
-        const el = await browser.$('//Button[@ClassName="Button" and @Name="Plus"]');
-        await el.waitForExist({ timeout: 8000 });
-        await el.click();
+        await _clickBySid(_appSid, null, '//Button[@ClassName="Button" and @Name="Plus"]');
     }
 
     async click4() {
-        const el = await browser.$('//Button[@ClassName="Button" and @Name="Three"]');
-        await el.waitForExist({ timeout: 8000 });
-        await el.click();
+        await _clickBySid(_appSid, null, '//Button[@ClassName="Button" and @Name="Three"]');
     }
 
     async click6() {
-        const el = await browser.$('//Button[@ClassName="Button" and @Name="Equals"]');
-        await el.waitForExist({ timeout: 8000 });
-        await el.click();
+        await _clickBySid(_appSid, null, '//Button[@ClassName="Button" and @Name="Equals"]');
     }
 
     async click7() {
-        const el = await browser.$('//Text[@ClassName="TextBlock" and @Name="Result display"]');
-        await el.waitForExist({ timeout: 8000 });
-        await el.click();
-        await el.click();
+        await _clickBySid(_appSid, null, '//Text[@ClassName="TextBlock" and @Name="Result display"]', true);
     }
 
     async scroll8() {
@@ -337,22 +492,30 @@ class CalculatorPageByClass {
     }
 
     async click11() {
-        const el = await browser.$('//*[@AutomationId="NumberPad"]/Button[3]');
-        await el.waitForExist({ timeout: 8000 });
-        await el.click();
+        await _clickBySid(_appSid, null, '//*[@AutomationId="NumberPad"]/Button[3]');
     }
 }
 
-describe('CalculatorTestByClass', () => {
-    beforeAll(async () => {
+// Plain async entry point — replaces the old Jasmine describe/it wrapper
+// (2026-07-17: standalone execution, no WDIO/Jasmine runner needed).
+async function run() {
+    // Everything — including Appium/session startup — runs inside this
+    // try/finally, not just the replay steps: a failure in ensureAppium()/
+    // _createSession() (e.g. a bad capability) must still kill any Appium
+    // process this run spawned. Node does not reliably reap child processes
+    // on Windows when the parent exits, so leaving startup outside the
+    // finally risked leaking an orphaned Appium instance on every startup
+    // failure (confirmed 2026-07-17 while verifying the standalone runner).
+    try {
         _warmupPowerShell();
-        await initAppHwnd();
-        normalizeWindowSimple(null);
-    });
 
-    it('should replay recorded flow', async () => {
+    await ensureAppium();
+    _appSid = await _createSession("");
+    console.log(`[session] app session ${_appSid} ready`);
+    await initAppHwnd();
+    normalizeWindowSimple(null);
+
         const page = new CalculatorPageByClass();
-
             osActivate("Calculator");
             await _step('1:click Five', () => page.click1());
             // [STEP 2] skip type on non-editable element
@@ -365,8 +528,14 @@ describe('CalculatorTestByClass', () => {
             // [STEP 9] rightClick scope-out — replay skipped (event scope: Click/Type/DoubleClick/Scroll, 2026-07-10)
             // [STEP 10] drag scope-out — replay skipped (event scope: Click/Type/DoubleClick/Scroll, 2026-07-10)
             await _step('11:click ', () => page.click11());
+    } finally {
 
-            if (_warnings.length) console.warn('[replay-warnings]', _warnings);
-            expect(_failures).toEqual([]);
-    });
-});
+        if (_appSid) { try { await _appiumFetch(`/session/${_appSid}`, { method: 'DELETE' }, 5000); } catch {} }
+        _killSpawnedAppium();
+    }
+    if (_warnings.length) console.warn('[replay-warnings]', _warnings);
+    if (_failures.length) { console.error('[FAIL]', _failures); process.exitCode = 1; }
+    else console.log('[PASS] all steps completed');
+}
+
+run().catch(e => { console.error('[FATAL]', e); process.exitCode = 1; });
