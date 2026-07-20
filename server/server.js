@@ -1016,7 +1016,7 @@ if __name__ == "__main__":
 // (comtypes COM IUIAutomation)으로 대조 진단(`diag_com_scopedinvoke.py`)한
 // 결과 ComboBox 자식 2개(Edit + DropDown 버튼) 정상 인식, Invoke까지 성공 —
 // PS1을 폐기하고 이 스택으로 교체.
-const OS_SCOPEDINVOKE_PY = `import sys, json, base64, argparse, ctypes
+const OS_SCOPEDINVOKE_PY = `import sys, json, base64, argparse, ctypes, time
 from ctypes import wintypes
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
@@ -1030,8 +1030,21 @@ import comtypes.client
 UIA_NameProperty = 30005
 UIA_AutomationIdProperty = 30011
 UIA_ClassNameProperty = 30012
+UIA_ControlTypeProperty = 30003
 UIA_InvokePatternId = 10000
 UIA_SelectionItemPatternId = 10010
+UIA_ValuePatternId = 10002
+# 2026-07-17 (2차) 실측(FileZilla Site Manager 재생 타임스탬프 진단):
+# osScopedInvoke가 "target not found"로 보고한 실패 중 다수가 사실은 요소를
+# 매번 찾았는데(item=found) Invoke/SelectionItemPattern 둘 다 미지원이라
+# invoke_item()이 False를 반환한 것이었다(Tree 컨테이너 자체, Edit 필드 클릭 —
+# 둘 다 그 패턴들을 구조적으로 지원 안 함). 이런 컨트롤에 대한 "클릭"의 실제
+# 의도는 포커스 이동뿐이므로, 이 5종 + SetFocus 성공 시에만 성공으로 인정한다.
+# Button/MenuItem/TreeItem/ListItem 등 실제 실행 가능한 컨트롤은 이 목록에
+# 없으므로 여전히 Invoke/Select 성공을 요구한다(거짓 PASS 방지 — 2026-07-13
+# 3차 교훈: UIA 패턴 "지원 여부"만으로 태깅하면 과다신호가 되므로 실증된
+# ControlType으로만 좁힌다).
+PASSIVE_CONTROL_TYPES = {50004, 50030, 50033, 50018, 50023}  # Edit, Document, Pane, Tab, Tree
 TreeScope_Descendants = 4
 # Element(1)|Children(2)|Descendants(4) — TreeScope_Descendants alone can
 # never match the root element being searched from (UIA standard behavior),
@@ -1075,8 +1088,10 @@ def resolve_cond(uia, sel):
 
 
 def invoke_item(mod, el):
+    focus_ok = False
     try:
         el.SetFocus()
+        focus_ok = True
     except Exception:
         pass
     try:
@@ -1088,6 +1103,42 @@ def invoke_item(mod, el):
         el.GetCurrentPattern(UIA_SelectionItemPatternId).QueryInterface(mod.IUIAutomationSelectionItemPattern).Select()
         return True
     except Exception:
+        pass
+    try:
+        ctrl_type = el.CurrentControlType
+    except Exception:
+        ctrl_type = None
+    if focus_ok and ctrl_type in PASSIVE_CONTROL_TYPES:
+        return True
+    print(f"[osScopedInvoke] found element (controlType={ctrl_type}) but no actionable pattern (Invoke/Select) succeeded", file=sys.stderr)
+    return False
+
+
+# 2026-07-17: owned 다이얼로그(WAD가 scoped session을 거부하는 창)에 타이핑하기
+# 위한 COM 경로. 기존에는 getWindowSession()이 owned 창을 만나면 WinAppDriver
+# Root 세션 REST로 전체 데스크톱 XPath 검색을 폴백으로 썼는데, 실측(2026-07-17
+# FileZilla 다이얼로그 진단): 이 Root-세션 REST 호출은 쿼리 내용/매치 여부와
+# 무관하게 매번 15~20초가 걸린다(빈 결과조차 15.6초) — WinAppDriver 3.5.2의
+# Root 세션 자체가 모든 element 조회에 고정 비용을 갖는 것으로 보임. hwnd는
+# 이미 EnumWindows로 알고 있으므로, 같은 COM 스택(osScopedInvoke의 클릭 경로와
+# 동일)으로 즉시 타이핑하면 이 15~20초를 완전히 우회한다.
+def type_item(mod, el, text):
+    try:
+        el.SetFocus()
+    except Exception:
+        pass
+    # 2026-07-17 (2차) 실측: 인라인 이름변경 편집 상자에 입력된 값은 물리
+    # 캡처에서 트레일링 개행("d\\n")을 포함한다(사용자가 Enter로 확정) — 이걸
+    # 그대로 SetValue에 넣으면 개행이 리터럴 문자로 들어갈 뿐 Enter 키로
+    # 동작하지 않아 편집 상자가 미확정 상태로 남고, 그 상태에서 같은
+    # 다이얼로그의 다른 서브트리(탭 패널 등)가 UIA 검색에서 안 잡히는 게
+    # 실측으로 확인됨(FileZilla Site Manager). 트레일링 개행은 스트립 —
+    # 실제 Enter 키 주입은 이 상태에서 어디까지 필요한지 GUI 재검증 후 별도로.
+    value = text[:-1] if text.endswith('\\n') else text
+    try:
+        el.GetCurrentPattern(UIA_ValuePatternId).QueryInterface(mod.IUIAutomationValuePattern).SetValue(value)
+        return True
+    except Exception:
         return False
 
 
@@ -1096,6 +1147,7 @@ def main():
     ap.add_argument("--hwnd", type=int, required=True)
     ap.add_argument("--sel-b64", required=True)
     ap.add_argument("--trigger-sel-b64", default=None)
+    ap.add_argument("--text-b64", default=None)
     args = ap.parse_args()
 
     comtypes.CoInitialize()
@@ -1139,46 +1191,67 @@ def main():
                 # 남긴다 (2026-07-14, 침묵 스킵이 진단을 어렵게 만든 것을 확인).
                 print(f"[osScopedInvoke] WARN trigger not found (sel={args.trigger_sel_b64}) — dropdown likely never opened")
 
-    # (a) 메인 창 서브트리. Subtree = 창 자기 자신(root)도 포함해 검색한다 —
-    #     Descendants만 쓰면 캡처된 타겟이 창 자체(예: className="#32770")인
-    #     경우 구조적으로 못 찾는다(2026-07-16 FileZilla 다이얼로그 클릭 확인).
-    try:
-        item = root.FindFirst(TreeScope_Subtree, item_cond)
-    except Exception:
-        item = None
-    if item and invoke_item(mod, item):
-        print("[osScopedInvoke] invoked under main window subtree")
-        sys.exit(0)
+    # --text-b64가 있으면 클릭/Invoke 대신 타이핑(ValuePattern.SetValue) —
+    # osScopedType() JS wrapper 전용 (2026-07-17, owned 다이얼로그 안 Edit
+    # 컨트롤에 타이핑하기 위해 도입 — Root 세션 REST 폴백의 15~20초 고정
+    # 비용을 피한다. 검색 로직((a)(b) 둘 다)은 클릭과 완전히 동일).
+    act = (lambda el: type_item(mod, el, base64.b64decode(args.text_b64).decode("utf-8"))) \
+        if args.text_b64 else (lambda el: invoke_item(mod, el))
+    verb = 'typed into' if args.text_b64 else 'invoked'
 
-    # (b) 메인 창과 같은 프로세스(PID)가 소유한 다른 최상위 창 서브트리 — 이미
-    #     열려 있는 팝업/드롭다운(예: PuTTY의 ComboLBox, FileZilla 메뉴)을
-    #     잡는다. 새로 뜬 창인지 여부는 따지지 않는다(트리거가 이미 직전
-    #     스텝에서 실행됐으므로 baseline diff 불필요). PID로 반드시 한정한다 —
-    #     PID 무관하게 데스크톱 전체를 뒤지면 완전히 남남인 창을 잘못 클릭할
-    #     수 있음을 실측으로 확인(2026-07-15: 7-Zip에서 "hansung"/"project" 등
-    #     사용자의 실제 폴더명을 검색하다가 (a)에서 못 찾자 사용자가 실제로
-    #     열어둔 탐색기 창(explorer.exe, class=CabinetWClass)과 VS Code
-    #     창(Code.exe)에서 우연히 같은 이름을 찾아 그 창을 대신 클릭 — 거짓
-    #     성공으로 로그에 "invoked" 찍힘 + 사용자 창에 실제 부작용).
+    # 최대 4회 시도(즉시 1회 + 300ms 간격 재시도 3회, 총 최대 ~0.9초) — 2026-07-17
+    # 실측: "새 사이트(N)" 클릭 직후 뜨는 인라인 이름변경 상자(automationId="1")를
+    # 즉시 1회만 찾으면 렌더링 레이스로 못 찾는 경우가 실제 GUI에서 재현됨
+    # (FileZilla Site Manager). 기존 REST 경로(_findScoped)는 1초 간격으로 최대
+    # 8초 폴링해 이런 레이스를 자연히 흡수했는데, COM 경로는 단발 시도라 그
+    # 여유가 없었다 — _step()의 범용 Fail-and-Recover(ESC)에 기대면 이름변경
+    # 상자에서 ESC가 변경 자체를 취소시켜 재시도도 함께 실패하므로(esc-recovery
+    # 후 osScopedType 재실패로 실측 확인), 스크립트 자체에 짧은 재시도를 둔다.
     main_pid = wintypes.DWORD()
     user32.GetWindowThreadProcessId(main_h, ctypes.byref(main_pid))
-    for h in top_windows():
-        if h == main_h:
-            continue
-        cand_pid = wintypes.DWORD()
-        user32.GetWindowThreadProcessId(h, ctypes.byref(cand_pid))
-        if cand_pid.value != main_pid.value:
-            continue
+    for attempt in range(4):
+        if attempt > 0:
+            time.sleep(0.3)
+
+        # (a) 메인 창 서브트리. Subtree = 창 자기 자신(root)도 포함해 검색한다 —
+        #     Descendants만 쓰면 캡처된 타겟이 창 자체(예: className="#32770")인
+        #     경우 구조적으로 못 찾는다(2026-07-16 FileZilla 다이얼로그 클릭 확인).
         try:
-            other_root = uia.ElementFromHandle(h)
-            if not other_root:
-                continue
-            item = other_root.FindFirst(TreeScope_Subtree, item_cond)
-            if item and invoke_item(mod, item):
-                print(f"[osScopedInvoke] invoked under other top-level window hwnd={h}")
-                sys.exit(0)
+            item = root.FindFirst(TreeScope_Subtree, item_cond)
         except Exception:
-            continue
+            item = None
+        if item and act(item):
+            print(f"[osScopedInvoke] {verb} under main window subtree")
+            sys.exit(0)
+
+        # (b) 메인 창과 같은 프로세스(PID)가 소유한 다른 최상위 창 서브트리 —
+        #     이미 열려 있는 팝업/드롭다운(예: PuTTY의 ComboLBox, FileZilla
+        #     메뉴)을 잡는다. 새로 뜬 창인지 여부는 따지지 않는다(트리거가
+        #     이미 직전 스텝에서 실행됐으므로 baseline diff 불필요). PID로
+        #     반드시 한정한다 — PID 무관하게 데스크톱 전체를 뒤지면 완전히
+        #     남남인 창을 잘못 클릭할 수 있음을 실측으로 확인(2026-07-15:
+        #     7-Zip에서 "hansung"/"project" 등 사용자의 실제 폴더명을 검색하다가
+        #     (a)에서 못 찾자 사용자가 실제로 열어둔 탐색기 창(explorer.exe,
+        #     class=CabinetWClass)과 VS Code 창(Code.exe)에서 우연히 같은
+        #     이름을 찾아 그 창을 대신 클릭 — 거짓 성공으로 로그에 "invoked"
+        #     찍힘 + 사용자 창에 실제 부작용).
+        for h in top_windows():
+            if h == main_h:
+                continue
+            cand_pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(h, ctypes.byref(cand_pid))
+            if cand_pid.value != main_pid.value:
+                continue
+            try:
+                other_root = uia.ElementFromHandle(h)
+                if not other_root:
+                    continue
+                item = other_root.FindFirst(TreeScope_Subtree, item_cond)
+                if item and act(item):
+                    print(f"[osScopedInvoke] {verb} under other top-level window hwnd={h}")
+                    sys.exit(0)
+            except Exception:
+                continue
 
     print(f"osScopedInvoke: target not found under main window or any other top-level window (sel={args.sel_b64})", file=sys.stderr)
     sys.exit(2)
@@ -1309,9 +1382,36 @@ const EXPAND_MERGE_CONTROL_TYPES = new Set(['ComboBox', 'MenuItem']);
 function mergeExpandCollapseClicks(events) {
   const out = [];
   for (let i = 0; i < events.length; i++) {
-    const e = events[i];
+    let e = events[i];
     if (e.action === 'click' && e.element?.expandCollapse
         && EXPAND_MERGE_CONTROL_TYPES.has(e.element?.controlType)) {
+      // Collapse consecutive RE-clicks of the identical trigger before
+      // merging with an item (2026-07-17, real FileZilla GUI run — the
+      // Site Manager's "배경색(B):" color combo needed 3 physical clicks
+      // before it actually opened). The old version below always paired a
+      // trigger with whatever event came right after it, so click #1 got
+      // "merged" with click #2 — also just a re-click of the SAME trigger,
+      // not a real item — producing a self-referencing itemName equal to
+      // the trigger's own name (observed live: "배경색(B): -> 배경색(B):"
+      // followed by "target not found", since no dropdown item is actually
+      // named after the combo itself). Walk forward over same-element
+      // re-clicks first and treat only the LAST one as the effective
+      // trigger, so the merge below pairs with the real item that follows.
+      let j = i;
+      while (
+        events[j + 1]?.action === 'click' &&
+        events[j + 1]?.element?.expandCollapse &&
+        events[j + 1]?.element?.controlType === e.element.controlType &&
+        (events[j + 1]?.element?.automationId || '') === (e.element.automationId || '') &&
+        (events[j + 1]?.element?.name || '') === (e.element.name || '')
+      ) {
+        j++;
+      }
+      if (j > i) {
+        console.log(`[expand-merge] collapsed ${j - i} redundant re-click(s) of trigger '${e.element.name}' @index ${i}..${j}`);
+        e = events[j];
+        i = j;
+      }
       const next = events[i + 1];
       const itemName = next?.element?.name || next?.element?.automationId;
       if (next && next.action === 'click' && itemName) {
@@ -1458,7 +1558,7 @@ function isComboDropDownArrow(el) {
   return el && el.automationId === 'DropDown';
 }
 
-function wdioSelectorById(el) {
+function wdioSelectorById(el, ambiguousIds) {
   if (!el) return null;
   if (isComboDropDownArrow(el)) return `'~${escapeAttr(el.automationId)}'`;
   // Skip purely numeric automationIds only for virtualized row/item controls
@@ -1468,7 +1568,20 @@ function wdioSelectorById(el) {
   const isSlotIndex = isNumeric && SLOT_INDEX_CONTROL_TYPES.has(el.controlType);
   const hasStableId = el.automationId && !isSlotIndex
     && !(GENERIC_AUTOMATION_IDS.has(el.automationId) && el.name);
-  if (hasStableId) return `'~${escapeAttr(el.automationId)}'`;
+  if (hasStableId) {
+    // Same Win32 dialog can reuse one numeric AutomationId across several
+    // fields (confirmed 2026-07-17: FileZilla Site Manager's automationId
+    // "5999" appears on Host/Port/User/... Edit fields, each with a distinct
+    // Name) — a bare accessibility-id XPath always matches the first
+    // instance. When the pre-scan (generateWdio) flags this id as reused
+    // with differing Names, AND the Name in (mirrors wdioSelectorByClass's
+    // ClassName+Name combo, same fix class as PuTTY 2026-07-13 5차).
+    if (ambiguousIds?.has(el.automationId) && el.name) {
+      const tag = (el.controlType && /^[A-Za-z]+$/.test(el.controlType)) ? el.controlType : '*';
+      return `'//${tag}[@AutomationId="${escapeAttr(el.automationId)}" and @Name="${escapeAttr(el.name)}"]'`;
+    }
+    return `'~${escapeAttr(el.automationId)}'`;
+  }
   // ControlType으로 태그 제약(ByClass와 동일 근거, 2026-07-07 VSCode 사고 —
   // 와일드카드 @Name XPath가 동일 이름의 엉뚱한 노드에 매칭될 수 있음).
   // AutomationId가 없어 Name이 유일한 구분자인 ById 경로에서 이 안전망이
@@ -1521,7 +1634,7 @@ function escapeStr(s) {
 //   true  → multiple windowTitles OR any Electron event
 //           → wdio.conf: appium:app='Root'; generated code uses getWindowSession/getCenter/osClick
 //   false → single windowTitle AND no Electron
-//           → wdio.conf: appium:app=exePath; generated code uses browser.$().click() + osClick fallback
+//           → simple mode: single scoped Appium session (_appSid) + _clickBySid/_typeScoped (2026-07-17: no WDIO `browser`)
 function needsSessionSwitching(eventList) {
   const filtered = filterEvents(eventList);
   const hasElectron = filtered.some(e => e.isElectron === true);
@@ -1568,9 +1681,18 @@ const OS_FOREGROUND_ENCODED = Buffer.from(
   'utf16le'
 ).toString('base64');
 
-const SIMPLE_HEADER = `import { execSync } from 'child_process';
+// ── Standalone bootstrap (shared by SIMPLE_HEADER + SESSION_HEADER) ────────
+// 2026-07-17: generated tests used to require `npx wdio run wdio.conf.js`
+// (Jasmine + @wdio/cli + appium-service) — the whole WDIO harness had to be
+// assembled by hand before a recording could be replayed. This preamble lets
+// the generated file run standalone via plain `node <file>.js`: it starts
+// (or reuses) Appium itself and drives it over raw REST, the same
+// _appiumFetch/_appiumPost/_createSession plumbing SESSION_HEADER already
+// used — WDIO's `browser` global is no longer needed anywhere.
+const STANDALONE_PREAMBLE = `import { execSync, spawn } from 'child_process';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { homedir } from 'os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -1583,7 +1705,7 @@ const _warnings = [];
 // budget was getting eaten by PowerShell's own process-spawn + Add-Type JIT
 // cost on the FIRST call of a run (confirmed 2026-07-07 — VSCode multi-window
 // osClick timeouts under concurrent PowerShell spawns). Absorbing that cost
-// once in beforeAll keeps every real step's timeout budget for the actual work.
+// once up front keeps every real step's timeout budget for the actual work.
 function _warmupPowerShell() {
     try {
         execSync('powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms"', { stdio: 'pipe', timeout: 30000 });
@@ -1592,6 +1714,171 @@ function _warmupPowerShell() {
     }
 }
 
+// Fixed local Appium endpoint — this file starts its own Appium instance
+// (see ensureAppium below), so there is no WDIO config to read a
+// host/port from anymore.
+const _APPIUM = 'http://127.0.0.1:4723';
+let _spawnedAppium = null;
+// Root-session id (multi-window replay) / single-app-session id (simple
+// replay) — set once in run()'s startup, consumed everywhere below.
+let _rootSid = null;
+let _appSid = null;
+
+// Starts Appium if nothing is already listening on _APPIUM, otherwise
+// reuses whatever is already running there (e.g. a dev Appium left up from
+// a previous run). Spawned via the shared generated-wdio/node_modules
+// install (one \`npm install\` for the whole generated-wdio/ tree, not per
+// app) so no per-app setup step is required before \`node <file>.js\`.
+async function ensureAppium() {
+    try {
+        const r = await fetch(\`\${_APPIUM}/status\`, { signal: AbortSignal.timeout(2000) });
+        if (r.ok) { console.log(\`[appium] reusing already-running Appium at \${_APPIUM}\`); return; }
+    } catch {}
+    console.log('[appium] starting Appium...');
+    // node_modules/appium's package.json declares bin: { appium: 'index.js' } —
+    // target that documented entry point directly rather than build/lib/main.js
+    // (an internal build artifact that only works via an explicitly-documented
+    // backwards-compat shim, confirmed 2026-07-17 by reading the installed
+    // package; index.js is the stable contract across appium versions).
+    const appiumBin = join(__dirname, '..', 'node_modules', 'appium', 'index.js');
+    // '*:winappdriver' not bare 'winappdriver' — Appium 3.x's insecure-feature
+    // validator requires '<automationName-or-*>:<featureName>' and throws on
+    // a bare name (confirmed 2026-07-17 against the installed appium@3.5.2:
+    // "The full feature name must include both the destination automation
+    // name or the '*' wildcard ... Got 'winappdriver' instead"). This was a
+    // pre-existing latent bug shared with wdio.conf.js's identical args —
+    // just never hit because nothing had actually spawned Appium with these
+    // exact CLI args end-to-end this session before ensureAppium() did.
+    _spawnedAppium = spawn(process.execPath, [appiumBin, '--allow-insecure', '*:winappdriver', '--port', '4723'], { stdio: 'pipe' });
+    _spawnedAppium.on('error', (e) => console.warn('[appium] spawn error:', String(e.message || e).substring(0, 150)));
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+        try {
+            const r = await fetch(\`\${_APPIUM}/status\`, { signal: AbortSignal.timeout(2000) });
+            if (r.ok) { console.log('[appium] ready'); return; }
+        } catch {}
+        await new Promise(res => setTimeout(res, 1000));
+    }
+    throw new Error('Appium did not become ready within 30s');
+}
+
+function _killSpawnedAppium() {
+    if (_spawnedAppium) {
+        try { _spawnedAppium.kill(); } catch {}
+        _spawnedAppium = null;
+    }
+}
+
+// Hard timeout on every Appium HTTP call — WinAppDriver can block internally
+// on a POST /session for a hwnd whose window is mid-close (confirmed
+// 2026-07-09: STEP replay hung forever inside _createSession with no
+// "failed" log ever printed, because the fetch neither resolved nor
+// rejected). Without this, getWindowSession's existing catch-and-fall-back-
+// to-Root-scan path never runs, since a promise that never settles never
+// reaches a catch block.
+async function _appiumFetch(path, opts = {}, timeoutMs = 20000) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+        return await fetch(\`\${_APPIUM}\${path}\`, { ...opts, signal: ctrl.signal });
+    } catch (e) {
+        if (e.name === 'AbortError') throw new Error(\`Appium request timed out after \${timeoutMs}ms: \${opts.method || 'GET'} \${path}\`);
+        throw e;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+async function _appiumPost(path, body, timeoutMs = 20000) {
+    const r = await _appiumFetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    }, timeoutMs);
+    return (await r.json()).value;
+}
+
+async function _createSession(app) {
+    const isHwnd = /^0x[0-9a-f]+$/i.test(app);
+    const cap = isHwnd
+        ? { platformName: 'Windows', 'appium:automationName': 'Windows', 'appium:appTopLevelWindow': app, 'appium:newCommandTimeout': 60000, 'appium:createSessionTimeout': 15000 }
+        : { platformName: 'Windows', 'appium:automationName': 'Windows', 'appium:app': app, 'appium:newCommandTimeout': 60000, 'appium:createSessionTimeout': 15000 };
+    const v = await _appiumPost('/session', { capabilities: { alwaysMatch: cap } }, 30000);
+    if (!v?.sessionId) throw new Error(\`Appium session failed for "\${app}": \${JSON.stringify(v)}\`);
+    return v.sessionId;
+}
+
+async function _isSessionAlive(sid) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 1500);
+    try {
+        const r = await fetch(\`\${_APPIUM}/session/\${sid}\`, { signal: ctrl.signal });
+        if (!r.ok) return false;
+        const j = await r.json();
+        return !!j?.value;
+    } catch {
+        return false;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// 셀렉터로 요소를 찾아 element id를 돌려준다 — 좌표 산출 없음 (2026-07-10
+// 좌표 실행 금지). sid/rootElId만 받는 일반형이라 세션 모드(title-keyed
+// 캐시)와 simple 모드(단일 _appSid) 양쪽에서 그대로 재사용된다.
+async function _findElement(sid, rootElId, selector) {
+    try {
+        const raw = selector.replace(/^['"]|['"]$/g, '');
+        const using = raw.startsWith('~') ? 'accessibility id' : 'xpath';
+        const value = raw.startsWith('~') ? raw.slice(1) : raw;
+        const path = rootElId
+            ? \`/session/\${sid}/element/\${rootElId}/element\`
+            : \`/session/\${sid}/element\`;
+        const el = await _appiumPost(path, { using, value });
+        if (!el) return null;
+        return el.ELEMENT || el['element-6066-11e4-a52e-4f735466cecf'] || null;
+    } catch (e) {
+        console.warn('[findElement] lookup failed:', String(e.message || e).substring(0, 120));
+        return null;
+    }
+}
+
+// XPath-only click by raw session id — element/click = UIA Invoke, no
+// coordinates anywhere. Used by simple mode (single _appSid, no title
+// cache needed); session mode uses the title-keyed _clickScoped instead.
+async function _clickBySid(sid, rootElId, selector, dbl = false) {
+    const elId = await _findElement(sid, rootElId, selector);
+    if (!elId) {
+        _failures.push('click-not-found:' + String(selector).substring(0, 60));
+        return;
+    }
+    await _appiumPost(\`/session/\${sid}/element/\${elId}/click\`, {});
+    if (dbl) await _appiumPost(\`/session/\${sid}/element/\${elId}/click\`, {});
+}
+
+// Returns true on success, false on failure (never pushes to _failures itself
+// — WinAppDriver's element/value endpoint outright rejects some native edit
+// controls (confirmed 2026-07-08: Win11 Notepad's RichEditD2DPT Document
+// control), so the caller falls back to OS-level typing instead of failing).
+async function _typeScoped(sid, rootElId, selector, text) {
+    try {
+        const raw = selector.replace(/^['"]|['"]$/g, '');
+        const using = raw.startsWith('~') ? 'accessibility id' : 'xpath';
+        const value = raw.startsWith('~') ? raw.slice(1) : raw;
+        const path = rootElId
+            ? \`/session/\${sid}/element/\${rootElId}/element\`
+            : \`/session/\${sid}/element\`;
+        const el = await _appiumPost(path, { using, value });
+        if (!el) throw new Error('element not found');
+        const elId = el.ELEMENT || el['element-6066-11e4-a52e-4f735466cecf'];
+        await _appiumPost(\`/session/\${sid}/element/\${elId}/clear\`, {});
+        await _appiumPost(\`/session/\${sid}/element/\${elId}/value\`, { text });
+        return true;
+    } catch (e) { console.warn('[type] scoped sendKeys failed:', String(e.message || e).substring(0, 100)); return false; }
+}
+`;
+
+const SIMPLE_HEADER = STANDALONE_PREAMBLE + `
 // 프로그래매틱 스크롤 — osScroll.py가 추적된 top-level hwnd 아래에서 녹화된
 // 컨테이너를 UIA로 찾아 ScrollPattern.Scroll()을 호출하고, ScrollPattern
 // 미지원 레거시 컨트롤에만 hwnd-scoped WM_MOUSEWHEEL을 PostMessageW로
@@ -1695,7 +1982,9 @@ let _appHwnd = 0;
 
 async function initAppHwnd() {
     try {
-        const h = await browser.getWindowHandle();   // e.g. "0x00061D2C"
+        const r = await _appiumFetch(\`/session/\${_appSid}/window\`);
+        const j = await r.json();
+        const h = j.value;   // e.g. "0x00061D2C"
         _appHwnd = parseInt(h, 16);
         console.log(\`[hwnd] session window hwnd=\${_appHwnd} (0x\${_appHwnd.toString(16)})\`);
     } catch (e) {
@@ -1873,30 +2162,7 @@ async function _step(label, fn) {
 `;
 
 // ── 세션 전환 헤더 (Electron / 다중 창 앱) ────────────────────────────────
-const SESSION_HEADER = `import { execSync, spawn } from 'child_process';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-
-// 주입/헬스 실패 수집 — 마지막에 실질 assert로 검증.
-const _failures = [];
-// 조용히 넘어갈 수 있는 성능/폴백 신호 — 실패는 아니지만 재생 품질 저하 가능성을 기록.
-const _warnings = [];
-
-// One-time PowerShell/.NET cold-start warm-up. execSync's per-call timeout
-// budget was getting eaten by PowerShell's own process-spawn + Add-Type JIT
-// cost on the FIRST call of a run (confirmed 2026-07-07 — VSCode multi-window
-// osClick timeouts under concurrent PowerShell spawns). Absorbing that cost
-// once in beforeAll keeps every real step's timeout budget for the actual work.
-function _warmupPowerShell() {
-    try {
-        execSync('powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms"', { stdio: 'pipe', timeout: 30000 });
-    } catch (e) {
-        console.warn('[warmup] powershell warm-up failed (non-fatal):', String(e.message || e).substring(0, 100));
-    }
-}
-
+const SESSION_HEADER = STANDALONE_PREAMBLE + `
 // 프로그래매틱 스크롤 — osScroll.py가 대상 창 hwnd 아래에서 녹화된 컨테이너를
 // UIA로 찾아 ScrollPattern.Scroll()을 호출하고, ScrollPattern 미지원 레거시
 // 컨트롤에만 hwnd-scoped WM_MOUSEWHEEL을 PostMessageW로 전달한다. 픽셀
@@ -1990,10 +2256,40 @@ function osScopedInvoke(hwnd, target, triggerTarget) {
     }
 }
 
+// owned 다이얼로그(WAD가 scoped session을 거부하는 창) 안의 Edit 컨트롤에
+// COM으로 직접 타이핑 — getWindowSession()의 owned-창 폴백이 예전엔 Root
+// 세션 REST XPath 검색을 썼는데, 실측(2026-07-17 FileZilla Site Manager
+// 진단): 이 REST 호출은 매치 여부와 무관하게 매번 15~20초 고정 비용이
+// 든다(빈 결과조차 15.6초 — WinAppDriver 3.5.2의 Root 세션 자체 특성으로
+// 보임). hwnd는 EnumWindows로 이미 알고 있으므로, 클릭과 동일한 COM 스택
+// (osScopedInvoke.py --text-b64)으로 타이핑도 처리해 그 15~20초를 우회한다.
+function osScopedType(hwnd, target, text) {
+    if (!hwnd) {
+        _failures.push('osScopedType:no-hwnd');
+        console.warn('[osScopedType] no window hwnd — cannot search without a window handle');
+        return;
+    }
+    try {
+        const selB64 = Buffer.from(JSON.stringify(target || {}), 'utf8').toString('base64');
+        const textB64 = Buffer.from(text ?? '', 'utf8').toString('base64');
+        const out = execSync(
+            \`python "\${join(__dirname, 'osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" --text-b64 "\${textB64}"\`,
+            { stdio: 'pipe', timeout: 20000 }
+        ).toString().trim();
+        if (out) console.log(out);
+    } catch (e) {
+        _failures.push('osScopedType');
+        const stdoutMsg = (e.stdout && e.stdout.toString().trim()) || '';
+        if (stdoutMsg) console.log(stdoutMsg);
+        console.warn('[osScopedType] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).substring(0, 200));
+    }
+}
+
 // Window session pool: title → Appium sessionId.
-// global browser (Root session) used ONCE per new windowTitle for hwnd discovery;
-// a fast scoped appTopLevelWindow session is then opened via Appium REST API.
-let _APPIUM = 'http://127.0.0.1:4723';
+// _rootSid (Standalone preamble, run() creates it once) is scanned per new
+// windowTitle for hwnd discovery; a fast scoped appTopLevelWindow session is
+// then opened via Appium REST API (_appiumFetch/_createSession — shared
+// preamble).
 const _sessionIds = {};
 // hwnds whose scoped-session creation already failed once this run.
 // appium-windows-driver spawns a NEW WinAppDriver.exe per session and WAD's
@@ -2005,74 +2301,15 @@ const _sessionIds = {};
 // allowed a new attempt.
 const _scopedFailHwnds = new Set();
 
-// Hard timeout on every Appium HTTP call — WinAppDriver can block internally
-// on a POST /session for a hwnd whose window is mid-close (confirmed
-// 2026-07-09: STEP replay hung forever inside _createSession with no
-// "failed" log ever printed, because the fetch neither resolved nor
-// rejected). Without this, getWindowSession's existing catch-and-fall-back-
-// to-Root-scan path never runs, since a promise that never settles never
-// reaches a catch block.
-async function _appiumFetch(path, opts = {}, timeoutMs = 20000) {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-    try {
-        return await fetch(\`\${_APPIUM}\${path}\`, { ...opts, signal: ctrl.signal });
-    } catch (e) {
-        if (e.name === 'AbortError') throw new Error(\`Appium request timed out after \${timeoutMs}ms: \${opts.method || 'GET'} \${path}\`);
-        throw e;
-    } finally {
-        clearTimeout(timer);
-    }
-}
-
-async function _appiumPost(path, body, timeoutMs = 20000) {
-    const r = await _appiumFetch(path, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-    }, timeoutMs);
-    return (await r.json()).value;
-}
-
-async function _createSession(app) {
-    const isHwnd = /^0x[0-9a-f]+$/i.test(app);
-    // createSessionTimeout 15s caps the driver's internal WAD POST /session
-    // retry loop; with WAD spawn (~3s) + /status poll (≤10s) that totals
-    // ~28s worst case, so the 30s client abort below only fires when WAD is
-    // truly wedged. Keeping server budget < client budget means Appium
-    // settles definitively first — no more "client aborted at 20s while the
-    // server went on to create an orphaned session/WAD process" race
-    // (observed 2026-07-09).
-    const cap = isHwnd
-        ? { platformName: 'Windows', 'appium:automationName': 'Windows', 'appium:appTopLevelWindow': app, 'appium:newCommandTimeout': 60000, 'appium:createSessionTimeout': 15000 }
-        : { platformName: 'Windows', 'appium:automationName': 'Windows', 'appium:app': app, 'appium:newCommandTimeout': 60000, 'appium:createSessionTimeout': 15000 };
-    const v = await _appiumPost('/session', { capabilities: { alwaysMatch: cap } }, 30000);
-    if (!v?.sessionId) throw new Error(\`Appium session failed for "\${app}": \${JSON.stringify(v)}\`);
-    return v.sessionId;
-}
-
-// Health-check with a hard timeout — a dead/stale session must never hang the suite.
-async function _isSessionAlive(sid) {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 1500);
-    try {
-        const r = await fetch(\`\${_APPIUM}/session/\${sid}\`, { signal: ctrl.signal });
-        if (!r.ok) return false;
-        const j = await r.json();
-        return !!j?.value;
-    } catch {
-        return false;
-    } finally {
-        clearTimeout(timer);
-    }
-}
-
 // Cache entries are { sid, rootElId }. rootElId scopes element lookups to the
 // discovered dialog's subtree when sid is a Root-session fallback (see below) —
 // without it, every lookup walks the ENTIRE desktop UI tree (VSCode's full
 // Electron accessibility tree included), costing 10s+ per call.
 async function getWindowSession(title) {
     const cached = _sessionIds[title];
+    // owned:true entries have no Appium sid (sid: null, COM-routed instead) —
+    // nothing to health-check, reuse the cached hwnd directly.
+    if (cached && cached.owned) return cached;
     if (cached && await _isSessionAlive(cached.sid)) return cached;
     delete _sessionIds[title];
     _ensureDialog(title);
@@ -2093,12 +2330,36 @@ async function getWindowSession(title) {
     }
     // Owned windows (native dialogs owned by the app's main window) can
     // never become scoped sessions — WAD rejects them, but only after the
-    // full ~16s spawn/retry budget. Blacklist them up front (see _windowOwner).
-    if (hwndNum && !_scopedFailHwnds.has(hwndNum)) {
+    // full ~16s spawn/retry budget.
+    //
+    // Ownership is checked UNCONDITIONALLY here (not gated by
+    // _scopedFailHwnds) — 2026-07-17 bug found while verifying the fix
+    // below: _scopedFailHwnds was designed only to stop RE-ATTEMPTING
+    // _createSession on a hwnd that already failed, but gating the
+    // ownership check on it too meant that once a hwnd got blacklisted on
+    // the first call, a LATER call (e.g. after _findScoped's cache-eviction
+    // refresh, or after _switchWindow) would skip re-detecting "owned"
+    // entirely and fall all the way through to the slow Root-scan below —
+    // exactly defeating the COM fast path it was meant to protect.
+    // _windowOwner() itself is a single cheap PowerShell call (not the
+    // 15-20s Root-scan cost), so re-checking it every time is fine.
+    if (hwndNum) {
         const ownerHwnd = _windowOwner(hwndNum);
         if (ownerHwnd) {
-            console.log(\`[session] hwnd=0x\${hwndNum.toString(16)} owned by 0x\${ownerHwnd.toString(16)} — skipping scoped session (WAD rejects owned windows)\`);
-            _scopedFailHwnds.add(hwndNum);
+            if (!_scopedFailHwnds.has(hwndNum)) {
+                console.log(\`[session] hwnd=0x\${hwndNum.toString(16)} owned by 0x\${ownerHwnd.toString(16)} — skipping scoped session (WAD rejects owned windows)\`);
+                _scopedFailHwnds.add(hwndNum);
+            }
+            // 2026-07-17: owned 창을 예전엔 곧장 아래 "Root scan"(desktop-wide
+            // REST XPath)으로 보냈는데, 실측 확정: 이 Root-세션 REST 호출은
+            // 쿼리 내용/매치 여부와 무관하게 매번 15~20초 고정 비용이 든다
+            // (빈 결과조차 15.6초 — WinAppDriver 3.5.2의 Root 세션 자체
+            // 특성으로 보임, FileZilla Site Manager 다이얼로그 진단으로 확정).
+            // hwnd는 이미 알고 있으므로 REST 폴백 없이 즉시 COM 라우팅
+            // 마커(owned:true)를 반환 — _clickScoped/_typeScopedOrCom이
+            // osScopedInvoke.py(COM, 1초 미만)를 hwnd 기반으로 직접 쓴다.
+            _sessionIds[title] = { sid: null, rootElId: null, hwnd: hwndNum, owned: true };
+            return _sessionIds[title];
         }
     }
     if (hwndNum && !_scopedFailHwnds.has(hwndNum)) {
@@ -2126,13 +2387,14 @@ async function getWindowSession(title) {
     console.log(\`[session] Root scan for: "\${title}"\`);
     const shortTitle = title.slice(0, 30).replace(/"/g, '');
     let hwnd = null;
-    let matchedEl = null;
+    let matchedElId = null;
     for (const sel of [\`//*[@Name="\${title}"]\`, \`//*[contains(@Name,"\${shortTitle}")]\`]) {
         try {
-            const el = await browser.$(sel);
-            const raw = await el.getAttribute('NativeWindowHandle');
-            const rawNum = parseInt(raw, 10);
-            if (rawNum) { hwnd = '0x' + rawNum.toString(16); matchedEl = el; break; }
+            const elId = await _findElement(_rootSid, null, sel);
+            if (!elId) continue;
+            const r = await (await _appiumFetch(\`/session/\${_rootSid}/element/\${elId}/attribute/NativeWindowHandle\`)).json();
+            const rawNum = parseInt(r.value, 10);
+            if (rawNum) { hwnd = '0x' + rawNum.toString(16); matchedElId = elId; break; }
         } catch {}
     }
     const scanHwndNum = hwnd ? parseInt(hwnd, 16) : 0;
@@ -2159,14 +2421,13 @@ async function getWindowSession(title) {
             console.warn(\`[session] scoped session failed after \${Date.now() - t0}ms (\${e.message}) — reusing Root session for "\${title}"\`);
         }
     }
-    // Root-session reuse (proven 2026-07-08): no new session, no WAD spawn.
-    // Element lookups are scoped to the matched dialog element's subtree via
-    // rootElId; hwnd 0 = /location is already screen-absolute. Deliberately
-    // NOT _createSession('Root') — that would spawn yet another WinAppDriver
-    // process with the same 30s-hang exposure as the scoped path.
+    // Root-session reuse (proven 2026-07-08): no new session, no WAD spawn —
+    // reuse the single _rootSid run() already created at startup. Element
+    // lookups are scoped to the matched dialog element's subtree via
+    // rootElId; hwnd 0 = /location is already screen-absolute.
     if (!hwnd) console.warn(\`[session] Window "\${title}" not found — falling back to Root\`);
     _warnings.push('session-fallback:' + title);
-    _sessionIds[title] = { sid: browser.sessionId, rootElId: matchedEl ? matchedEl.elementId : null, hwnd: 0 };
+    _sessionIds[title] = { sid: _rootSid, rootElId: matchedElId, hwnd: 0 };
     return _sessionIds[title];
 }
 
@@ -2185,25 +2446,8 @@ async function _switchWindow(title) {
     return await getWindowSession(title);
 }
 
-// 스코프 세션(또는 Root 폴백의 rootElId 서브트리)에서 셀렉터로 요소를 찾아
-// element id를 돌려준다 — 좌표 산출 없음. 클릭은 element/click 엔드포인트로
-// UIA Invoke를 그대로 태운다 (2026-07-10 좌표 실행 금지).
-async function _findElement(sid, rootElId, selector) {
-    try {
-        const raw = selector.replace(/^['"]|['"]$/g, '');
-        const using = raw.startsWith('~') ? 'accessibility id' : 'xpath';
-        const value = raw.startsWith('~') ? raw.slice(1) : raw;
-        const path = rootElId
-            ? \`/session/\${sid}/element/\${rootElId}/element\`
-            : \`/session/\${sid}/element\`;
-        const el = await _appiumPost(path, { using, value });
-        if (!el) return null;
-        return el.ELEMENT || el['element-6066-11e4-a52e-4f735466cecf'] || null;
-    } catch (e) {
-        console.warn('[findElement] lookup failed:', String(e.message || e).substring(0, 120));
-        return null;
-    }
-}
+// _findElement is defined once in the shared preamble (sid/rootElId
+// generic — session mode and simple mode both reuse it).
 
 // Diagnostic for a final row-lookup failure: dump the row names UIA actually
 // exposes under the dialog RIGHT NOW. Distinguishes list virtualization (the
@@ -2280,6 +2524,19 @@ async function _findScoped(title, selector, timeoutMs = 8000) {
 // 금지 대상이라 쓰지 않는다). 실패는 _failures로 기록되어 _step()의
 // Fail-and-Recover(팝업 해제 후 1회 재시도)를 태운 뒤 최종 FAIL로 남는다.
 async function _clickScoped(title, selector, dbl = false) {
+    // 2026-07-17: owned 다이얼로그면 REST 폴백(15~20초 고정 비용, 실측 확정)을
+    // 아예 타지 않고 COM(osScopedInvoke, 1초 미만)으로 즉시 처리한다. 셀렉터가
+    // COM 조건으로 못 옮기는 형태(anchor 상대 경로 등)면 null을 반환해 아래
+    // REST 경로로 안전하게 폴백한다.
+    const s0 = await getWindowSession(title);
+    if (s0.owned && s0.hwnd) {
+        const target = _parseSelectorToTarget(selector);
+        if (target) {
+            osScopedInvoke(s0.hwnd, target);
+            if (dbl) osScopedInvoke(s0.hwnd, target);
+            return;
+        }
+    }
     const { elId, s } = await _findScoped(title, selector);
     if (!elId) {
         _failures.push('click-not-found:' + String(selector).substring(0, 60));
@@ -2289,26 +2546,51 @@ async function _clickScoped(title, selector, dbl = false) {
     if (dbl) await _appiumPost(\`/session/\${s.sid}/element/\${elId}/click\`, {});
 }
 
-// Returns true on success, false on failure (never pushes to _failures itself
-// — WinAppDriver's element/value endpoint outright rejects some native edit
-// controls (confirmed 2026-07-08: Win11 Notepad's RichEditD2DPT Document
-// control), so the caller falls back to OS-level typing instead of failing).
-async function _typeScoped(sid, rootElId, selector, text) {
-    try {
-        const raw = selector.replace(/^['"]|['"]$/g, '');
-        const using = raw.startsWith('~') ? 'accessibility id' : 'xpath';
-        const value = raw.startsWith('~') ? raw.slice(1) : raw;
-        const path = rootElId
-            ? \`/session/\${sid}/element/\${rootElId}/element\`
-            : \`/session/\${sid}/element\`;
-        const el = await _appiumPost(path, { using, value });
-        if (!el) throw new Error('element not found');
-        const elId = el.ELEMENT || el['element-6066-11e4-a52e-4f735466cecf'];
-        await _appiumPost(\`/session/\${sid}/element/\${elId}/clear\`, {});
-        await _appiumPost(\`/session/\${sid}/element/\${elId}/value\`, { text });
-        return true;
-    } catch (e) { console.warn('[type] scoped sendKeys failed:', String(e.message || e).substring(0, 100)); return false; }
+// COM 라우팅(owned 다이얼로그)이 필요한 session-mode 타이핑 — 위
+// _clickScoped와 동일한 이유/동일한 15~20초 회피. selector가 COM 조건으로
+// 못 옮기는 형태면 기존 REST 기반 _typeScoped(공유 preamble)로 폴백한다.
+async function _typeScopedOrCom(title, selector, text) {
+    const s = await getWindowSession(title);
+    if (s.owned && s.hwnd) {
+        const target = _parseSelectorToTarget(selector);
+        if (target) {
+            osScopedType(s.hwnd, target, text);
+            return true;
+        }
+    }
+    return await _typeScoped(s.sid, s.rootElId, selector, text);
 }
+
+// wdioSelectorById/wdioSelectorByClass가 만드는 단순 셀렉터 형태를
+// {automationId,className,name} 객체로 변환한다 — osScopedInvoke.py의
+// AND-조건 포맷과 동일. 태그는 '*'뿐 아니라 controlType(예: //TreeItem[...])도
+// 나올 수 있음(2026-07-17 실측: FileZilla "내 사이트" 셀렉터가
+// '//TreeItem[@Name="내 사이트"]'였는데 '*'만 매칭하는 첫 버전 정규식이
+// 이걸 못 잡아 owned-창 COM 우회가 이 스텝에서만 발동 안 하고 조용히
+// 느린 REST 경로로 떨어졌다) — 태그는 UIA ControlType이지 Win32 className이
+// 아니므로 그냥 무시(캡처 못함), Name/AutomationId/ClassName 속성만 뽑는다.
+// anchor 상대 경로(//*[@AutomationId="X"]/Tag[i])나 contains() 등은 COM
+// FindFirst 단일 조건으로 표현 불가하므로 null을 반환해 호출부가 기존
+// REST 경로로 폴백하게 한다.
+function _parseSelectorToTarget(selector) {
+    const raw = String(selector).replace(/^['"]|['"]$/g, '');
+    if (raw.startsWith('~')) return { automationId: raw.slice(1), className: '', name: '' };
+    let m = raw.match(/^\\/\\/[A-Za-z*]+\\[@AutomationId="([^"]*)"\\]$/);
+    if (m) return { automationId: m[1], className: '', name: '' };
+    m = raw.match(/^\\/\\/[A-Za-z*]+\\[@AutomationId="([^"]*)" and @Name="([^"]*)"\\]$/);
+    if (m) return { automationId: m[1], className: '', name: m[2] };
+    m = raw.match(/^\\/\\/[A-Za-z*]+\\[@ClassName="([^"]*)" and @Name="([^"]*)"\\]$/);
+    if (m) return { automationId: '', className: m[1], name: m[2] };
+    m = raw.match(/^\\/\\/[A-Za-z*]+\\[@ClassName="([^"]*)"\\]$/);
+    if (m) return { automationId: '', className: m[1], name: '' };
+    m = raw.match(/^\\/\\/[A-Za-z*]+\\[@Name="([^"]*)"\\]$/);
+    if (m) return { automationId: '', className: '', name: m[1] };
+    return null;
+}
+
+// _typeScoped(sid, rootElId, selector, text) is defined once in the shared
+// preamble (generic over sid — used here with a title-resolved sid/rootElId,
+// and by simple mode with _appSid directly).
 
 // ── HWND 추적 (창 세그먼팅) ────────────────────────────────────────────────
 // Title fragment → hwnd of the window launchApp actually created for this run.
@@ -2474,11 +2756,21 @@ async function launchApp(exePath, args, titleFrag, rect) {
     // Download Manager", VSCode's winFrag) since tailFrag === titleFrag then.
     const tailFrag = (titleFrag || '').split(' - ').pop() || titleFrag;
     const baselineTail = tailFrag !== titleFrag ? new Set(_listWindowHwnds(tailFrag)) : null;
+    // cwd 명시 (2026-07-17) — 안 주면 spawn()이 이 재생 스크립트를 실행한
+    // Node 프로세스의 CWD를 그대로 물려받는다. 파일 탐색기류 앱(FileZilla
+    // 로컬 패널 등)은 시작 폴더를 그 CWD로 삼는 경우가 있어, 어느 디렉터리에서
+    // node로 이 파일을 실행했는지에 따라 재생 결과가 달라지는 비결정성이
+    // 생긴다(실측: generated-wdio/FileZilla에서 실행하니 로컬 패널이 그
+    // 프로젝트 폴더에서 열려 녹화가 가정한 ".."/"C:" 같은 최상위 항목이
+    // 하나도 안 보임 — 앱이 스스로 기억하는 상태가 아니라 순수 프로세스
+    // 상속 문제로 확인됨, filezilla.xml에 해당 경로 없음). 홈 디렉터리로
+    // 고정해 실행 위치와 무관하게 항상 같은 곳에서 시작하게 한다.
+    const launchCwd = homedir();
     try {
         if (isAumid) {
-            spawn('explorer.exe', ['shell:AppsFolder\\\\' + exePath], { detached: true, stdio: 'ignore' }).unref();
+            spawn('explorer.exe', ['shell:AppsFolder\\\\' + exePath], { detached: true, stdio: 'ignore', cwd: launchCwd }).unref();
         } else {
-            spawn(exePath, args, { detached: true, stdio: 'ignore' }).unref();
+            spawn(exePath, args, { detached: true, stdio: 'ignore', cwd: launchCwd }).unref();
         }
     } catch (e) {
         _failures.push('launch');
@@ -2641,6 +2933,25 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
   const pageMethods  = [];
   const testSteps    = [];
 
+  // AutomationIds that are genuinely reused across DIFFERENT elements (same id,
+  // different Name) — bare `~id` is ambiguous for these, so wdioSelectorById
+  // must AND in the Name (see wdioSelectorById). A lone/non-reused numeric id
+  // (e.g. a single native Button) is NOT included here and stays bare `~id`,
+  // preserving the 2026-07-13 "trust native numeric resource ids" behavior.
+  const ambiguousIds = (() => {
+    const namesById = new Map();
+    for (const e of filtered) {
+      const id = e.element?.automationId;
+      const name = e.element?.name;
+      if (!id || !name) continue;
+      if (!namesById.has(id)) namesById.set(id, new Set());
+      namesById.get(id).add(name);
+    }
+    const out = new Set();
+    for (const [id, names] of namesById) if (names.size > 1) out.add(id);
+    return out;
+  })();
+
   // Electron 창 rect 앵커: 모든 Electron 이벤트 타이틀의 공통 부분문자열.
   const _elecTitles = filtered.filter(e => e.isElectron === true)
                               .map(e => e.element?.windowTitle || '').filter(Boolean);
@@ -2704,6 +3015,45 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
     });
   }
 
+  // 창 세그먼트 목록(멀티윈도우 시각화용, 2026-07-17) — rootHwndHex/newWindowSegment
+  // 경계를 한 번 더 훑어 [W1]/[W2].. 라벨을 매긴다. 아래 segBoundary(런타임
+  // _switchWindow 호출 여부)와는 완전히 별개다: segBoundary는 getWindowSession()을
+  // 실제로 호출하는 두 분기에서만 참(불필요한 20초 스캔을 피하려는 2026-07-16
+  // 최적화, 아래에서도 그대로 유지), 반면 이 라벨링은 순수 코멘트라 실행 비용이
+  // 0이므로 모든 세그먼트 경계에서 매긴다 — "새 화면 요소가 코드에 그 화면 밑에
+  // 묶여 보여야 한다"는 요구사항(멀티윈도우 피드백)에 대응.
+  const windowSegments = [];
+  const _segIndexByEvent = [];
+  {
+    let prevHwnd = null;
+    let prevTitle = null;
+    filtered.forEach((e, i) => {
+      const t = groupTitle(e, i);
+      const hwnd = e.rootHwndHex || null;
+      // hwnd는 ground truth지만 agent.py가 windowTitle보다 몇 이벤트 늦게
+      // 채우는 경우가 있다(2026-07-17 실측: FileZilla "사이트 관리자" 진입
+      // 직후 "내 사이트" 트리 클릭 3건은 windowTitle="사이트 관리자"인데
+      // rootHwndHex가 아직 None — PID self-heal이 클릭 캡처는 즉시 통과시키지만
+      // rootHwndHex 태깅은 watcher가 그 창을 정식 등록한 뒤에야 붙기 때문).
+      // hwnd만 보면 이 구간의 경계를 통째로 놓쳐 배너가 이전 창 밑에 잘못
+      // 붙는다 — title 변화도 함께 신호로 쓴다(같은 이유로 segBoundary 아래도
+      // 동일하게 고침). 7-Zip류 "같은 텍스트, 다른 hwnd" 충돌은 hwnd 체크가
+      // 여전히 담당하므로 회귀 없음(MockCollision).
+      const isNew = windowSegments.length === 0 || e.newWindowSegment
+        || (hwnd && hwnd !== prevHwnd) || (t && t !== prevTitle);
+      if (isNew) windowSegments.push({ title: t || '(unknown)', rootHwndHex: hwnd });
+      if (hwnd) prevHwnd = hwnd;
+      if (t) prevTitle = t;
+      _segIndexByEvent.push(windowSegments.length - 1);
+    });
+  }
+  // Single-window recordings (the common case) get no banners at all —
+  // only multi-window recordings need the visual grouping.
+  const multiWindow = windowSegments.length > 1;
+  const windowLegend = multiWindow
+    ? `// Windows in this recording:\n${windowSegments.map((s, idx) => `//   [W${idx + 1}] "${escapeStr(s.title)}"${idx === 0 ? ' (main)' : ' (opened during recording)'}`).join('\n')}\n\n`
+    : '';
+
   // windowTitle이 빈 문자열로 캡처된 이벤트(agent.py가 element.windowTitle을
   // 못 채운 경우)는 직전에 관측된 실제 windowTitle을 이어받아 같은 창 세그먼트로
   // 묶는다 — 같은 다이얼로그 안에서 연속 캡처되므로 안전한 가정이다.
@@ -2712,10 +3062,14 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
   // (2026-07-16 멀티윈도우 세그먼팅). agent.py가 event.newWindowSegment를
   // 직접 신호하면 그걸 우선 쓰고, 없으면(구버전 캡처) hwnd-diff로 폴백한다.
   let prevSegHwnd = null;
+  // relTitle 변화도 함께 본다(2026-07-17) — rootHwndHex가 windowTitle보다
+  // 늦게 채워지는 구간(위 windowSegments 사전 스캔과 동일 근거)에서
+  // switchWindowStep이 아예 한 번도 안 생성되던 버그를 고친다.
+  let prevSegTitle = null;
 
   filtered.forEach((e, i) => {
     const stepNum  = i + 1;
-    const sel      = selFn(e.element);
+    const sel      = selFn(e.element, ambiguousIds);
     const isEdit   = EDITABLE_CONTROL_TYPES.has(e.element?.controlType);
     const winTitle = groupTitle(e, i);
     const relTitle    = winTitle || lastWinTitle;
@@ -2734,11 +3088,26 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
     // 실제로 getWindowSession()을 호출하는 두 분기(아래 type-via-session,
     // click-via-session)에서만 segBoundary를 보고 스텝을 삽입한다.
     const segBoundary = useSession && relTitle &&
-      (e.newWindowSegment || (e.rootHwndHex && e.rootHwndHex !== prevSegHwnd));
+      (e.newWindowSegment || (e.rootHwndHex && e.rootHwndHex !== prevSegHwnd)
+        || (relTitle !== prevSegTitle));
     if (e.rootHwndHex) prevSegHwnd = e.rootHwndHex;
+    prevSegTitle = relTitle;
     const switchWindowStep = segBoundary
       ? `            await _step('switch to window: ${escapeStr(relTitle)}', async () => { await _switchWindow('${escapeStr(relTitle)}'); });\n`
       : '';
+
+    // Purely-visual window-section banner (2026-07-17) — zero runtime cost
+    // (a comment), separate from switchWindowStep above (which is gated to
+    // the branches that actually call getWindowSession() to avoid wasted
+    // scans). Marks every segment boundary so the page-object class and the
+    // test body both visibly group each window's methods/steps under it.
+    const segIdxHere = _segIndexByEvent[i];
+    const isSegStart = multiWindow && (i === 0 || segIdxHere !== _segIndexByEvent[i - 1]);
+    const segBanner = isSegStart
+      ? `\n    // ${'═'.repeat(60)}\n    // [W${segIdxHere + 1}] ${escapeStr(windowSegments[segIdxHere].title)}${segIdxHere === 0 ? ' (main window)' : ' (new window)'}\n    // ${'═'.repeat(60)}\n`
+      : '';
+    const pushMethod = (str) => { pageMethods[pageMethods.length] = segBanner + str; };
+    const pushStep = (str) => { testSteps[testSteps.length] = segBanner + str; };
 
     if (e.action === 'scroll') {
       // 프로그래매틱 스크롤 (2026-07-10 지시): 캡처 시점에 agent.py가 기록한
@@ -2756,19 +3125,19 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
         name: st.name || el.name || '',
       };
       if (useSession) {
-        pageMethods.push(
+        pushMethod(
 `    async scroll${stepNum}() {
         osScrollEl(_scrollHwnd('${escapeStr(relTitle)}'), ${JSON.stringify(target)}, ${notches});
     }`
         );
       } else {
-        pageMethods.push(
+        pushMethod(
 `    async scroll${stepNum}() {
         osScrollEl(_appHwnd, ${JSON.stringify(target)}, ${notches});
     }`
         );
       }
-      testSteps.push(
+      pushStep(
 `            await _step('${stepNum}:scroll delta=${notches}', () => page.scroll${stepNum}());`
       );
       return;
@@ -2778,7 +3147,7 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       // scope-out (2026-07-10 스테이크홀더 지시): 이벤트 스코프는
       // Click / Type / DoubleClick / Scroll 4종. drag/rightClick은 캡처는
       // 유지하되 재생하지 않는다 — 좌표 실행 전면 금지로 대체 경로도 없음.
-      testSteps.push(
+      pushStep(
 `            // [STEP ${stepNum}] ${e.action} scope-out — replay skipped (event scope: Click/Type/DoubleClick/Scroll, 2026-07-10)`
       );
       return;
@@ -2787,14 +3156,14 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
     if (e.action === 'type' && isEdit) {
       // switchWindowStep is only prepended for the getWindowSession()-calling
       // branch below (useSession && relTitle && !electronCtx) — the Electron
-      // (osType) and simple-mode (browser.$) branches never touch a window
+      // (osType) and simple-mode (_appSid) branches never touch a window
       // session, so inserting the switch step ahead of them would be dead
       // weight (see the segBoundary comment above).
       let usesGetWindowSession = false;
       if (useSession && electronCtx) {
         // Electron 입력 → UIA 세션 조회(45초 실패 경로) 제거, OS 키 주입
         // (SendKeys — 키보드 폴백, 좌표 실행 아님).
-        pageMethods.push(
+        pushMethod(
 `    async type${stepNum}(value) {
         osType(value);
     }`
@@ -2803,10 +3172,9 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
         usesGetWindowSession = true;
         const elSel = sel || `'//*[@Name="${escapeAttr(e.element?.name)}"]'`;
         const relTitleArg = escapeStr(relTitle);
-        pageMethods.push(
+        pushMethod(
 `    async type${stepNum}(value) {
-        const s = await getWindowSession('${relTitleArg}');
-        const ok = await _typeScoped(s.sid, s.rootElId, ${elSel}, value);
+        const ok = await _typeScopedOrCom('${relTitleArg}', ${elSel}, value);
         if (!ok) {
             console.warn('[type${stepNum}] scoped sendKeys failed — falling back to OS-level typing');
             osActivate('${relTitleArg}', _hwndCache['${relTitleArg}']);
@@ -2815,32 +3183,32 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
     }`
         );
       } else {
+        // Simple mode: no title-keyed session cache (single _appSid) — same
+        // sid/rootElId-generic _typeScoped session mode uses, just called
+        // directly against _appSid instead of via getWindowSession().
         const elSel = sel || `'//*[@Name="${escapeAttr(e.element?.name)}"]'`;
-        pageMethods.push(
+        pushMethod(
 `    async type${stepNum}(value) {
-        try {
-            const el = await browser.$(${elSel});
-            await el.waitForExist({ timeout: 8000 });
-            await el.addValue(value);
-        } catch (e) {
+        const ok = await _typeScoped(_appSid, null, ${elSel}, value);
+        if (!ok) {
             // WinAppDriver's element/value endpoint rejects some native edit
             // controls outright (confirmed 2026-07-08: Win11 Notepad's
             // RichEditD2DPT Document control returns "unknown error" in
             // ~15ms, even after waitForExist/elementClear succeeded) — no
             // amount of retrying helps, so fall back to real OS-level key
             // injection instead of failing the step.
-            console.warn('[type${stepNum}] element sendKeys failed — falling back to OS-level typing:', String(e.message || e).substring(0, 100));
+            console.warn('[type${stepNum}] element sendKeys failed — falling back to OS-level typing');
             osActivate('');
             osType(value);
         }
     }`
         );
       }
-      testSteps.push(
+      pushStep(
 `${usesGetWindowSession ? switchWindowStep : ''}            await _step('${stepNum}:type ${escapeStr(e.value)}', () => page.type${stepNum}('${escapeStr(e.value)}'));`
       );
     } else if (e.action === 'type') {
-      testSteps.push(`            // [STEP ${stepNum}] skip type on non-editable element`);
+      pushStep(`            // [STEP ${stepNum}] skip type on non-editable element`);
     } else if (e.element?.expandCollapse) {
       // ExpandCollapsePattern 재생 (ComboBox 드롭다운/메뉴바 MenuItem/트리 +-
       // 토글) — 2026-07-13 진단(poc/diag_expandcollapse.py)으로 실증: 일반
@@ -2864,12 +3232,12 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       };
       const itemName = e.expandItemName || '';
       const hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
-      pageMethods.push(
+      pushMethod(
 `    async click${stepNum}() {
         osExpandCollapse(${hwndArg}, ${JSON.stringify(target)}, ${itemName ? JSON.stringify(itemName) : 'null'});
     }`
       );
-      testSteps.push(
+      pushStep(
 `            await _step('${stepNum}:expandCollapse ${escapeStr(e.element?.name || '')}${itemName ? ' -> ' + escapeStr(itemName) : ''}', () => page.click${stepNum}());`
       );
     } else if (e.action === 'click' && isCrossWindowEvent(e, recordedRect)
@@ -2915,12 +3283,12 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       // SESSION_HEADER는 _hwndCache[_mainTitleFrag](launchApp의 baseline-diff가
       // beforeAll에서 채움) — 둘 다 osScopedInvoke 호출 전에 이미 준비돼 있다.
       const hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
-      pageMethods.push(
+      pushMethod(
 `    async click${stepNum}() {
         osScopedInvoke(${hwndArg}, ${JSON.stringify(target)}${triggerTarget ? `, ${JSON.stringify(triggerTarget)}` : ''});
     }`
       );
-      testSteps.push(
+      pushStep(
 `            await _step('${stepNum}:click ${escapeStr(e.element?.name || '')} (cross-window)', () => page.click${stepNum}());`
       );
     } else if ((e.action === 'click' || e.action === 'doubleClick')
@@ -2943,12 +3311,12 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
         name: e.element.name || '',
       };
       const hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
-      pageMethods.push(
+      pushMethod(
 `    async click${stepNum}() {
         osScopedInvoke(${hwndArg}, ${JSON.stringify(target)});
     }`
       );
-      testSteps.push(
+      pushStep(
 `            await _step('${stepNum}:${e.action} ${escapeStr(e.element?.name || '')}', () => page.click${stepNum}());`
       );
     } else {
@@ -2961,7 +3329,7 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
         // 셀렉터도 anchor도 없는 이벤트(예: light-dismiss 오버레이 레이스)는
         // 재생 수단이 없다 — 조용히 건너뛰면 이후 플로우가 어긋난 채 PASSED로
         // 남을 수 있으므로(거짓 통과), 명시적 실패로 기록한다.
-        testSteps.push(
+        pushStep(
 `            // [STEP ${stepNum}] ${e.action}: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
             _failures.push('${stepNum}:${e.action}:no-selector');`
         );
@@ -2971,37 +3339,38 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
         // HWND 세그먼트: 이 이벤트가 속한 창의 세션 컨텍스트로 전환한 뒤
         // (getWindowSession — 필요 시 scoped 세션 생성/Root 폴백) 그 안에서
         // 셀렉터를 라이브 조회해 element/click(UIA Invoke)한다.
-        pageMethods.push(
+        pushMethod(
 `    async click${stepNum}() {
         await _clickScoped('${escapeStr(relTitle)}', ${sel}${dbl ? ', true' : ''});
     }`
         );
       } else {
-        // Simple mode: pure XPath click via el.click() (UIA Invoke) — verified
-        // on Calculator (session 13). NOTE: no moveTo() before click() —
-        // WinAppDriver's Actions endpoint rejects mouse pointerMove ("only pen
-        // and touch pointer input source types are supported"). A lookup/click
-        // failure propagates to _step()'s Fail-and-Recover (popup dismiss +
-        // one retry) and then fails the test — no coordinate fallback exists.
-        const secondClick = dbl ? `\n        await el.click();` : '';
-        pageMethods.push(
+        // Simple mode: pure XPath click via element/click (UIA Invoke) —
+        // verified on Calculator (session 13). NOTE: no moveTo() before
+        // click() — WinAppDriver's Actions endpoint rejects mouse pointerMove
+        // ("only pen and touch pointer input source types are supported").
+        // A lookup/click failure propagates to _step()'s Fail-and-Recover
+        // (popup dismiss + one retry) and then fails the test — no
+        // coordinate fallback exists. Single _appSid (no title cache needed).
+        pushMethod(
 `    async click${stepNum}() {
-        const el = await browser.$(${sel});
-        await el.waitForExist({ timeout: 8000 });
-        await el.click();${secondClick}
+        await _clickBySid(_appSid, null, ${sel}${dbl ? ', true' : ''});
     }`
         );
       }
-      testSteps.push(
+      pushStep(
 `${useSession ? switchWindowStep : ''}            await _step('${stepNum}:${e.action} ${escapeStr(e.element?.name || '')}', () => page.click${stepNum}());`
       );
     }
   });
 
   // OS 주입(osClick/osScroll/type) 실패를 실제 assert로 검증(거짓 통과 방지).
-  // SIMPLE_HEADER/SESSION_HEADER 둘 다 _failures/_warnings를 갖는다.
-  const assertLine = `            if (_warnings.length) console.warn('[replay-warnings]', _warnings);
-            expect(_failures).toEqual([]);`;
+  // SIMPLE_HEADER/SESSION_HEADER 둘 다 _failures/_warnings를 갖는다. No Jasmine
+  // `expect()` under bare `node` — the process exit code carries pass/fail
+  // (2026-07-17: standalone `node <file>.js`, no WDIO/Jasmine runner).
+  const assertLine = `    if (_warnings.length) console.warn('[replay-warnings]', _warnings);
+    if (_failures.length) { console.error('[FAIL]', _failures); process.exitCode = 1; }
+    else console.log('[PASS] all steps completed');`;
 
   const header   = useSession ? SESSION_HEADER : SIMPLE_HEADER;
   // launchApp identifies the NEW window this run creates (baseline/diff on
@@ -3030,51 +3399,60 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
   // uses _appHwnd directly, already resolved by initAppHwnd()).
   const mainTitleFrag = useSession ? launchFrag : '';
 
-  const beforeHook = useSession ? `
-    beforeAll(async () => {
-        _warmupPowerShell();
-        _mainTitleFrag = ${JSON.stringify(mainTitleFrag)};
-        _dialogRects = ${JSON.stringify(dialogRects)};
-        const { hostname, port } = browser.options;
-        _APPIUM = \`http://\${hostname || '127.0.0.1'}:\${port || 4723}\`;
-        console.log(\`[session] Appium endpoint resolved to \${_APPIUM}\`);
-${launchCall}    });
-` : '';
+  // Session mode: start (or reuse) Appium, open our own Root session
+  // (replaces the old WDIO-injected `browser`), then launch the app.
+  // Simple mode: start Appium, open a single scoped session on the app
+  // itself, resolve its hwnd, normalize its geometry.
+  const beforeBody = useSession ? `
+    _mainTitleFrag = ${JSON.stringify(mainTitleFrag)};
+    _dialogRects = ${JSON.stringify(dialogRects)};
+    await ensureAppium();
+    _rootSid = await _createSession('Root');
+    console.log(\`[session] Root session \${_rootSid} ready\`);
+${launchCall}` : `
+    await ensureAppium();
+    _appSid = await _createSession(${JSON.stringify(resolveAppCap(exePath))});
+    console.log(\`[session] app session \${_appSid} ready\`);
+    await initAppHwnd();
+    normalizeWindowSimple(${JSON.stringify(recordedRect)});
+`;
 
-  const afterHook = useSession ? `
-    afterAll(async () => {
+  const afterBody = useSession ? `
         for (const { sid } of Object.values(_sessionIds)) {
-            if (sid === browser.sessionId) continue;
+            if (sid === _rootSid) continue;
             try { await _appiumFetch(\`/session/\${sid}\`, { method: 'DELETE' }, 5000); } catch {}
         }
-    });
-` : '';
+        if (_rootSid) { try { await _appiumFetch(\`/session/\${_rootSid}\`, { method: 'DELETE' }, 5000); } catch {} }
+` : `
+        if (_appSid) { try { await _appiumFetch(\`/session/\${_appSid}\`, { method: 'DELETE' }, 5000); } catch {} }
+`;
 
-  // Identify the session's own window by hwnd (deterministic — title match
-  // can grab a pre-existing same-titled window instead, see osActivate in
-  // SIMPLE_HEADER) and normalize it back to the recorded position/size
-  // before the first step.
-  const simpleBeforeHook = !useSession ? `
-    beforeAll(async () => {
-        _warmupPowerShell();
-        await initAppHwnd();
-        normalizeWindowSimple(${JSON.stringify(recordedRect)});
-    });
-` : '';
-
-  return header + `class ${pageName} {
+  return header + `${windowLegend}class ${pageName} {
 ${pageMethods.join('\n\n')}
 }
 
-describe('${testName}', () => {${beforeHook}${afterHook}${simpleBeforeHook}
-    it('should replay recorded flow', async () => {
+// Plain async entry point — replaces the old Jasmine describe/it wrapper
+// (2026-07-17: standalone execution, no WDIO/Jasmine runner needed).
+async function run() {
+    // Everything — including Appium/session startup — runs inside this
+    // try/finally, not just the replay steps: a failure in ensureAppium()/
+    // _createSession() (e.g. a bad capability) must still kill any Appium
+    // process this run spawned. Node does not reliably reap child processes
+    // on Windows when the parent exits, so leaving startup outside the
+    // finally risked leaking an orphaned Appium instance on every startup
+    // failure (confirmed 2026-07-17 while verifying the standalone runner).
+    try {
+        _warmupPowerShell();
+${beforeBody}
         const page = new ${pageName}();
-
 ${activateStep}${testSteps.join('\n')}
-
+    } finally {
+${afterBody}        _killSpawnedAppium();
+    }
 ${assertLine}
-    });
-});
+}
+
+run().catch(e => { console.error('[FATAL]', e); process.exitCode = 1; });
 `;
 }
 
@@ -3188,7 +3566,7 @@ function buildWdioConf(exePath, specFiles, useSession) {
   jasmineOpts: { defaultTimeoutInterval: 300000 },
   reporters: ['spec'],
   services: ['appium'],
-  appium: { command: 'appium', args: ['--allow-insecure', 'winappdriver'] },
+  appium: { command: 'appium', args: ['--allow-insecure', '*:winappdriver'] },
   injectGlobals: true,${stateResetHook}
 };`;
   }
@@ -3214,7 +3592,7 @@ function buildWdioConf(exePath, specFiles, useSession) {
   jasmineOpts: { defaultTimeoutInterval: 60000 },
   reporters: ['spec'],
   services: ['appium'],
-  appium: { command: 'appium', args: ['--allow-insecure', 'winappdriver'] },
+  appium: { command: 'appium', args: ['--allow-insecure', '*:winappdriver'] },
   injectGlobals: true,${stateResetHook}
 };`;
 }
@@ -3304,8 +3682,25 @@ app.post('/api/generate', (req, res) => {
     // 앱별 서브폴더에 저장
     const wdioOutDir = path.join(WDIO_BASE_DIR, base);
 
+    // wdio.conf.js is kept only as an optional legacy artifact — the
+    // generated *TestById.js/*TestByClass.js files run standalone via plain
+    // `node <file>.js` (2026-07-17) and no longer need it, @wdio/cli, or
+    // appium-service to replay.
     const confContent = buildWdioConf(exe || name, wdioFiles.map(f => f.filename), useSession);
     const confFile    = { filename: 'wdio.conf.js', content: confContent };
+    const pkgJsonFile = {
+      filename: 'package.json',
+      content: JSON.stringify({
+        name: `${base.toLowerCase()}-generated-test`,
+        version: '1.0.0',
+        type: 'module',
+        description: 'Standalone recorded UI test — run with `node <Base>TestById.js` (Appium auto-starts; no wdio.conf.js/npm install needed here, dependencies live in the shared ../node_modules).',
+        scripts: {
+          'test:byid': `node ${base}TestById.js`,
+          'test:byclass': `node ${base}TestByClass.js`,
+        },
+      }, null, 2),
+    };
     // 좌표 주입 헬퍼(osClick.ps1/osDrag.ps1)는 더 이상 생성하지 않는다
     // (2026-07-10 좌표 실행 전면 금지). osScroll.py는 ScrollPattern +
     // PostMessage 휠 폴백의 프로그래매틱 스크롤로 교체됨.
@@ -3319,7 +3714,7 @@ app.post('/api/generate', (req, res) => {
     const expandCollapsePs1File = { filename: 'osExpandCollapse.py', content: OS_EXPANDCOLLAPSE_PY };
     const scopedInvokePyFile = { filename: 'osScopedInvoke.py', content: OS_SCOPEDINVOKE_PY };
     const { savedPaths: wdioPaths, saveError: wdioErr } = saveFiles(
-      [...wdioFiles, confFile, scrollPyFile, winRectPs1File, moveWinPs1File, typePs1File, activatePs1File, dismissPopupPs1File, escapePs1File, expandCollapsePs1File, scopedInvokePyFile], wdioOutDir
+      [...wdioFiles, confFile, pkgJsonFile, scrollPyFile, winRectPs1File, moveWinPs1File, typePs1File, activatePs1File, dismissPopupPs1File, escapePs1File, expandCollapsePs1File, scopedInvokePyFile], wdioOutDir
     );
 
     const warnings = !exe ? ['exePath missing — launchApp will be skipped'] : [];
@@ -3340,7 +3735,7 @@ app.post('/api/generate', (req, res) => {
       files: wdioFiles,
       savedPaths: wdioPaths,
       folder: base,
-      runCommand: `cd generated-wdio && npx wdio run ${base}/wdio.conf.js`,
+      runCommand: `cd generated-wdio/${base} && node ${base}TestById.js`,
       saveErrors: [wdioErr].filter(Boolean),
       warnings,
     });

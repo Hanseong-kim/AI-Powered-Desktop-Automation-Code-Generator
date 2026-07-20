@@ -1,0 +1,10 @@
+{
+  "name": "filezilla-generated-test",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Standalone recorded UI test — run with `node <Base>TestById.js` (Appium auto-starts; no wdio.conf.js/npm install needed here, dependencies live in the shared ../node_modules).",
+  "scripts": {
+    "test:byid": "node FileZillaTestById.js",
+    "test:byclass": "node FileZillaTestByClass.js"
+  }
+}

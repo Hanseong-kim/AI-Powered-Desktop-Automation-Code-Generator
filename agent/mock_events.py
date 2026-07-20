@@ -215,6 +215,70 @@ COLLISION_EVENTS = [
                winLeft=0, winTop=0, winWidth=1024, winHeight=768),
 ]
 
+# Delayed-rootHwndHex dialog scenario (2026-07-17, real FileZilla GUI run) —
+# agent.py's PID self-heal lets a click through with the correct windowTitle
+# the INSTANT a new dialog's PID matches the target app, but rootHwndHex
+# tagging lags a few events behind until the background watcher formally
+# registers the hwnd. server.js's window-segment boundary detection (both
+# the runtime `_switchWindow()` gate and the `[Wn]` banner pre-pass) used to
+# key ONLY off rootHwndHex/newWindowSegment, so this lag meant the first
+# few clicks inside a freshly-opened dialog were silently attributed to the
+# PREVIOUS window — no `switch to window:` step ever got generated for that
+# dialog, and its banner showed under the wrong window section. Real capture
+# had 3 TreeItem clicks with windowTitle="사이트 관리자" but rootHwndHex=None
+# before rootHwndHex finally appeared on the 4th event.
+DELAYED_HWND_APP = "MockDelayedHwnd"
+DELAYED_HWND_EXE = "C:\\mock\\delayedhwnd.exe"
+DELAYED_HWND_EVENTS = [
+    make_event("click", name="Open", automation_id="btnOpen", class_name="Button",
+               window_title="Main Window", app_name=DELAYED_HWND_APP, x=100, y=100, index=1,
+               rootHwndHex="AAAA", winLeft=0, winTop=0, winWidth=1024, winHeight=768),
+    # Dialog opens. windowTitle flips immediately (PID self-heal); rootHwndHex
+    # stays None for these two clicks, exactly like the real capture.
+    make_event("click", name="Field1", automation_id="", class_name="TreeItem",
+               window_title="Dialog", app_name=DELAYED_HWND_APP, x=200, y=200, index=2),
+    make_event("click", name="Field2", automation_id="", class_name="TreeItem",
+               window_title="Dialog", app_name=DELAYED_HWND_APP, x=210, y=210, index=3),
+    # rootHwndHex finally shows up here (watcher caught up).
+    make_event("click", name="OkButton", automation_id="btnOk", class_name="Button",
+               window_title="Dialog", app_name=DELAYED_HWND_APP, x=220, y=220, index=4,
+               rootHwndHex="BBBB", newWindowSegment=True,
+               winLeft=200, winTop=150, winWidth=400, winHeight=300),
+]
+
+# Redundant-trigger-click ComboBox scenario (2026-07-17, real FileZilla GUI
+# run — Site Manager's "배경색(B):" color combo needed 3 physical clicks
+# before it actually opened). mergeExpandCollapseClicks() paired an
+# expandCollapse trigger with whatever event came right after it, without
+# checking whether that "next" event was itself just another re-click of
+# the SAME trigger rather than a real item — so click #1 got merged with
+# click #2 (itemName = the combo's own label) instead of with the real
+# item ("빨강") that came after click #3. This app's events replicate that
+# exact pattern with a plain Button trigger (name="Combo") to isolate the
+# bug from ComboBox-specific behavior.
+EXPAND_REDUNDANT_APP = "MockExpandRedundant"
+EXPAND_REDUNDANT_EVENTS = [
+    make_event("click", name="Combo", automation_id="5999", class_name="ComboBox",
+               control_type="ComboBox", app_name=EXPAND_REDUNDANT_APP,
+               expand_collapse=True, index=1),
+    make_event("click", name="Combo", automation_id="5999", class_name="ComboBox",
+               control_type="ComboBox", app_name=EXPAND_REDUNDANT_APP,
+               expand_collapse=True, index=2),
+    make_event("click", name="Combo", automation_id="5999", class_name="ComboBox",
+               control_type="ComboBox", app_name=EXPAND_REDUNDANT_APP,
+               expand_collapse=True, index=3),
+    make_event("click", name="Red", automation_id="", class_name="ListItem",
+               control_type="ListItem", app_name=EXPAND_REDUNDANT_APP, index=4),
+    # A normal (non-redundant) MenuItem->MenuItem merge right after, to prove
+    # the fix doesn't touch the existing correct-merge path.
+    make_event("click", name="File", automation_id="", class_name="MenuItem",
+               control_type="MenuItem", app_name=EXPAND_REDUNDANT_APP,
+               expand_collapse=True, index=5),
+    make_event("click", name="Open", automation_id="mnuOpen", class_name="MenuItem",
+               control_type="MenuItem", app_name=EXPAND_REDUNDANT_APP,
+               expand_collapse=True, index=6),
+]
+
 # Native Win32 dialog scenario (2026-07-13, PuTTY GUI failure follow-up) —
 # exercises the SLOT_INDEX_CONTROL_TYPES carve-out in wdioSelectorById/
 # wdioSelectorByClass: numeric AutomationIds are STABLE resource IDs on
@@ -296,6 +360,28 @@ NATIVE_EVENTS = [
                class_name="", control_type="ListItem", window_title="Native Dialog",
                app_name=NATIVE_APP, x=420, y=430, index=11,
                winLeft=350, winTop=520, winWidth=300, winHeight=200),
+    # Reused numeric AutomationId across DIFFERENT fields (2026-07-17,
+    # FileZilla Site Manager GUI failure: automationId="5999" is shared by
+    # ~12 Edit fields — Host/Port/User/Password/... — each with a distinct
+    # Name). A bare accessibility-id selector ('~5999') always resolves to
+    # the FIRST matching field, so FileZillaTestById.js's Host/Port TYPE
+    # steps failed with "target not found" while the SAME fields' cross-window
+    # CLICK steps (which build {automationId,className,name} directly,
+    # bypassing wdioSelectorById) succeeded — proving the data (a distinct
+    # Name per field) was always present in the capture; only the ById
+    # selector-builder was throwing it away. codegen must detect the reuse
+    # and AND the Name into the selector (same fix class as the PuTTY
+    # 2026-07-13 5차 combo/radio id collision), while lone/non-reused numeric
+    # ids (e.g. "1049" above) must keep resolving to the bare '~id' form.
+    make_event("click", name="Host:", automation_id="5999",
+               class_name="Edit", control_type="Edit", window_title="Native Dialog",
+               app_name=NATIVE_APP, x=300, y=200, index=12),
+    make_event("click", name="Port:", automation_id="5999",
+               class_name="Edit", control_type="Edit", window_title="Native Dialog",
+               app_name=NATIVE_APP, x=300, y=260, index=13),
+    make_event("type", name="Host:", automation_id="5999",
+               class_name="Edit", control_type="Edit", window_title="Native Dialog",
+               app_name=NATIVE_APP, value="host.example.com", x=300, y=200, index=14),
 ]
 NATIVE_SESSION_META = {
     "action": "session_meta",
@@ -390,6 +476,14 @@ def step_wdio_generate():
     check("ok == true", body.get("ok") is True)
     check("folder field present", bool(body.get("folder")), f"got {body.get('folder')}")
     check("runCommand field present", bool(body.get("runCommand")))
+    run_command = body.get("runCommand", "")
+    check(
+        "runCommand uses standalone `node <file>.js`, not `npx wdio run`",
+        run_command.startswith("cd generated-wdio/") and "node " in run_command and "npx wdio" not in run_command,
+        f"got '{run_command}' — the setup-dependency gap (record -> generate -> "
+        "node thefile.js, no harness assembly) means the advertised run "
+        "command must not require the WDIO CLI",
+    )
     files = body.get("files", [])
     check("Two .js files returned", len(files) == 2, f"got {len(files)}")
     saved_paths = body.get("savedPaths", [])
@@ -398,20 +492,42 @@ def step_wdio_generate():
         any(str(p).endswith("osEscape.ps1") for p in saved_paths),
         f"savedPaths={saved_paths}",
     )
+    check(
+        "package.json saved alongside the wdio output (self-describing standalone folder)",
+        any(str(p).endswith("package.json") for p in saved_paths),
+        f"savedPaths={saved_paths}",
+    )
     for f in files:
         fname = f.get("filename", "")
         content = f.get("content", "")
         check(f"  {fname} ends with .js", fname.endswith(".js"), f"got '{fname}'")
         check(f"  {fname} has content", bool(content.strip()))
         check(
-            f"  {fname} contains waitForExist",
-            "waitForExist" in content,
-            "missing waitForExist — possible regression",
+            f"  {fname} clicks via _clickBySid (single _appSid, no browser.$)",
+            "_clickBySid(_appSid" in content,
+            "simple-mode click must resolve XPath via the raw Appium REST "
+            "session this file opens itself — no WDIO `browser` global "
+            "(2026-07-17 standalone execution)",
         )
         check(
-            f"  {fname} asserts on _failures",
-            "expect(_failures).toEqual([])" in content,
-            "missing _failures assert — injection failures would go unnoticed",
+            f"  {fname} asserts on _failures via process.exitCode (no Jasmine expect)",
+            "process.exitCode = 1" in content and "expect(_failures)" not in content,
+            "missing the standalone pass/fail exit-code check, or a leftover "
+            "Jasmine expect() that would crash under plain `node` (no "
+            "injected `expect` global without the WDIO/Jasmine runner)",
+        )
+        check(
+            f"  {fname} is a standalone script (no describe/it/browser.*)",
+            "describe(" not in content and "browser." not in content and "async function run()" in content,
+            "generated file must run under plain `node <file>.js` — no "
+            "Jasmine describe/it wrapper and no WDIO `browser` global "
+            "(2026-07-17: setup-dependency gap)",
+        )
+        check(
+            f"  {fname} self-starts Appium (ensureAppium) and opens its own session",
+            "async function ensureAppium()" in content and "_createSession(" in content,
+            "standalone file must start/reuse Appium itself and create its "
+            "own session — previously this was WDIO's job via wdio.conf.js",
         )
         check(
             f"  {fname} has no pause()",
@@ -621,6 +737,49 @@ def step_wdio_generate():
         "Automation) can't see Button/ComboBox internals on native Win32 "
         "dialogs (PuTTY 2026-07-14 diagnosis)",
     )
+    # 2026-07-17 (2차): timestamped replay diagnosis (FileZilla Site Manager)
+    # found osScopedInvoke.py reporting "target not found" for clicks that
+    # actually found the element every attempt (item=found) but had no
+    # actionable Invoke/SelectionItem pattern — Tree containers and Edit
+    # fields don't support either. A plain click's real intent there is just
+    # focus, so passive control types should count SetFocus as success while
+    # actionable controls (Button/MenuItem/TreeItem) still require a real
+    # Invoke/Select (false-PASS guard, 2026-07-13 3rd lesson).
+    check(
+        "osScopedInvoke.py treats passive controls (Edit/Tree/Tab/Pane/Document) "
+        "as clicked when SetFocus succeeds even without Invoke/Select",
+        "PASSIVE_CONTROL_TYPES = {50004, 50030, 50033, 50018, 50023}" in scoped_invoke_py
+        and "if focus_ok and ctrl_type in PASSIVE_CONTROL_TYPES:" in scoped_invoke_py,
+        "expected passive-controltype fallback in invoke_item() — without it, "
+        "a captured click on a Tree container or Edit field always fails even "
+        "though the element is found every retry (FileZilla Site Manager 2026-07-17)",
+    )
+    check(
+        "osScopedInvoke.py strips a trailing newline before SetValue (type path)",
+        "value = text[:-1] if text.endswith('\\n') else text" in scoped_invoke_py,
+        "expected trailing-newline strip in type_item() — a captured rename-box "
+        "commit like 'd\\n' otherwise gets typed literally instead of pressing "
+        "Enter, leaving the edit box uncommitted and blocking sibling-tab "
+        "lookups in the same dialog (FileZilla Site Manager 2026-07-17)",
+    )
+    # osScopedInvoke.py is embedded as a JS template literal in server.js —
+    # a bare \n inside that backtick string is interpreted by JS as a real
+    # newline BEFORE it ever reaches the .py file, silently splitting a
+    # Python string literal across two lines (unterminated string literal).
+    # Caught once already while writing the fix above (the string-match check
+    # only failed to match by accident; it does not prove the file parses).
+    # A real syntax check is the only thing that actually guards this class
+    # of JS-template-escaping bug for a generated Python file.
+    try:
+        compile(scoped_invoke_py, "osScopedInvoke.py", "exec")
+        py_syntax_ok, py_syntax_err = True, ""
+    except SyntaxError as e:
+        py_syntax_ok, py_syntax_err = False, str(e)
+    check(
+        "osScopedInvoke.py is syntactically valid Python",
+        py_syntax_ok,
+        py_syntax_err or "generated helper failed to compile",
+    )
     # 2026-07-14: osExpandCollapse도 같은 이유로 .NET managed UIA(.ps1)에서
     # comtypes COM UIA(.py)로 교체 — managed UIA는 레거시 SysTreeView32 TreeItem을
     # 못 봐서 "Window" 트리 노드 펼치기가 항상 "target element not found"로
@@ -683,6 +842,44 @@ def step_wdio_generate_session():
             "_typeScoped(" in content,
             "missing _typeScoped — session-mode typing regressed",
         )
+        # 2026-07-17: owned-다이얼로그 COM 라우팅 — Root-세션 REST 폴백이
+        # 매치 여부와 무관하게 매번 15~20초 고정 비용이 드는 것을 실측
+        # 확정(FileZilla Site Manager 진단, 빈 결과조차 15.6초). 코드생성
+        # 스텝은 이제 getWindowSession()을 직접 부르지 않고
+        # _typeScopedOrCom()을 통해 owned 여부를 런타임에 판단한다.
+        check(
+            f"  {fname} routes session-mode typing through _typeScopedOrCom "
+            "(owned-dialog COM fast path)",
+            "_typeScopedOrCom(" in content,
+            "generated type step must call _typeScopedOrCom(title, selector, "
+            "value) instead of manually resolving getWindowSession()+"
+            "_typeScoped() inline — without this, owned dialogs always pay "
+            "the 15-20s Root-scan REST fallback even though the hwnd is "
+            "already known from EnumWindows",
+        )
+        check(
+            f"  {fname} defines osScopedType (COM typing for owned dialogs)",
+            "function osScopedType(hwnd, target, text)" in content
+            and "--text-b64" in content,
+            "missing osScopedType()/--text-b64 wiring — owned-dialog typing "
+            "has no COM fallback and must fall through to the slow REST path",
+        )
+        check(
+            f"  {fname} defines _parseSelectorToTarget (XPath -> COM condition)",
+            "function _parseSelectorToTarget(selector)" in content,
+            "missing the selector translator — _clickScoped/_typeScopedOrCom "
+            "can't route simple ~id / @AutomationId / @Name selectors to the "
+            "COM path without it",
+        )
+        check(
+            f"  {fname} getWindowSession short-circuits owned windows instead "
+            "of Root-scanning",
+            "owned: true" in content,
+            "getWindowSession() must return { owned: true, hwnd } immediately "
+            "when a window is owned, instead of falling through to the "
+            "Root-session REST XPath scan (empirically ~15-20s per call "
+            "regardless of match, 2026-07-17 FileZilla diagnosis)",
+        )
         check(
             f"  {fname} scrolls via osScrollEl with the window's hwnd",
             "osScrollEl(" in content and "_scrollHwnd(" in content,
@@ -696,9 +893,24 @@ def step_wdio_generate_session():
                 f"found {banned} — coordinate-based execution is forbidden",
             )
         check(
-            f"  {fname} asserts on _failures",
-            "expect(_failures).toEqual([])" in content,
-            "missing _failures assert",
+            f"  {fname} asserts on _failures via process.exitCode (no Jasmine expect)",
+            "process.exitCode = 1" in content and "expect(_failures)" not in content,
+            "missing the standalone pass/fail exit-code check, or a leftover "
+            "Jasmine expect() that would crash under plain `node`",
+        )
+        check(
+            f"  {fname} is a standalone script (no describe/it/browser.*)",
+            "describe(" not in content and "browser." not in content and "async function run()" in content,
+            "session-mode file must also run under plain `node <file>.js` — "
+            "no Jasmine wrapper, no WDIO `browser` global "
+            "(2026-07-17: setup-dependency gap)",
+        )
+        check(
+            f"  {fname} self-starts Appium and opens its own Root session",
+            "async function ensureAppium()" in content and "_createSession('Root')" in content,
+            "session-mode file must start/reuse Appium itself and open the "
+            "Root session it used to get for free via WDIO's injected "
+            "`browser`",
         )
         # 2026-07-16 multi-window segmenting fix: an explicit, separately
         # logged "switch to window" step must appear at every hwnd boundary
@@ -718,6 +930,27 @@ def step_wdio_generate_session():
             switch_count == 3,
             f"expected 3 '_switchWindow(' calls (initial + dialog-open + "
             f"revisit-main), got {switch_count}",
+        )
+        # 2026-07-17 multi-window code-structure feedback: elements belonging
+        # to a new screen must be visibly grouped under it IN THE GENERATED
+        # CODE (not just an implicit runtime switch) — a window legend up
+        # top and a [Wn] section banner at every hwnd boundary (3 for
+        # MockMulti's A1B2 -> C3D4 -> A1B2 revisit), independent of whether
+        # that boundary happens to also emit a runtime _switchWindow() call.
+        check(
+            f"  {fname} has a window legend listing all 3 segments",
+            "// Windows in this recording:" in content
+            and "[W1]" in content and "[W2]" in content and "[W3]" in content,
+            "missing the window legend / [Wn] labels — multi-window code "
+            "structure must be visible without reading replay logs",
+        )
+        check(
+            f"  {fname} banners each window section in both the page-object class and the test body",
+            content.count("[W1]") >= 2 and content.count("[W2]") >= 2 and content.count("[W3]") >= 2,
+            "expected each [Wn] label to appear at least twice per window "
+            "(once in the legend/class banner, once again at the matching "
+            "test-body step) — got page-object and test-body banners out of "
+            "sync",
         )
         check(
             f"  {fname} labels the switch step visibly in the step list",
@@ -784,6 +1017,117 @@ def step_wdio_generate_window_collision():
         )
 
 
+def step_wdio_generate_delayed_hwnd():
+    print("\n[9d] Delayed rootHwndHex — windowTitle arrives before hwnd tagging "
+          "(2026-07-17 FileZilla GUI finding)")
+    request("DELETE", "/api/events")
+    for ev in DELAYED_HWND_EVENTS:
+        request("POST", "/api/events", ev)
+
+    status, body = request("POST", "/api/generate", {
+        "appName": DELAYED_HWND_APP,
+        "exePath": DELAYED_HWND_EXE,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (delayed-hwnd) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped delayed-hwnd checks)", False, body.get("message", ""))
+        return
+    files = body.get("files", [])
+    for f in files:
+        fname = f.get("filename", "")
+        content = f.get("content", "")
+        check(
+            f"  {fname} emits switch to window: Dialog despite rootHwndHex "
+            "being absent on the first events inside it",
+            "switch to window: Dialog" in content,
+            "windowTitle flips to 'Dialog' immediately but rootHwndHex stays "
+            "empty for 2 events (PID self-heal lets the click through before "
+            "the watcher formally registers the hwnd) — boundary detection "
+            "keyed only on rootHwndHex misses this transition entirely, so "
+            "no _switchWindow() ever fires for the dialog (real bug: FileZilla "
+            "Site Manager typing/clicks silently used a stale/wrong session)",
+        )
+        check(
+            f"  {fname} labels the Dialog window's own section, not the "
+            "previous window's",
+            '[W2] Dialog' in content,
+            "the [Wn] banner must attribute Field1/Field2 (windowTitle="
+            "'Dialog', rootHwndHex=None) to the Dialog's own section — a "
+            "hwnd-only boundary check leaves them mislabeled under [W1] "
+            "Main Window",
+        )
+        # The banner for W2 should appear before Field1's click, not only at
+        # OkButton (index 4, the first event with a real rootHwndHex) — i.e.
+        # the window section must start at the FIRST Dialog event.
+        w1_pos = content.find('[W1] Main Window')
+        w2_pos = content.find('[W2] Dialog')
+        field1_pos = content.find("'2:click Field1'")
+        check(
+            f"  {fname} starts the [W2] Dialog section before Field1's step, "
+            "not after it",
+            -1 not in (w1_pos, w2_pos, field1_pos) and w1_pos < w2_pos < field1_pos,
+            f"positions: [W1]={w1_pos} [W2]={w2_pos} Field1 step={field1_pos} — "
+            "expected [W2] to appear right before Field1, proving the boundary "
+            "was detected at the FIRST dialog event, not delayed until "
+            "OkButton where rootHwndHex finally shows up",
+        )
+
+
+def step_wdio_generate_expand_redundant_trigger():
+    print("\n[9c] Redundant ComboBox trigger re-clicks before the real item "
+          "(2026-07-17 FileZilla GUI finding)")
+    request("DELETE", "/api/events")
+    for ev in EXPAND_REDUNDANT_EVENTS:
+        request("POST", "/api/events", ev)
+
+    status, body = request("POST", "/api/generate", {
+        "appName": EXPAND_REDUNDANT_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (expand-redundant) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped expand-redundant checks)", False, body.get("message", ""))
+        return
+    files = body.get("files", [])
+    for f in files:
+        fname = f.get("filename", "")
+        content = f.get("content", "")
+        if "ById" not in fname:
+            continue
+        check(
+            f"  {fname} merges the 3 redundant trigger re-clicks with the REAL item (not itself)",
+            'osExpandCollapse(_appHwnd, {"automationId":"5999","className":"ComboBox","name":"Combo"}, "Red")' in content,
+            "expected the 3 consecutive re-clicks of the same ComboBox trigger "
+            "to collapse into ONE osExpandCollapse call whose itemName is the "
+            "real item ('Red') that came after them — real FileZilla capture "
+            "had 3 physical clicks on '배경색(B):' before it opened, and the "
+            "old merge logic paired click #1 with click #2 (also just the "
+            "trigger) instead of skipping ahead to the real item",
+        )
+        check(
+            f"  {fname} never merges the trigger with itself (self-referencing itemName)",
+            'osExpandCollapse(_appHwnd, {"automationId":"5999","className":"ComboBox","name":"Combo"}, "Combo")' not in content,
+            "found a self-referencing merge — itemName equals the trigger's "
+            "own name, which is exactly the STEP6 bug seen in the real "
+            "FileZilla run ('배경색(B): -> 배경색(B):')",
+        )
+        expand_step_count = content.count("_step('")
+        check(
+            f"  {fname} emits exactly 2 steps (1 collapsed ComboBox merge + 1 normal MenuItem merge)",
+            expand_step_count == 2,
+            f"got {expand_step_count} — the 3 redundant trigger clicks + 1 item "
+            "should collapse to 1 step, plus the unrelated File->Open "
+            "MenuItem merge = 2 total (not 4, which would mean the redundant "
+            "re-clicks leaked out as their own broken steps)",
+        )
+        check(
+            f"  {fname} still correctly merges an ordinary MenuItem trigger+item pair (regression)",
+            'osExpandCollapse(_appHwnd, {"automationId":"","className":"MenuItem","name":"File"}, "Open")' in content,
+            "the fix must not disturb the existing non-redundant merge path",
+        )
+
+
 def step_wdio_generate_native():
     print("\n[10] Native Win32 dialog generation — numeric AutomationId handling")
     request("DELETE", "/api/events")
@@ -817,6 +1161,35 @@ def step_wdio_generate_native():
             "'~6'" not in content and 'Name="Selection"' in content,
             "runtime slot index (6) on a virtualized TreeItem was trusted as "
             "a stable id — will drift as the tree scrolls/reorders",
+        )
+        # Reused numeric AutomationId across different fields (2026-07-17,
+        # FileZilla Site Manager: automationId "5999" on ~12 Edit fields).
+        check(
+            f"  {fname} ANDs the Name into a reused numeric AutomationId (Host field)",
+            '//Edit[@AutomationId="5999" and @Name="Host:"]' in content,
+            "a bare '~5999' selector matches whichever field WinAppDriver "
+            "finds first — the generated click/type step for the Host field "
+            "must combine automationId+Name to disambiguate it from the "
+            "other 11 fields sharing the same id (FileZilla 2026-07-17)",
+        )
+        check(
+            f"  {fname} ANDs the Name into a reused numeric AutomationId (Port field)",
+            '//Edit[@AutomationId="5999" and @Name="Port:"]' in content,
+            "same disambiguation must apply independently to every field "
+            "sharing the reused id, not just the first one encountered",
+        )
+        check(
+            f"  {fname} never emits the ambiguous bare '~5999' for the reused id",
+            "'~5999'" not in content,
+            "if the bare accessibility-id selector survives anywhere, that "
+            "step still resolves to the wrong field at replay time",
+        )
+        check(
+            f"  {fname} still emits the bare '~1049' for a NON-reused numeric id (regression)",
+            "'~1049'" in content,
+            "the reuse-detection must not over-trigger on a numeric id that "
+            "only appears once — that would needlessly lengthen a selector "
+            "that was already unambiguous",
         )
         # ExpandCollapsePattern replay (2026-07-13, poc/diag_expandcollapse.py):
         # ComboBox open+select must merge into ONE osExpandCollapse() call
@@ -900,12 +1273,13 @@ def step_wdio_generate_native():
             "2026-07-14)",
         )
         step_count = content.count("_step('")
-        # NATIVE_EVENTS: 11 events -> CheckBox(1) + TreeItem-Selection(1) +
+        # NATIVE_EVENTS: 14 events -> CheckBox(1) + TreeItem-Selection(1) +
         # ComboBox+SOCKS5 merged(1) + TreeItem-Window-toggle(1) + Data(1) +
-        # DropDown+cross-window-item merged(1) + DropDown+scroll+item merged(1) = 7.
+        # DropDown+cross-window-item merged(1) + DropDown+scroll+item merged(1)
+        # + Host-click(1) + Port-click(1) + Host-type(1) = 10.
         check(
-            f"  {fname} step count (11 events -> 7 steps: 3 merges, scroll dropped)",
-            step_count == 7,
+            f"  {fname} step count (14 events -> 10 steps: 3 merges, scroll dropped)",
+            step_count == 10,
             f"got {step_count} _step(...) invocations",
         )
 
@@ -926,6 +1300,16 @@ def step_wdio_generate_native():
             "a DropDown arrow leaked into a bare Name-based Button selector — "
             "matches the titlebar Close (X) button and closes the app "
             "(PuTTY ByClass 2026-07-14). Use ~DropDown / merge it away.",
+        )
+        # wdioSelectorByClass was NOT touched by the reused-id fix (it already
+        # ANDs ClassName+Name unconditionally) — confirm it still resolves the
+        # reused-id Host/Port fields correctly, i.e. no regression there.
+        check(
+            f"  {fname} already disambiguates the reused-id fields via ClassName+Name (regression)",
+            '//Edit[@ClassName="Edit" and @Name="Host:"]' in content
+            and '//Edit[@ClassName="Edit" and @Name="Port:"]' in content,
+            "wdioSelectorByClass's existing ClassName+Name combo must keep "
+            "working unchanged after the ById-side fix",
         )
 
 
@@ -975,6 +1359,8 @@ def main():
     step_wdio_generate()
     step_wdio_generate_session()
     step_wdio_generate_window_collision()
+    step_wdio_generate_delayed_hwnd()
+    step_wdio_generate_expand_redundant_trigger()
     step_wdio_generate_native()
 
     passed = sum(_results)
