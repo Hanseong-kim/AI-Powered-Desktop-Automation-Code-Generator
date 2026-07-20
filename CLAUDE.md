@@ -18,13 +18,14 @@ cd agent; python agent.py
 # Terminal 3 — React UI
 cd ui; npm start                                   # http://localhost:3000
 
-# Run generated tests (Appium auto-starts, WinAppDriver at 4723 not needed separately)
-cd generated-wdio
-npx wdio run Calculator/wdio.conf.js               # 폴더 이름 = PascalCase 앱 이름
-npx wdio run Notepad/wdio.conf.js
+# Run generated tests — standalone, self-starts Appium (2026-07-17: no more
+# wdio.conf.js/npx wdio run needed; that path is now a legacy artifact only)
+cd generated-wdio/Calculator
+node CalculatorTestById.js                         # 폴더 이름 = PascalCase 앱 이름
+node NotepadTestById.js                             # (from generated-wdio/Notepad)
 
 # Regression (no agent needed, server must be running)
-python agent/mock_events.py                        # expect 115/115 checks
+python agent/mock_events.py                        # expect 197/197 checks
 ```
 
 ---
@@ -63,8 +64,9 @@ All UIA/COM runs on the worker thread after `CoInitialize`.
 - **File naming**: PascalCase app name → subfolder name. Server enforces this.
 - **No Java, no Playwright**: test-runner 삭제됨, generated-playwright 경로 삭제됨.
   WebdriverIO (JS) 템플릿 생성만 지원.
-- **Regression gates**: `python agent/mock_events.py` 115/115 checks
-  (simple + session 모드, 좌표 호출 금지 게이트 포함).
+- **Regression gates**: `python agent/mock_events.py` 197/197 checks
+  (simple + session 모드, 좌표 호출 금지 게이트 포함, 2026-07-17부터 standalone
+  실행/window banner 게이트 포함).
 - **Documentation honesty**: never write GUI-unverified work as "DONE" in docs.
 - **`generated-wdio/*` 직접 편집 금지**: 매 Generate 호출마다 덮어써지는 산출물이므로
   수정은 항상 `server/server.js`/`agent/agent.py` 원본에서.
@@ -662,18 +664,128 @@ FileZillaTestByClass.js 둘 다 2회 연속 PASSED**로 GUI 검증을 마쳤다.
   이번 재생에서는 모든 스텝이 캡처 문제 없이 통과했으므로, 다음에 재현되는 앱이
   나오면 그때 로그 기반으로 진행.
 
+**2026-07-17: 스테이크홀더 반박 메일 대응 — setup-dependency 갭(①) + 멀티윈도우
+코드 구조화 갭(③) 해소, ①은 실제 GUI로 완전 검증, ③은 코드/회귀-테스트 레벨
+검증 (FileZilla 실전 재확인은 미완)**
+
+07-10 서면 피드백 3건 중 ②(시각적 실시간 리플레이)는 이미 완료로 확인됐던 상태에서,
+남은 두 건에 착수. 상세 → `daily/2026-07-17.md`.
+- **① Setup dependency 해소 (`node <file>.js` 단독 실행)**: `server.js`에
+  `STANDALONE_PREAMBLE`(공유 `ensureAppium()` + 순수 Appium-REST 헬퍼)을 신설해
+  `SIMPLE_HEADER`/`SESSION_HEADER` 양쪽에 병합, Jasmine `describe/it` 래퍼를
+  일반 `async function run()`으로 교체, WDIO `browser` 전역 참조를 전부
+  제거(`_clickBySid`/`_typeScoped`가 대신 raw Appium REST로 클릭/타이핑).
+  `saveFiles`가 앱별 `package.json`을 추가로 저장하고, `/api/generate`의
+  `runCommand` 응답이 `npx wdio run ...` 대신 `node <Base>TestById.js`를
+  반환한다. `wdio.conf.js`는 레거시 산출물로만 계속 생성.
+  **GUI 검증 완료**: 실제 `calc.exe`로 `/api/generate`(exePath 포함) →
+  `node CalcRealTestById.js` 단독 실행 — Appium 자체 기동, 실제 앱 세션 생성,
+  "Five" 클릭, `[PASS] all steps completed`로 정상 종료 확인. 종료 후
+  `netstat`/`tasklist`로 Appium/Calculator 프로세스 잔존 없음 확인(정상 정리).
+- **검증 중 발견한 독립 버그 2건(둘 다 수정 완료)**:
+  1) 설치된 Appium 3.5.2가 `--allow-insecure winappdriver`(콜론 없는 bare
+     이름)를 `Error: The full feature name must include ... '*' wildcard ...`로
+     거부 — `*:winappdriver` 형식이 필요함을 실측 확인. 이 버그는 기존
+     `wdio.conf.js`의 `appium.args`에도 동일하게 있던 잠재 버그였음(이번에
+     실제로 Appium을 직접 스폰해보기 전까진 아무도 마주치지 않았을 뿐) —
+     두 위치 모두 수정.
+  2) `run()`에서 `ensureAppium()`/`_createSession()` 호출이 `try/finally`
+     바깥에 있어, 세션 생성 실패 시(예: 빈 capability) 스폰한 Appium
+     프로세스가 정리되지 않고 남을 수 있었음(Windows는 부모 종료 시 자식
+     프로세스를 자동으로 안 죽임) — 시작 단계 전체를 `try` 안으로 이동.
+- **③ 멀티윈도우 코드 구조화**: `rootHwndHex`/`newWindowSegment` 기반으로
+  세그먼트를 사전 계산해, 생성 코드 상단에 `// Windows in this recording:
+  [W1].../[W2]...` 범례를 추가하고, 페이지 오브젝트 클래스와 테스트 본문
+  양쪽에 `[Wn]` 섹션 배너를 삽입(순수 코멘트, 런타임 비용 0 — 기존
+  `_switchWindow()` 호출 최적화와는 독립적으로 유지). "새 화면의 요소가
+  코드에서 그 화면 아래 묶여 보여야 한다"는 요구를 충족.
+  **검증 수준: 코드/회귀-테스트만** — `MockMulti`(합성 3-세그먼트 시나리오)
+  생성물에서 범례+배너가 정확히 렌더링됨을 확인했으나, 실제 FileZilla
+  재녹화로 재확인하지는 않음(아래 Next actions).
+- **회귀 게이트 163 → 177**: standalone 래퍼(`describe(`/`browser.` 부재,
+  `run()`/`ensureAppium` 존재, `process.exitCode` 기반 pass/fail) 체크,
+  `package.json`/`runCommand` 체크, `[W1]/[W2]/[W3]` 범례+배너 체크 등 약
+  15건 추가. `python agent/mock_events.py` **177/177 통과**.
+- **미검증(중요)**: 이번 세션의 실제 GUI 검증은 Calculator(simple 모드,
+  단일 창)만 수행 — FileZilla 같은 session 모드(멀티윈도우) 앱을
+  `node <Base>TestById.js`로 실제 재생해 (a) 새 standalone 실행 경로 자체가
+  session 모드에서도 동작하는지, (b) `[Wn]` 배너가 실제 캡처에서도 올바르게
+  나오는지는 아직 실측 안 됨.
+
+**2026-07-17 (2차): FileZilla session 모드 실전 재생 디버깅 — 버그 7건 발견,
+5건 수정 완료(2건 실전 반복 검증), 2건 미확정. 상세 → `daily/2026-07-17.md`
+(사용자 요청으로 발견 순서·원인·수정·검증 상태 전부 기록됨)**
+
+바로 위 "미검증" 항목(FileZilla session 모드 standalone 실전 재생)에 착수해
+`systematic-debugging`으로 진행. 발견 순서대로:
+- **버그 A(수정 완료)**: `mergeExpandCollapseClicks()`가 콤보박스 3연클릭
+  (열릴 때까지 재클릭)을 트리거 자기 자신과 잘못 병합
+  (`expandCollapse 배경색(B): -> 배경색(B):`). 연속 재클릭을 먼저 몰아서
+  스킵하도록 수정, TDD로 회귀 테스트 추가(177→182).
+- **사고**: 이 검증 과정에서 `mock_events.py` 실행이 **실제 사용자 FileZilla
+  캡처 파일을 덮어씀** — `POST /api/events`가 전역 `sessionBackupFile`에
+  매번 전체를 다시 쓰는데, 이 변수가 실제 세션과 테스트 세션 사이에
+  공유돼서 발생. 사용자가 재녹화로 복구. **구조적 원인은 안 고침** — 다음
+  세션 과제.
+- **버그 B(수정 완료, 실전 검증)**: 창-경계 판정(`[Wn]` 배너 + 런타임
+  `_switchWindow()`)이 `rootHwndHex`만 보는데, agent.py가 `windowTitle`보다
+  `rootHwndHex`를 몇 이벤트 늦게 채워서(PID self-heal vs watcher 등록 시차)
+  다이얼로그 진입 초반 이벤트들의 경계를 놓침 — `switch to window:` 스텝이
+  한 번도 안 생김. `windowTitle` 변화도 신호로 추가, 회귀 182→189.
+- **버그 C(수정 완료, 진단 스크립트+실전 반복 검증)**: 독립 진단
+  (`server/_diag_rootscan.mjs`)으로 Appium Root 세션 REST 조회가 **쿼리
+  내용/매치 여부와 무관하게 매번 15~20초 고정 비용**임을 실측 확정(빈 결과
+  0.5초 미만이 아니라 15.6초). owned 다이얼로그(WAD가 scoped session 거부)는
+  hwnd를 이미 알고 있으므로 Root-scan REST 폴백 대신 기존 COM 경로
+  (`osScopedInvoke.py`, cross-window 클릭에 이미 쓰던 것)로 즉시 라우팅 —
+  타이핑용 `osScopedType()`/`--text-b64` 신설. 실전에서 20초 타임아웃 완전히
+  사라짐 반복 확인.
+- **버그 C-1(수정 완료)**: 위 수정 자체의 버그 — `_scopedFailHwnds`
+  블랙리스트(원래 "세션 생성 재시도 방지"용)가 owned 재감지 자체를 막아서,
+  캐시 재조회 시 다시 느린 경로로 떨어짐. owned 여부 확인을 블랙리스트와
+  무관하게 항상 먼저 하도록 재구성.
+- **버그 C-2(수정 완료)**: 셀렉터 파서(`_parseSelectorToTarget`)가
+  `//*[...]`(와일드카드)만 매칭하고 `//TreeItem[...]`(실제 ControlType
+  태그) 형태를 못 잡아 일부 클릭만 여전히 느린 경로로 폴백. 정규식을
+  태그 형태 전부 매칭하도록 확장.
+- **버그 D(수정 완료, 실전 반복 검증)**: `launchApp()`의 `spawn()`이 `cwd`를
+  안 정해줘서, `node <file>.js`를 실행한 위치(예:
+  `generated-wdio/FileZilla`)를 FileZilla가 그대로 물려받아 로컬 패널이
+  엉뚱한 폴더에서 열림 — 녹화가 가정한 "컴퓨터" 루트의 `..`/`C:`가 아예
+  안 보여 STEP1부터 실패. FileZilla 자체 설정엔 이 경로가 안 남아있어서
+  앱이 기억하는 상태가 아니라 순수 CWD 상속 문제로 확정(7-Zip류 "마지막
+  폴더 기억" 문제와는 별개). `cwd: homedir()`로 고정.
+- **버그 E(부분 수정, 미확정)**: COM 경로가 REST의 폴링(1초 간격 최대 8초)과
+  달리 단발 시도라 "새 사이트(N)" 클릭 직후 렌더링되는 인라인 이름변경
+  상자를 놓칠 수 있음(`_step()`의 ESC 기반 복구는 이름변경 상자에서 ESC가
+  변경을 취소시켜 오히려 재시도를 방해). 최대 4회(즉시+300ms×3) 재시도
+  루프를 `osScopedInvoke.py`에 추가했으나, 실전 재생에서 **동일 코드로 돌린
+  두 번의 실행 결과가 달랐음**(한 번은 STEP4까지 전부 성공, 바로 다음 실행은
+  STEP4부터 실패해 연쇄 실패). Site Manager 누적 데이터 때문인가 의심했으나
+  `sitemanager.xml` 자체가 없어(전부 저장 전 취소돼 안 남음) 기각 — 근본
+  원인 미확정, 반복 재현 관찰 필요.
+- **스코프 밖(오늘 미착수)**: 숫자 automationId 재사용(`5999`가 호스트(H)/
+  사용자(U) 필드 둘 다에, `5101`이 서로 다른 취소 버튼에 재사용 — PuTTY
+  2026-07-13 5차와 같은 패턴), STEP7 "항목 선택(S):" SysTreeView32 힌트
+  텍스트 문제.
+- **회귀 게이트 177 → 189 → 197** (버그 A/B로 189, 이후 정리 커밋으로 197).
+  `python agent/mock_events.py` **197/197 통과**.
+
 **Next actions (2026-07-13 이후):**
 1. **PuTTY GUI 재검증 (2026-07-14 RC-A/B/C 수정 반영)**: server.js 재시작 후
    PuTTY 재-Generate(재녹화 불필요 — 최신 캡처 restore 후 Generate) →
-   `npx wdio run PuTTY/wdio.conf.js` **2 passed** 확인. 체크포인트: ByClass가
+   실행 명령이 2026-07-17부터 `node PuTTYTestById.js`로 바뀜(`npx wdio run`
+   아님 — §1 Commands 참고) — 이걸로 **2 passed 상당** 확인. 체크포인트: ByClass가
    타이틀바 X로 종료 안 함, "Window" expandCollapse가 `[osExpandCollapse] ...
    under main window subtree`(COM)로 성공, 병합 후 UTF-8 도달, 양쪽 spec에
    `esc-recovery-closed-app` 없음, 서버 로그 `[cross-window-merge] merged
    click+scroll+click ... (dropped intervening scroll)`. UTF-8 재오픈
    (클릭→스크롤→클릭)이 이번 병합으로 처리되는지가 핵심. FileZilla 메뉴는
    별도 백로그.
-2. Calculator/Notepad `npx wdio run` 재실행 — 07-13 숫자-id 완화 + Name-fallback
-   태그 추가가 기존 GENERIC_AUTOMATION_IDS/XAML 경로에 회귀 없는지 확인.
+2. Calculator/Notepad `node <Base>TestById.js` 재실행(2026-07-17부터 `npx wdio run`
+   대신 이 명령 — Calculator는 실제 `calc.exe`로 이미 검증됨, §4 2026-07-17) —
+   07-13 숫자-id 완화 + Name-fallback 태그 추가가 기존
+   GENERIC_AUTOMATION_IDS/XAML 경로에 회귀 없는지 Notepad로 확인.
 3. FileZilla 호스트 필드 타이핑 재검증: 영문 텍스트 의도적 입력 후 `[keydrop]`
    로그 유무로 "입력 없이 Enter만" vs "게이트 문제" vs "IME 문제" 판정
    (daily/2026-07-13.md "세 번째 트랙" 참고).
@@ -682,8 +794,8 @@ FileZillaTestByClass.js 둘 다 2회 연속 PASSED**로 GUI 검증을 마쳤다.
    (07-12 재녹화에서는 해당 케이스 미발생 — light-dismiss 경로만 검증됨).
 5. **7-Zip 재녹화 검증 (2026-07-15 이어서)**: agent.py 재시작(관리자) → 동일 흐름
    재녹화(컴퓨터→C: 더블클릭→$Recycle.Bin 더블클릭→파일 더블클릭, 더블클릭 직후
-   같은 자리 재클릭 주의) → Generate → `npx wdio run Sevenzip/wdio.conf.js`
-   **2 passed** 확인 + `[inspect] ... climbed`류 신호로 신규 row-climb 조건
+   같은 자리 재클릭 주의) → Generate → `node SevenzipTestById.js`(2026-07-17부터
+   `npx wdio run` 아님) **2 passed 상당** 확인 + `[inspect] ... climbed`류 신호로 신규 row-climb 조건
    발동 확인. 코드 수정 자체는 수동 패치 캡처로 이미 2/2 검증됨(§4 2026-07-15).
    그 뒤 다른 native 앱(WinRAR 등)으로 확장.
 6. Check `INPUT_CONTROL_TYPES` if typing in new apps is silently dropped
@@ -699,6 +811,30 @@ FileZillaTestByClass.js 둘 다 2회 연속 PASSED**로 GUI 검증을 마쳤다.
    실전 확인 안 됨 — 7-Zip류 타이틀 충돌 케이스로 재확인 필요. "2차 화면 요소
    캡처 누락"(리뷰 피드백 3번)도 이번 FileZilla 재생에선 재현되지 않아 원인
    미확정 상태 유지 — `_watch_windows()`는 여전히 추측성으로 고치지 않는다.
+9. ~~FileZilla 실전 재확인 — standalone 실행 + `[Wn]` 배너~~ — **2026-07-17
+   (2차) 완료**: session 모드 standalone 실행 자체는 정상 동작 확인(`[appium]
+   starting Appium...` → `_rootSid` 세션 생성 → `switch to window:` 스텝
+   발동 → 종료 후 프로세스 정리 확인). 그 과정에서 버그 7건 발견(5건 수정,
+   2건 미확정) — 상세 → 위 "2026-07-17 (2차)" 항목 + `daily/2026-07-17.md`.
+   PuTTY/7-Zip은 여전히 `node <Base>TestById.js`로 재확인 안 됨(항목 1, 5).
+10. **버그 E 재현 관찰 (2026-07-17 (2차)에서 이어서, 최우선)**: FileZilla
+    "새 사이트(N)" 클릭 직후 인라인 이름변경 상자 타이핑이 같은 코드로도
+    실행마다 성공/실패가 갈림(COM 경로 재시도 루프 0.9초로도 가끔 부족).
+    여러 번 연속 재생해 패턴 기록 — 재시도 시간을 늘리는 게 도움되는지,
+    아니면 다른 근본 원인(이름변경 상자가 UIA에 다른 방식으로 노출되는
+    케이스)을 찾아야 하는지 판단.
+11. **숫자 automationId 재사용 (FileZilla Site Manager, 2026-07-17 (2차)
+    발견)**: `5999`가 호스트(H)/사용자(U) 필드 둘 다에, `5101`이 서로 다른
+    다이얼로그의 취소 버튼에 재사용됨 — PuTTY 2026-07-13 (5차)와 같은 패턴
+    (automationId 단독 조건이 먼저 매칭돼버림). 같은 해법(automationId+
+    name을 AND로 묶은 조건을 먼저 시도) 적용 가능한지 검토.
+12. **`sessionBackupFile` 구조적 위험 (2026-07-17 (2차)에서 사고로 발견)**:
+    `POST /api/events`가 전역 `sessionBackupFile`에 매번 전체를 다시 쓰는데,
+    이 변수가 실제 사용자 녹화 세션과 `mock_events.py` 테스트 세션 사이에
+    공유될 수 있어 **실제 캡처 파일이 테스트 데이터로 덮어써지는 사고가
+    실제로 발생**했음(사용자가 재녹화로 복구). 재발 방지 필요 여부 결정 —
+    예: 테스트 전용 엔드포인트 분리, 또는 "테스트 모드" 플래그로 실제 백업
+    경로 덮어쓰기 차단.
 
 *(보류됨 — 07-10 피드백으로 우선순위 강등: VSCode GUI 재검증 3종, FreeDM 드래그
 재녹화, FreeDM/ClaudeDesktop 실행 기록. Electron 제외 지시 + Drag 스코프 아웃.)*

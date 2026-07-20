@@ -13,6 +13,7 @@ const PRESETS = [
   { label: 'PuTTY',            appName: 'PuTTY',            exePath: 'C:\\Program Files\\PuTTY\\putty.exe' },
   { label: 'FileZilla',        appName: 'FileZilla',        exePath: 'C:\\Program Files\\FileZilla FTP Client\\filezilla.exe' },
   { label: 'IDM',              appName: 'IDM',              exePath: 'C:\\Program Files (x86)\\Internet Download Manager\\IDMan.exe' },
+  { label: '7-Zip',            appName: 'SevenZip',         exePath: 'C:\\Program Files\\7-Zip\\7zFM.exe' },
   // NOTE: LOCALAPPDATA is not available in CRA bundles; path uses "user" as default username.
   // If your Windows profile is not "user", select "Custom..." and enter the correct path.
   { label: 'VSCode',           appName: 'VSCode',           exePath: 'C:\\Users\\user\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe' },
