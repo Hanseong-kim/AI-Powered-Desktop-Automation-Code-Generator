@@ -447,6 +447,32 @@ NESTED_DROPDOWN_EVENTS = [
                winLeft=300, winTop=100, winWidth=400, winHeight=300),
 ]
 
+# Simple-mode cross-window click carrying a rootHwndHex from agent.py's PID/
+# install-dir self-heal (2026-07-21, real 7-Zip Benchmark repro: clicking
+# "Cancel" in the Benchmark dialog). needsSessionSwitching() correctly stays
+# in SIMPLE mode here (only ONE distinct rootHwndHex value appears across the
+# whole recording, so roots.size===1 -> False) — but simple mode has no
+# _switchWindow()/getWindowSession() at all, only a single _appSid session
+# scoped to the ORIGINAL main window. The cross-window click branch's guard
+# (added 2026-07-21 to fix a SESSION-mode title-collision regression) used to
+# exclude ANY event carrying rootHwndHex unconditionally, leaving this event
+# with no valid replay path — it fell through to the plain click branch,
+# which can only ever search the main window's own session, producing
+# `click-not-found` for a button that lives in a different top-level window.
+SIMPLE_ROOTHWND_APP = "MockSimpleRootHwnd"
+SIMPLE_ROOTHWND_EVENTS = [
+    make_event("click", name="", automation_id="", class_name="",
+               window_title="Main", app_name=SIMPLE_ROOTHWND_APP, x=100, y=100, index=1,
+               winLeft=0, winTop=0, winWidth=800, winHeight=600),
+    # Benchmark-dialog Cancel button — different rect than the main window,
+    # and tagged with a rootHwndHex agent.py's self-heal resolved (the ONLY
+    # rootHwndHex anywhere in this recording, so session mode never triggers).
+    make_event("click", name="취소", automation_id="2", class_name="Button",
+               window_title="Benchmark", app_name=SIMPLE_ROOTHWND_APP, x=400, y=400, index=2,
+               winLeft=300, winTop=300, winWidth=400, winHeight=300,
+               rootHwndHex="137900"),
+]
+
 
 # ---------------------------------------------------------------------------
 # Test steps
@@ -964,6 +990,39 @@ def step_wdio_generate_nested_dropdown():
             "an AND condition on both fields matches nothing (PuTTY 2026-07-14 "
             "class of bug, reappearing here because this click falls through "
             "to the unmerged branch instead of the triggerTarget-only fix path)",
+        )
+
+
+def step_wdio_generate_simple_roothwnd():
+    print("\n[8e] Simple-mode cross-window click with a rootHwndHex must "
+          "still use osScopedInvoke, not the main-session-only plain click "
+          "(2026-07-21, real 7-Zip Benchmark 'Cancel' repro)")
+    request("DELETE", "/api/events")
+    for ev in SIMPLE_ROOTHWND_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": SIMPLE_ROOTHWND_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (simple-roothwnd) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped simple-roothwnd checks)", False, body.get("message", ""))
+        return
+    files = body.get("files", [])
+    for f in files:
+        content = f.get("content", "")
+        check(
+            f"  {f.get('filename')} replays the Benchmark-dialog Cancel via "
+            "osScopedInvoke, not a main-session-scoped click",
+            'osScopedInvoke(_appHwnd, {"automationId":"2"' in content
+            and 'Name="취소"' not in content,
+            "expected the cross-window click branch to handle this (rect "
+            "differs from the main window, and this recording never enters "
+            "session mode since only one rootHwndHex value appears at all) "
+            "— if it instead falls through to the plain click branch, it can "
+            "only ever search _appSid (scoped to the ORIGINAL main window) "
+            "and can never find a button living in a different top-level "
+            "window, producing click-not-found",
         )
 
 
@@ -1522,6 +1581,7 @@ def main():
     step_wdio_generate_app_state_reset()
     step_wdio_generate_anim_settle()
     step_wdio_generate_nested_dropdown()
+    step_wdio_generate_simple_roothwnd()
     step_wdio_generate_session()
     step_wdio_generate_window_collision()
     step_wdio_generate_delayed_hwnd()

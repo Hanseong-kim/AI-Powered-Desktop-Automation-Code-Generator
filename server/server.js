@@ -3314,19 +3314,27 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
 `            await _step('${stepNum}:expandCollapse ${escapeStr(e.element?.name || '')}${itemName ? ' -> ' + escapeStr(itemName) : ''}', () => page.click${stepNum}());`
       );
     } else if (e.action === 'click' && isCrossWindowEvent(e, recordedRect)
-        && !e.rootHwndHex
+        && !(useSession && e.rootHwndHex)
         && (e.element?.name || e.element?.automationId)) {
-      // !e.rootHwndHex (2026-07-21): agent.py가 이 이벤트에 rootHwndHex를
-      // 붙였다는 건 _watch_windows()가 이미 그 창을 최상위 창으로 추적
-      // 중이라는 뜻 — 그런 경우는 위 segBoundary/_switchWindow()
-      // 메커니즘(2026-07-16)이 이미 정확히 처리한다(title 충돌 포함, 그게
-      // 그 기능이 생긴 이유). 이 분기는 rootHwndHex가 아예 없는, 창으로
-      // 추적조차 안 되는 진짜 "보이지 않는 팝업"(PuTTY ComboLBox 드롭다운
-      // 목록처럼 너무 짧게 살아 watcher가 못 잡는 경우)만을 위한 것 —
-      // recordedRect가 이제 session_meta 대신 실제 이벤트 rect를 우선하도록
-      // 넓어지면서(바로 위 recordedRect 계산 참고), rootHwndHex로 이미 제대로
-      // 추적되는 진짜 다른 창(예: 7-Zip 다이얼로그)까지 rect-diff만으로 여기
-      // 잘못 흡수돼 switch 스텝이 통째로 안 나가는 회귀가 나 이 가드를 추가함.
+      // !(useSession && e.rootHwndHex) (2026-07-21, 수정 — 원래 2026-07-21
+      // 오전에는 useSession 무관하게 그냥 !e.rootHwndHex였다): agent.py가 이
+      // 이벤트에 rootHwndHex를 붙였다는 건 _watch_windows()가 이미 그 창을
+      // 최상위 창으로 추적 중이라는 뜻 — session 모드에서는 위
+      // segBoundary/_switchWindow() 메커니즘(2026-07-16)이 이미 정확히
+      // 처리한다(title 충돌 포함, 그게 그 기능이 생긴 이유)이므로 그쪽에
+      // 맡기고 여기선 건드리지 않는다. **하지만 simple 모드에는
+      // _switchWindow()/getWindowSession() 자체가 없다** — 유일한 재생
+      // 경로는 메인 창에 고정 스코프된 _appSid 세션뿐이라, rootHwndHex가
+      // 있다는 이유로 이 분기를 건너뛰면 그 이벤트는 대체 경로가 전혀 없이
+      // "else"의 평범한 클릭(항상 _appSid로 검색)으로 떨어져 다른 최상위
+      // 창(예: 7-Zip 벤치마크 다이얼로그) 안의 요소를 찾다가
+      // click-not-found로 실패한다(실측: 2026-07-21, simple 모드로
+      // 코드생성된 7-Zip 벤치마크 녹화에서 self-heal로 rootHwndHex가 붙은
+      // "취소" 버튼이 정확히 이렇게 실패). 이 분기는 rootHwndHex가 아예
+      // 없는, 창으로 추적조차 안 되는 진짜 "보이지 않는 팝업"(PuTTY
+      // ComboLBox 드롭다운 목록처럼 너무 짧게 살아 watcher가 못 잡는 경우)과
+      // — simple 모드에서는 rootHwndHex 유무와 무관하게 — 모든 창-교차
+      // 클릭을 위한 것.
       // 창-교차 클릭 (2026-07-13, PuTTY "Remote character set:" 콤보박스
       // 조사) — 이 이벤트가 캡처된 창 크기/위치가 메인 창과 다름 → 클릭
       // 시점에 별도 최상위 창(팝업/드롭다운 목록)에 있었다는 뜻. 세션은
