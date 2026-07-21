@@ -10,6 +10,7 @@
 
 const fs   = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
 
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
@@ -76,6 +77,28 @@ app.post('/api/start', async (req, res) => {
       EVENTS_BACKUP,
       `${appName}_${new Date().toISOString().replace(/[:.]/g, '-')}.json`
     );
+    // 2026-07-21 (7-Zip 재현): 재생 쪽(run() 안의 buildAppStateResetCall)은
+    // 앱을 켜기 전 상태-초기화 레지스트리 리셋을 이미 하는데, 녹화 시작
+    // 시점(여기, agent.py launch 이전)은 이 리셋을 한 번도 안 해서 두 시점의
+    // "앱이 처음 뜰 때 상태"가 달라질 수 있었다. 실측: 이전 세션이 7-Zip을
+    // "C:\" 폴더에 두고 종료해 레지스트리에 남긴 상태에서 다시 녹화를
+    // 시작하니 첫 이벤트의 windowTitle이 "7-Zip"(컴퓨터 루트)이 아니라
+    // "C:\\"로 캡처됐고, 그 값을 그대로 믿는 launchFrag가 재생 시 —
+    // 리셋 때문에 실제로는 "7-Zip" 제목으로 뜨는 — 새 창을 "C:\\" 제목으로
+    // 기다리다 20초 타임아웃(`window not detected within timeout`)으로
+    // 실패했다. 녹화 시작 전에도 같은 리셋을 적용해 두 시점의 시작 상태를
+    // 맞춘다 — KNOWN_APP_STATE_RESET은 아래(§ WdIO conf 생성) generateWdio에서
+    // 재사용하는 것과 동일한 맵.
+    const resetCmd = KNOWN_APP_STATE_RESET[path.basename(exePath || '').toLowerCase()];
+    if (resetCmd) {
+      try {
+        const encoded = Buffer.from(resetCmd, 'utf16le').toString('base64');
+        execSync(`powershell -NoProfile -EncodedCommand ${encoded}`, { stdio: 'pipe', timeout: 10000 });
+        console.log(`[start] app-state reset applied for ${path.basename(exePath)}`);
+      } catch (e) {
+        console.warn('[start] app-state reset failed (non-fatal):', String(e.message || e).substring(0, 150));
+      }
+    }
     const out = await callAgent('/start', { appName, exePath, platform });
     if (out.ok) {
       recording   = true;
