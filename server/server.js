@@ -3001,6 +3001,20 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
   const recordedRect = _rectEvent
     ? { left: _rectEvent.winLeft, top: _rectEvent.winTop, width: _rectEvent.winWidth, height: _rectEvent.winHeight }
     : (_sessionMeta?.initialWindow || null);
+  // dialogRects(아래)가 메인 창 자신의 타이틀을 엉뚱한 작은 팝업 rect로 덮어쓰는
+  // 것을 막기 위해, "메인 창의 진짜 타이틀"을 merge 이전(_rectEvent, _deduped
+  // 기준) 시점에 미리 잡아둔다 — 2026-07-21 실측(7-Zip): "추가" 버튼(메인 창,
+  // 1152x592) 클릭 바로 다음이 그 결과로 뜬 작은 "확인" 다이얼로그(235x163)
+  // 클릭인데, 이 다이얼로그가 메인 창과 리터럴로 똑같이 "7-Zip"이라는 제목을
+  // 씀. mergeCrossWindowTriggerClicks가 이 둘을 트리거+아이템으로 병합하면서
+  // "추가" 이벤트 자체가 filtered에서 사라지고, 병합된 이벤트는 작은 다이얼로그
+  // 쪽 rect(235x163)를 그대로 물고 있다 — 그 결과 나중에 filtered를 훑어
+  // "7-Zip" 제목의 첫 rect를 찾는 dialogRects 계산이 이 축소된 rect를 메인
+  // 창의 것으로 착각해, 재생 중 진짜 메인 창을 235x163으로 쪼그라뜨려버렸다
+  // (실측: 이후 모든 상호작용이 사실상 멈춤). recordedRect/_rectEvent는 병합
+  // 전(`_deduped`) 시점에 계산되므로 여기서 잡은 타이틀이 항상 진짜 메인 창의
+  // 것이다.
+  const _mainWindowTitleForDialogRects = _rectEvent?.element?.windowTitle || '';
 
   const filtered     = mergeCrossWindowTriggerClicks(mergeExpandCollapseClicks(_deduped), recordedRect);
   const pageMethods  = [];
@@ -3073,6 +3087,12 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
   // 스크롤/클릭이 전부 빗나감). "coordinate" 폴백 이벤트(windowTitle 빈 문자열)는
   // 직전 실제 title을 승계해 같은 다이얼로그로 묶는다 — 위 lastWinTitle 승계 로직과 동일 가정.
   const dialogRects = {};
+  // 메인 창 타이틀을 미리 심어둔다(2026-07-21) — 아래 루프의 "if (t in
+  // dialogRects) return" 가드가 이후 같은 제목의 팝업 rect로 덮어쓰는 것을
+  // 막아준다. 위 _mainWindowTitleForDialogRects/recordedRect 주석 참고.
+  if (_mainWindowTitleForDialogRects && recordedRect) {
+    dialogRects[_mainWindowTitleForDialogRects] = recordedRect;
+  }
   {
     let _lastT = '';
     filtered.forEach((e, i) => {

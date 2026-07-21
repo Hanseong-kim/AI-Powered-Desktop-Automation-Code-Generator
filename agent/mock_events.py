@@ -473,6 +473,41 @@ SIMPLE_ROOTHWND_EVENTS = [
                rootHwndHex="137900"),
 ]
 
+# dialogRects corruption via same-titled trigger+popup merge (2026-07-21,
+# real 7-Zip GUI repro): clicking "추가" (Add) in the MAIN window pops open a
+# small confirmation dialog with an "확인" (OK) button — and that small
+# dialog happens to carry the exact same literal title text as the main
+# window itself ("7-Zip"), a title collision. mergeCrossWindowTriggerClicks
+# merges the trigger ("추가", non-cross-window, main window rect) with the
+# item ("확인", cross-window, small-dialog rect) into ONE event, which
+# consumes the trigger and keeps only the small dialog's own geometry. The
+# later dialogRects scan (keyed purely by window TITLE) walks the merged
+# `filtered` list looking for the FIRST rect seen under title "7-Zip" — with
+# the trigger's entry gone, it picks up the small dialog's rect instead of
+# the real main window's, and _ensureDialog() then shrinks the ACTUAL main
+# window down to that tiny size on the next same-titled segment boundary,
+# freezing the whole replay.
+TITLE_COLLISION_DIALOGRECT_APP = "MockTitleCollisionDialogRect"
+TITLE_COLLISION_DIALOGRECT_EVENTS = [
+    make_event("click", name="추가", automation_id="", class_name="Button",
+               window_title="7-Zip", app_name=TITLE_COLLISION_DIALOGRECT_APP, x=100, y=100, index=1,
+               winLeft=2370, winTop=-415, winWidth=1152, winHeight=592),
+    # Small "OK" dialog — SAME literal title as the main window, but a much
+    # smaller rect and its own tracked rootHwndHex (a genuinely different,
+    # watcher-tracked top-level window).
+    make_event("click", name="확인", automation_id="", class_name="",
+               window_title="7-Zip", app_name=TITLE_COLLISION_DIALOGRECT_APP, x=120, y=120, index=2,
+               winLeft=2765, winTop=-214, winWidth=235, winHeight=163,
+               rootHwndHex="AAAA", newWindowSegment=True),
+    # Unrelated later dialog with its OWN distinct rootHwndHex, purely so
+    # this recording has >=2 distinct rootHwndHex values and needsSessionSwitching()
+    # actually enters session mode (dialogRects/_ensureDialog is session-mode-only).
+    make_event("click", name="", automation_id="", class_name="",
+               window_title="C:\\PerfLogs\\", app_name=TITLE_COLLISION_DIALOGRECT_APP, x=200, y=200, index=3,
+               winLeft=2370, winTop=-415, winWidth=1152, winHeight=592,
+               rootHwndHex="BBBB", newWindowSegment=True),
+]
+
 
 # ---------------------------------------------------------------------------
 # Test steps
@@ -1023,6 +1058,44 @@ def step_wdio_generate_simple_roothwnd():
             "only ever search _appSid (scoped to the ORIGINAL main window) "
             "and can never find a button living in a different top-level "
             "window, producing click-not-found",
+        )
+
+
+def step_wdio_generate_title_collision_dialogrect():
+    print("\n[8f] dialogRects must keep the MAIN window's own rect for its "
+          "title, not a same-titled popup's rect swallowed by trigger-merge "
+          "(2026-07-21, real 7-Zip 'Add' -> 'OK' dialog repro)")
+    request("DELETE", "/api/events")
+    for ev in TITLE_COLLISION_DIALOGRECT_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": TITLE_COLLISION_DIALOGRECT_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (title-collision-dialogrect) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped title-collision-dialogrect checks)", False, body.get("message", ""))
+        return
+    files = body.get("files", [])
+    for f in files:
+        content = f.get("content", "")
+        check(
+            f"  {f.get('filename')} keeps the main window's own (large) rect "
+            "for the '7-Zip' title in _dialogRects",
+            '"7-Zip":{"left":2370,"top":-415,"width":1152,"height":592}' in content.replace(" ", ""),
+            "expected _dialogRects['7-Zip'] to be the MAIN window's recorded "
+            "geometry (2370,-415,1152,592) — if the small same-titled 'OK' "
+            "dialog's rect (2765,-214,235,163) shows up instead, replay will "
+            "shrink the REAL main window down to that tiny size the next "
+            "time this title's segment boundary is hit, freezing everything "
+            "after it",
+        )
+        check(
+            f"  {f.get('filename')} does not let the small dialog's rect leak "
+            "into _dialogRects['7-Zip']",
+            '"7-Zip":{"left":2765,"top":-214,"width":235,"height":163}' not in content.replace(" ", ""),
+            "the small 'OK' dialog's own geometry must not be stored under "
+            "the main window's title key",
         )
 
 
@@ -1582,6 +1655,7 @@ def main():
     step_wdio_generate_anim_settle()
     step_wdio_generate_nested_dropdown()
     step_wdio_generate_simple_roothwnd()
+    step_wdio_generate_title_collision_dialogrect()
     step_wdio_generate_session()
     step_wdio_generate_window_collision()
     step_wdio_generate_delayed_hwnd()
