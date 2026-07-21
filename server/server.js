@@ -1959,7 +1959,7 @@ function osScrollEl(hwnd, target, delta) {
         if (out) console.log(out);
     } catch (e) {
         _failures.push('osScroll');
-        console.warn('[osScroll] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).substring(0, 200));
+        console.warn('[osScroll] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).slice(-1500));
     }
 }
 
@@ -1987,7 +1987,7 @@ function osExpandCollapse(hwnd, target, itemName) {
         if (out) console.log(out);
     } catch (e) {
         _failures.push('osExpandCollapse');
-        console.warn('[osExpandCollapse] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).substring(0, 200));
+        console.warn('[osExpandCollapse] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).slice(-1500));
     }
 }
 
@@ -2026,7 +2026,7 @@ function osScopedInvoke(hwnd, target, triggerTarget) {
         // "dropdown never opened" vs. other reasons the item search failed).
         const stdoutMsg = (e.stdout && e.stdout.toString().trim()) || '';
         if (stdoutMsg) console.log(stdoutMsg);
-        console.warn('[osScopedInvoke] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).substring(0, 200));
+        console.warn('[osScopedInvoke] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).slice(-1500));
     }
 }
 
@@ -2243,7 +2243,7 @@ function osScrollEl(hwnd, target, delta) {
         if (out) console.log(out);
     } catch (e) {
         _failures.push('osScroll');
-        console.warn('[osScroll] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).substring(0, 200));
+        console.warn('[osScroll] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).slice(-1500));
     }
 }
 
@@ -2280,7 +2280,7 @@ function osExpandCollapse(hwnd, target, itemName) {
         if (out) console.log(out);
     } catch (e) {
         _failures.push('osExpandCollapse');
-        console.warn('[osExpandCollapse] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).substring(0, 200));
+        console.warn('[osExpandCollapse] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).slice(-1500));
     }
 }
 
@@ -2313,7 +2313,7 @@ function osScopedInvoke(hwnd, target, triggerTarget) {
         _failures.push('osScopedInvoke');
         const stdoutMsg = (e.stdout && e.stdout.toString().trim()) || '';
         if (stdoutMsg) console.log(stdoutMsg);
-        console.warn('[osScopedInvoke] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).substring(0, 200));
+        console.warn('[osScopedInvoke] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).slice(-1500));
     }
 }
 
@@ -2342,7 +2342,7 @@ function osScopedType(hwnd, target, text) {
         _failures.push('osScopedType');
         const stdoutMsg = (e.stdout && e.stdout.toString().trim()) || '';
         if (stdoutMsg) console.log(stdoutMsg);
-        console.warn('[osScopedType] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).substring(0, 200));
+        console.warn('[osScopedType] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).slice(-1500));
     }
 }
 
