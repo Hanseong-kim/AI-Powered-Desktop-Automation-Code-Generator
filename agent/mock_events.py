@@ -461,7 +461,7 @@ def step_wdio_generate():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     out_dir = os.path.join(repo_root, "generated-wdio", APP_NAME)
     os.makedirs(out_dir, exist_ok=True)
-    for stale in ("osClick.ps1", "osDrag.ps1", "osScopedInvoke.ps1", "osScroll.ps1", "osExpandCollapse.ps1"):
+    for stale in ("osClick.ps1", "osDrag.ps1", "osScopedInvoke.ps1", "osScroll.ps1", "osExpandCollapse.ps1", "wdio.conf.js"):
         with open(os.path.join(out_dir, stale), "w", encoding="utf-8") as fh:
             fh.write("# dummy stale coordinate helper planted by mock_events.py\n")
 
@@ -708,12 +708,17 @@ def step_wdio_generate():
     )
     # savedPaths에 없는 것과 별개로, generate가 미리 심어둔 stale 파일을
     # 디스크에서 실제로 지웠는지 확인 (saveFiles의 OBSOLETE_FILES 정리).
-    for stale in ("osClick.ps1", "osDrag.ps1", "osScopedInvoke.ps1", "osScroll.ps1", "osExpandCollapse.ps1"):
+    for stale in ("osClick.ps1", "osDrag.ps1", "osScopedInvoke.ps1", "osScroll.ps1", "osExpandCollapse.ps1", "wdio.conf.js"):
         check(
             f"stale {stale} removed from disk by generate",
             not os.path.exists(os.path.join(out_dir, stale)),
             f"{stale} still on disk — saveFiles obsolete-cleanup regressed",
         )
+    check(
+        "wdio.conf.js is not (re-)generated",
+        not any(str(p).endswith("wdio.conf.js") for p in saved_paths),
+        f"wdio.conf.js still saved — it's an unread legacy artifact, should not be generated: {saved_paths}",
+    )
     # 2026-07-14: osScopedInvoke는 managed UIA(System.Windows.Automation)가
     # PuTTY 같은 native Win32 다이얼로그에서 Button/ComboBox 내부를 못 보는
     # 것이 실측 확정(diag_managed_uia.ps1: Button-controlType 0개)되어
@@ -803,6 +808,40 @@ def step_wdio_generate():
         "expected a comtypes COM ExpandCollapse script — managed UIA is blind "
         "to legacy SysTreeView32 TreeItems (PuTTY 2026-07-14, poc/FINDINGS.md)",
     )
+
+
+def step_wdio_generate_app_state_reset():
+    print("\n[8b] App-state reset ported from removed wdio.conf.js onWorkerStart hook")
+    # wdio.conf.js's onWorkerStart hook used to clear 7-Zip's registry-
+    # persisted last-visited folder (KNOWN_APP_STATE_RESET) before each run.
+    # Now that wdio.conf.js is no longer generated, that reset must instead
+    # be spliced directly into the standalone script's run() function —
+    # verify it survived the move instead of being silently dropped.
+    request("DELETE", "/api/events")
+    for ev in MOCK_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": "SevenZipStateReset",
+        "exePath": "C:\\Program Files\\7-Zip\\7zFM.exe",
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (7zFM state-reset) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped state-reset checks)", False, body.get("message", ""))
+        return
+    files = body.get("files", [])
+    for f in files:
+        content = f.get("content", "")
+        check(
+            f"  {f.get('filename')} ports the 7zFM.exe registry-reset into run()",
+            "PanelPath0" not in content  # the raw command is base64-encoded, not literal
+            and "-EncodedCommand" in content
+            and "[state-reset]" in content,
+            "expected an -EncodedCommand execSync call logging '[state-reset]' "
+            "near the top of run() — the app-state-reset feature that used to "
+            "live in wdio.conf.js's onWorkerStart hook must not be silently "
+            "dropped now that wdio.conf.js itself is no longer generated",
+        )
 
 
 def step_wdio_generate_session():
@@ -1357,6 +1396,7 @@ def main():
     step_clear_events()
     step_post_events()
     step_wdio_generate()
+    step_wdio_generate_app_state_reset()
     step_wdio_generate_session()
     step_wdio_generate_window_collision()
     step_wdio_generate_delayed_hwnd()

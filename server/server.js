@@ -3476,7 +3476,7 @@ async function run() {
     // failure (confirmed 2026-07-17 while verifying the standalone runner).
     try {
         _warmupPowerShell();
-${beforeBody}
+${buildAppStateResetCall(exePath)}${beforeBody}
         const page = new ${pageName}();
 ${activateStep}${testSteps.join('\n')}
     } finally {
@@ -3546,88 +3546,24 @@ const KNOWN_APP_STATE_RESET = {
 // quote levels (confirmed 2026-07-15: a single-quoted registry path inside
 // a single-quoted execSync(...) string broke the generated wdio.conf.js
 // with "missing ) after argument list").
-function buildAppStateResetHook(exePath) {
+// 2026-07-21: wdio.conf.js (and the WDIO onWorkerStart hook this used to
+// build) was removed — it was an unread legacy artifact, nothing in the
+// standalone `node <file>.js` execution path ever loaded it. The app-state
+// reset it performed (e.g. clearing 7-Zip's registry-persisted last-visited
+// folder before each run, see KNOWN_APP_STATE_RESET) is still needed, so it's
+// ported here as a plain statement spliced into run() itself, right before
+// ensureAppium()/launch — execSync is already imported by STANDALONE_PREAMBLE.
+function buildAppStateResetCall(exePath) {
   const base = path.basename(exePath || '').toLowerCase();
   const psCmd = KNOWN_APP_STATE_RESET[base];
   if (!psCmd) return '';
   const encoded = Buffer.from(psCmd, 'utf16le').toString('base64');
-  // onWorkerStart (not onPrepare) — onPrepare fires exactly ONCE, before any
-  // worker spawns, but each spec file (ById/ByClass) launches its OWN fresh
-  // app instance in its OWN later worker. With onPrepare, only the FIRST
-  // worker's launch saw a clean registry; by the second worker's turn the
-  // first worker's run had already re-polluted it, and that spec's STEP1
-  // failed exactly like before the fix (confirmed 2026-07-15: ById passed,
-  // ByClass — running second — failed on the identical "target not found").
-  // onWorkerStart runs once per worker, right before that worker creates
-  // its own session/launches its own app instance.
-  return `
-  onWorkerStart: function () {
-    try {
-      execSync('powershell -NoProfile -EncodedCommand ${encoded}', { stdio: 'pipe', timeout: 10000 });
-    } catch (e) {
-      console.warn('[onWorkerStart] app-state reset failed (non-fatal):', String(e.message || e).substring(0, 150));
-    }
-  },`;
-}
-
-function buildWdioConf(exePath, specFiles, useSession) {
-  const specsArr = (specFiles && specFiles.length)
-    ? specFiles.map(f => `'./${f}'`).join(', ')
-    : `'./*.js'`;
-
-  const stateResetHook = buildAppStateResetHook(exePath);
-  const execImport = stateResetHook ? `import { execSync } from 'child_process';\n\n` : '';
-
-  if (useSession) {
-    // Multi-window / Electron: Root session as global browser for hwnd discovery.
-    // Tests open scoped appTopLevelWindow sessions themselves via Appium REST API.
-    return `${execImport}export const config = {
-  runner: 'local',
-  specs: [${specsArr}],
-  exclude: ['./wdio.conf.js'],
-  maxInstances: 1,
-  capabilities: [{
-    platformName: 'Windows',
-    'appium:automationName': 'Windows',
-    'appium:app': 'Root',
-    'appium:newCommandTimeout': 120000,
-  }],
-  hostname: '127.0.0.1',
-  port: 4723,
-  path: '/',
-  framework: 'jasmine',
-  jasmineOpts: { defaultTimeoutInterval: 300000 },
-  reporters: ['spec'],
-  services: ['appium'],
-  appium: { command: 'appium', args: ['--allow-insecure', '*:winappdriver'] },
-  injectGlobals: true,${stateResetHook}
-};`;
-  }
-
-  // Single-window Win32/UWP: direct app launch, classic browser.$() style.
-  const appCap = resolveAppCap(exePath);
-  return `${execImport}export const config = {
-  runner: 'local',
-  specs: [${specsArr}],
-  exclude: ['./wdio.conf.js'],
-  maxInstances: 1,
-  capabilities: [{
-    platformName: 'Windows',
-    'appium:automationName': 'Windows',
-    'appium:app': '${appCap}',
-    'appium:newCommandTimeout': 60000,
-    'appium:connectHardwareKeyboard': false,
-  }],
-  hostname: '127.0.0.1',
-  port: 4723,
-  path: '/',
-  framework: 'jasmine',
-  jasmineOpts: { defaultTimeoutInterval: 60000 },
-  reporters: ['spec'],
-  services: ['appium'],
-  appium: { command: 'appium', args: ['--allow-insecure', '*:winappdriver'] },
-  injectGlobals: true,${stateResetHook}
-};`;
+  return `        try {
+            execSync('powershell -NoProfile -EncodedCommand ${encoded}', { stdio: 'pipe', timeout: 10000 });
+        } catch (e) {
+            console.warn('[state-reset] app-state reset failed (non-fatal):', String(e.message || e).substring(0, 150));
+        }
+`;
 }
 
 // ── 유틸: 이벤트 element name → 안전한 Java/JS 식별자 ───────────────────────
@@ -3651,7 +3587,7 @@ function safeName(str) {
 // (COM IUIAutomation via comtypes) 2026-07-14 — managed UIA proved unable to
 // see Button controls / ComboBox internals on native Win32 dialogs (PuTTY
 // diag). Old folders may still have the stale .ps1 on disk.
-const OBSOLETE_FILES = ['osClick.ps1', 'osDrag.ps1', 'osScopedInvoke.ps1', 'osScroll.ps1', 'osExpandCollapse.ps1'];
+const OBSOLETE_FILES = ['osClick.ps1', 'osDrag.ps1', 'osScopedInvoke.ps1', 'osScroll.ps1', 'osExpandCollapse.ps1', 'wdio.conf.js'];
 
 function saveFiles(files, dir) {
   const savedPaths = [];
@@ -3715,12 +3651,11 @@ app.post('/api/generate', (req, res) => {
     // 앱별 서브폴더에 저장
     const wdioOutDir = path.join(WDIO_BASE_DIR, base);
 
-    // wdio.conf.js is kept only as an optional legacy artifact — the
-    // generated *TestById.js/*TestByClass.js files run standalone via plain
-    // `node <file>.js` (2026-07-17) and no longer need it, @wdio/cli, or
-    // appium-service to replay.
-    const confContent = buildWdioConf(exe || name, wdioFiles.map(f => f.filename), useSession);
-    const confFile    = { filename: 'wdio.conf.js', content: confContent };
+    // wdio.conf.js is no longer generated (2026-07-21) — the generated
+    // *TestById.js/*TestByClass.js files run standalone via plain
+    // `node <file>.js` (2026-07-17) and never read it; it was an unread
+    // legacy artifact. Any wdio.conf.js left behind by an older generate is
+    // removed by the OBSOLETE_FILES cleanup below.
     const pkgJsonFile = {
       filename: 'package.json',
       content: JSON.stringify({
@@ -3747,7 +3682,7 @@ app.post('/api/generate', (req, res) => {
     const expandCollapsePs1File = { filename: 'osExpandCollapse.py', content: OS_EXPANDCOLLAPSE_PY };
     const scopedInvokePyFile = { filename: 'osScopedInvoke.py', content: OS_SCOPEDINVOKE_PY };
     const { savedPaths: wdioPaths, saveError: wdioErr } = saveFiles(
-      [...wdioFiles, confFile, pkgJsonFile, scrollPyFile, winRectPs1File, moveWinPs1File, typePs1File, activatePs1File, dismissPopupPs1File, escapePs1File, expandCollapsePs1File, scopedInvokePyFile], wdioOutDir
+      [...wdioFiles, pkgJsonFile, scrollPyFile, winRectPs1File, moveWinPs1File, typePs1File, activatePs1File, dismissPopupPs1File, escapePs1File, expandCollapsePs1File, scopedInvokePyFile], wdioOutDir
     );
 
     const warnings = !exe ? ['exePath missing — launchApp will be skipped'] : [];

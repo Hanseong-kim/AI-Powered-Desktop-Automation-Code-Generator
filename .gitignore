@@ -21,6 +21,7 @@ generated-wdio/MockNative/
 generated-wdio/MockCollision/
 generated-wdio/MockDelayedHwnd/
 generated-wdio/MockExpandRedundant/
+generated-wdio/SevenZipStateReset/
 
 Claude code task server token opt.md
 Claude code task v2.md
