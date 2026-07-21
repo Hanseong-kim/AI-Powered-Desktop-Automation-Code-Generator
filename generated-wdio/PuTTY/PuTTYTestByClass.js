@@ -466,41 +466,37 @@ async function _step(label, fn) {
     await fn();
 }
 
-// Windows in this recording:
-//   [W1] "PuTTY Configuration" (main)
-//   [W2] "PuTTY Configuration" (opened during recording)
-
 class PuTTYPageByClass {
-
-    // ════════════════════════════════════════════════════════════
-    // [W1] PuTTY Configuration (main window)
-    // ════════════════════════════════════════════════════════════
     async click1() {
-        await _clickBySid(_appSid, null, '//TreeItem[@Name="Appearance"]');
+        await _clickBySid(_appSid, null, '//TreeItem[@Name="Logging"]');
     }
 
     async click2() {
-        await _clickBySid(_appSid, null, '//TreeItem[@Name="Behaviour"]', true);
+        await _clickBySid(_appSid, null, '//TreeItem[@Name="Keyboard"]');
     }
 
     async click3() {
-        await _clickBySid(_appSid, null, '//TreeItem[@Name="Translation"]');
+        await _clickBySid(_appSid, null, '//TreeItem[@Name="Features"]');
     }
 
     async click4() {
-        osExpandCollapse(_appHwnd, {"automationId":"","className":"","name":"Selection"}, null);
+        await _clickBySid(_appSid, null, '//TreeItem[@Name="Appearance"]');
     }
 
     async click5() {
-        await _clickBySid(_appSid, null, '//TreeItem[@Name="Data"]');
+        await _clickBySid(_appSid, null, '//TreeItem[@Name="Translation"]');
     }
 
-
-    // ════════════════════════════════════════════════════════════
-    // [W2] PuTTY Configuration (new window)
-    // ════════════════════════════════════════════════════════════
     async click6() {
-        await _clickBySid(_appSid, null, '//Button[@ClassName="Button" and @Name="Cancel"]');
+        await _clickBySid(_appSid, null, '//TreeItem[@Name="Window"]');
+    }
+
+    async click7() {
+        osExpandCollapse(_appHwnd, {"automationId":"","className":"","name":"Window"}, null);
+    }
+
+    async click8() {
+        osExpandCollapse(_appHwnd, {"automationId":"","className":"","name":"Window"}, null);
     }
 }
 
@@ -525,20 +521,14 @@ async function run() {
 
         const page = new PuTTYPageByClass();
             osActivate("PuTTY Configuration");
-
-    // ════════════════════════════════════════════════════════════
-    // [W1] PuTTY Configuration (main window)
-    // ════════════════════════════════════════════════════════════
-            await _step('1:click Appearance', () => page.click1());
-            await _step('2:doubleClick Behaviour', () => page.click2());
-            await _step('3:click Translation', () => page.click3());
-            await _step('4:expandCollapse Selection', () => page.click4());
-            await _step('5:click Data', () => page.click5());
-
-    // ════════════════════════════════════════════════════════════
-    // [W2] PuTTY Configuration (new window)
-    // ════════════════════════════════════════════════════════════
-            await _step('6:click Cancel', () => page.click6());
+            await _step('1:click Logging', () => page.click1());
+            await _step('2:click Keyboard', () => page.click2());
+            await _step('3:click Features', () => page.click3());
+            await _step('4:click Appearance', () => page.click4());
+            await _step('5:click Translation', () => page.click5());
+            await _step('6:click Window', () => page.click6());
+            await _step('7:expandCollapse Window', () => page.click7());
+            await _step('8:expandCollapse Window', () => page.click8());
     } finally {
 
         if (_appSid) { try { await _appiumFetch(`/session/${_appSid}`, { method: 'DELETE' }, 5000); } catch {} }

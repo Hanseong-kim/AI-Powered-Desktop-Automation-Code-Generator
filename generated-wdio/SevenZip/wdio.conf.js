@@ -8,18 +8,17 @@ export const config = {
   capabilities: [{
     platformName: 'Windows',
     'appium:automationName': 'Windows',
-    'appium:app': 'C:\\Program Files\\7-Zip\\7zFM.exe',
-    'appium:newCommandTimeout': 60000,
-    'appium:connectHardwareKeyboard': false,
+    'appium:app': 'Root',
+    'appium:newCommandTimeout': 120000,
   }],
   hostname: '127.0.0.1',
   port: 4723,
   path: '/',
   framework: 'jasmine',
-  jasmineOpts: { defaultTimeoutInterval: 60000 },
+  jasmineOpts: { defaultTimeoutInterval: 300000 },
   reporters: ['spec'],
   services: ['appium'],
-  appium: { command: 'appium', args: ['--allow-insecure', 'winappdriver'] },
+  appium: { command: 'appium', args: ['--allow-insecure', '*:winappdriver'] },
   injectGlobals: true,
   onWorkerStart: function () {
     try {

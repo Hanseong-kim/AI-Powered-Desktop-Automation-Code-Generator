@@ -1414,11 +1414,34 @@ function mergeExpandCollapseClicks(events) {
       }
       const next = events[i + 1];
       const itemName = next?.element?.name || next?.element?.automationId;
-      if (next && next.action === 'click' && itemName) {
+      // Sibling-menu misattribution guard (2026-07-20, reproduced
+      // independently in FileZilla — 07-19, 파일→편집→보기 연속 트리거 — and
+      // here in Notepad's native XAML menu bar): a real dropdown/flyout item
+      // always renders BELOW its trigger's row (item rect top sits at/past
+      // the trigger's rect bottom — confirmed against every known-good merge:
+      // 7-Zip 파일→열기/보기→큰아이콘/자세히, Notepad 파일→새 탭). A sibling
+      // top-level menu trigger or an unrelated toolbar button clicked right
+      // after (no item ever actually chosen) instead sits at the SAME row as
+      // the trigger. Reject the merge in that case so the trigger replays as
+      // a plain toggle (no itemName) instead of falsely claiming an unrelated
+      // element is "the item" — this was silently wrong before (STEP
+      // '파일 -> 편집' happened to find *some* element named '편집' elsewhere
+      // in the tree and reported success) and outright failed when no such
+      // coincidence existed (STEP '보기 -> 굵게(Ctrl+B)': "item not found").
+      // Fails open (no rect data on either side) so captures predating rect
+      // logging keep today's behavior.
+      const triggerRect = e.element?.rect;
+      const itemRect = next?.element?.rect;
+      const looksLikeSiblingNotItem = Array.isArray(triggerRect) && Array.isArray(itemRect)
+        && itemRect[1] < triggerRect[3];
+      if (next && next.action === 'click' && itemName && !looksLikeSiblingNotItem) {
         console.log(`[expand-merge] merged click+click @index ${i} -> expand '${e.element.name}' then select '${itemName}'`);
         out.push({ ...e, expandItemName: itemName });
         i++; // consume the merged-in item-selection event
         continue;
+      }
+      if (looksLikeSiblingNotItem) {
+        console.log(`[expand-merge] rejected merge @index ${i}: '${e.element.name}' + '${itemName}' sit at the same row (sibling click, not a dropdown item) — keeping '${e.element.name}' as a plain toggle`);
       }
     }
     out.push(e);
@@ -3380,7 +3403,17 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
   // against whatever window with a matching title happened to still be
   // open, title-content drift and all (confirmed 2026-07-08: Notepad replay
   // reused the exact leftover hwnd from the prior recording session).
-  const launchFrag = winFragOk ? winFrag : groupTitle(filtered[0] || {}, 0);
+  // 2026-07-20: filtered[0]을 무조건 첫 이벤트로 가정하면, 그 첫 이벤트가
+  // 셀렉터/앵커 없는 좌표 전용 이벤트(windowTitle="")일 때 launchFrag가
+  // 빈 문자열이 되어 launchCall 자체가 통째로 비게 된다(launchApp 미호출) —
+  // Notepad 재녹화 캡처에서 실측: launchApp이 안 불려 앱이 켜지지도 않고
+  // _mainTitleFrag=""로 고정돼 이후 모든 osScopedInvoke/osExpandCollapse가
+  // _hwndCache['']를 참조해 STEP2부터 전부 'no window hwnd'로 실패했다.
+  // 바로 아래 simpleWinTitle(3415행)은 이미 "windowTitle이 있는 첫 이벤트를
+  // 찾는" 안전한 패턴을 쓰고 있었는데 이 session-mode 경로만 그 방어가
+  // 빠져있었음 — 같은 패턴으로 맞춘다.
+  const firstRealIdx = filtered.findIndex(e => e.element?.windowTitle);
+  const launchFrag = winFragOk ? winFrag : groupTitle(filtered[firstRealIdx] || {}, firstRealIdx >= 0 ? firstRealIdx : 0);
   const launchCall = (useSession && exePath && launchFrag)
     ? `        await launchApp(${JSON.stringify(exePath)}, ${JSON.stringify(newWindowArgsFor(exePath))}, ${JSON.stringify(launchFrag)}, ${JSON.stringify(recordedRect)});\n`
     : '';
