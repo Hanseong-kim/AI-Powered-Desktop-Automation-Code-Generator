@@ -730,6 +730,7 @@ class Recorder:
         # and is dropped in _emit(), regardless of when it's later processed.
         self._discovery_done_ts = 0.0
         self._probed_skip = False    # one-shot diagnostic probe on first mismatched-window click
+        self._app_install_dir_cache = None   # lazily computed by _app_install_dir()
 
         self._mouse_listener = None
         self._kb_listener = None
@@ -768,6 +769,7 @@ class Recorder:
         self._popup_hwnds = set()
         self._probed_skip = False
         self._last_emitted_hwnd_hex = ""
+        self._app_install_dir_cache = None
 
         # Snapshot visible top-level windows BEFORE launching, so discovery can
         # diff to find the new window(s) the target opens (locale-independent).
@@ -908,16 +910,17 @@ class Recorder:
                     self.target_hwnds.add(fg)
                     log(f"[target] lazy frame {fg} hosts CoreWindow {core} — added (keyboard)")
                     return True
-            # Ordinary Win32 sibling/child dialog belonging to a tracked PID
-            # (e.g. a freshly-opened Site Manager/Quickconnect dialog) — self
-            # -heal immediately via PID match instead of waiting on
-            # _watch_windows()'s 0.5s poll, which can otherwise drop every
-            # keystroke typed in that window during the gap (2026-07-13).
-            if pid_of_hwnd(fg) in self._target_pids():
+            # Ordinary Win32 sibling/child dialog belonging to a tracked PID,
+            # or a companion helper process living in the same install
+            # directory (e.g. 7-Zip's 7zG.exe, 2026-07-21) — self-heal
+            # immediately instead of waiting on _watch_windows()'s 0.5s poll,
+            # which can otherwise drop every keystroke typed in that window
+            # during the gap (2026-07-13).
+            if self._owned_by_app(pid_of_hwnd(fg)):
                 self.target_hwnds.add(fg)
                 self._popup_hwnds.add(fg)
-                log(f"[target] lazy PID-match {fg} — added (keyboard, "
-                    "pre-empts 0.5s watcher poll)")
+                log(f"[target] lazy self-heal {fg} — added (keyboard, "
+                    "pre-empts 0.5s watcher poll; PID or same install dir)")
                 return True
         return False
 
@@ -933,6 +936,35 @@ class Recorder:
             if p:
                 pids.add(p)
         return pids
+
+    def _app_install_dir(self):
+        """Directory the launched exe lives in, lowercased, cached — or ''
+        for UWP/AUMID launches (no meaningful filesystem directory)."""
+        if self._app_install_dir_cache is not None:
+            return self._app_install_dir_cache
+        exe_path = self.session.get("exePath", "")
+        d = "" if (not exe_path or is_aumid(exe_path)) else os.path.dirname(exe_path).lower().rstrip("\\/")
+        self._app_install_dir_cache = d
+        return d
+
+    def _owned_by_app(self, pid):
+        """True if `pid` is already PID-tracked, OR its exe lives in the
+        SAME install directory as the launched app (2026-07-21, 7-Zip
+        Benchmark repro: 7zG.exe is a genuinely separate helper process
+        7zFM.exe spawns for long-running operations — different PID, so
+        every existing PID-only check (this method's callers: _watch_windows
+        popup poll, _inspect's self-heal, _emit's known-other-window gate)
+        rejected its window forever, not just during the ~0.5s watcher-poll
+        race. Directory match is a generic signal (works for any app that
+        ships companion .exe helpers alongside the main one), not a 7-Zip
+        special case."""
+        if pid in self._target_pids():
+            return True
+        app_dir = self._app_install_dir()
+        if not app_dir:
+            return False
+        img = image_path_of_pid(pid)
+        return bool(img) and os.path.dirname(img).lower().rstrip("\\/") == app_dir
 
     def _discover_target_windows(self):
         """Poll up to DISCOVER_TIMEOUT for the window(s) the launched app opens.
@@ -1038,16 +1070,17 @@ class Recorder:
 
     def _watch_windows(self):
         """Background thread: poll for new top-level windows owned by target
-        process PIDs and auto-add them to target_hwnds. Fixes the bug where
+        process PIDs (or a sibling helper process living in the same install
+        directory, e.g. 7-Zip's 7zG.exe launched by 7zFM.exe for Benchmark —
+        2026-07-21) and auto-add them to target_hwnds. Fixes the bug where
         popup/child windows opened after recording started were silently
         filtered by _point_is_target()."""
         while not self._stop_flag.is_set():
             try:
-                target_pids = self._target_pids()
                 for hwnd in visible_toplevel_windows():
                     if hwnd in self.target_hwnds:
                         continue
-                    if pid_of_hwnd(hwnd) in target_pids:
+                    if self._owned_by_app(pid_of_hwnd(hwnd)):
                         self.target_hwnds.add(hwnd)
                         self._popup_hwnds.add(hwnd)
                         try:
@@ -1300,12 +1333,12 @@ class Recorder:
                     # unrelated window (different PID, e.g. the Calculator
                     # cross-contamination bug fixed 2026-07-13) still gets
                     # rejected below.
-                    if pid_of_hwnd(elem_hwnd) in self._target_pids():
+                    if self._owned_by_app(pid_of_hwnd(elem_hwnd)):
                         self.target_hwnds.add(elem_hwnd)
                         self._popup_hwnds.add(elem_hwnd)
-                        log(f"[inspect] PID self-heal hwnd={elem_hwnd} "
+                        log(f"[inspect] self-heal hwnd={elem_hwnd} "
                             f"(name={info.get('name')!r}) — accepted "
-                            "(pre-empts 0.5s watcher poll)")
+                            "(pre-empts 0.5s watcher poll; PID or same install dir)")
                     else:
                         log(f"[inspect] element hwnd={elem_hwnd} not a tracked "
                             f"window (name={info.get('name')!r} "
@@ -1638,12 +1671,31 @@ class Recorder:
                 top != 0 and top not in self.target_hwnds and top not in self._popup_hwnds
             )
             if is_known_other_window:
-                log(f"[skip] {action} known-other-window top={top} "
-                    f"title='{win32gui.GetWindowText(top)}' x={x} y={y}")
-                if not self._probed_skip:
-                    self._probed_skip = True
-                    probe_window("clickwin", top)
-                return
+                # Self-heal by PID/install-dir before concluding this is a
+                # truly unrelated window (2026-07-21, 7-Zip Benchmark repro):
+                # this gate used to reject unconditionally, even for a
+                # same-process (or same-install-dir sibling process, e.g.
+                # 7zG.exe) window that _watch_windows()'s ~0.5s poll simply
+                # hadn't caught up to yet — confirmed the very first click
+                # inside a freshly-opened dialog can land ~240ms after it
+                # appears, well before even one poll cycle. _inspect() already
+                # had its own self-heal for this exact race, but it runs on a
+                # UIA element's owning hwnd, which can differ from top_window_at
+                # here — both must agree, or the click still gets dropped here
+                # even after _inspect() successfully resolved a selector for it.
+                if self._owned_by_app(pid_of_hwnd(top)):
+                    self.target_hwnds.add(top)
+                    self._popup_hwnds.add(top)
+                    log(f"[target] self-heal (pid/install-dir) hwnd={top} "
+                        f"title='{win32gui.GetWindowText(top)}' — accepted "
+                        "before known-other-window gate")
+                else:
+                    log(f"[skip] {action} known-other-window top={top} "
+                        f"title='{win32gui.GetWindowText(top)}' x={x} y={y}")
+                    if not self._probed_skip:
+                        self._probed_skip = True
+                        probe_window("clickwin", top)
+                    return
             # Accept if the point is over a target window OR the target app is
             # foreground. The OR covers UWP (CoreWindow GA_ROOT != tracked
             # ApplicationFrameWindow, so point matching alone fails) and the
