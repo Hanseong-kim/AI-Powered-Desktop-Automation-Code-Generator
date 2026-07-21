@@ -926,49 +926,83 @@ async function _step(label, fn) {
     await fn();
 }
 
+// Windows in this recording:
+//   [W1] "7-Zip" (main)
+//   [W2] "옵션" (opened during recording)
+//   [W3] "옵션" (opened during recording)
+//   [W4] "벤치마크" (opened during recording)
+
 class SevenZipPageByClass {
+
+    // ════════════════════════════════════════════════════════════
+    // [W1] 7-Zip (main window)
+    // ════════════════════════════════════════════════════════════
     async click1() {
         osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"컴퓨터"});
     }
 
     async click2() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"문서"});
-    }
-
-    async click3() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"네트워크"});
-    }
-
-    async click4() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"\\\\."});
-    }
-
-    async click5() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"컴퓨터"});
-    }
-
-    async click6() {
         osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"C:"});
     }
 
-    async scroll7() {
-        osScrollEl(_scrollHwnd('7-Zip'), {"automationId":"1001","className":"SysListView32","name":"Users"}, -3);
+    async click5() {
+        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"도구(T)"}, "옵션(P)...");
+    }
+
+
+    // ════════════════════════════════════════════════════════════
+    // [W2] 옵션 (new window)
+    // ════════════════════════════════════════════════════════════
+    async click6() {
+        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"7-Zip"});
+    }
+
+    async click7() {
+        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"언어"});
     }
 
     async click8() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"Windows"});
+        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"DropDown","className":"","name":""});
     }
 
     async click9() {
-        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"파일(F)"}, "열기(O)\tEnter");
+        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"Malay : Bahasa Melayu"});
     }
 
     async click10() {
-        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"보기(V)"}, "큰 아이콘(G)\tCtrl+1");
+        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"DropDown","className":"","name":""});
     }
 
-    async click11() {
-        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"보기(V)"}, "자세히(S)\tCtrl+4");
+    async scroll11() {
+        osScrollEl(_scrollHwnd('옵션'), {"automationId":"","className":"ComboLBox","name":"언어:"}, 5);
+    }
+
+    async click12() {
+        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"Korean : 한국어  ***"});
+    }
+
+
+    // ════════════════════════════════════════════════════════════
+    // [W3] 옵션 (new window)
+    // ════════════════════════════════════════════════════════════
+    async click13() {
+        await _clickScoped('옵션', '//Button[@ClassName="Button" and @Name="확인"]');
+    }
+
+    async click14() {
+        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"도구(T)"}, "벤치마크(B)");
+    }
+
+
+    // ════════════════════════════════════════════════════════════
+    // [W4] 벤치마크 (new window)
+    // ════════════════════════════════════════════════════════════
+    async click15() {
+        await _clickScoped('벤치마크', '//Button[@ClassName="Button" and @Name="도움말"]');
+    }
+
+    async click16() {
+        await _clickScoped('벤치마크', '//Button[@ClassName="Button" and @Name="취소"]');
     }
 }
 
@@ -986,24 +1020,48 @@ async function run() {
         _warmupPowerShell();
 
     _mainTitleFrag = "7-Zip";
-    _dialogRects = {"7-Zip":{"left":2370,"top":-415,"width":1152,"height":592}};
+    _dialogRects = {"7-Zip":{"left":2370,"top":-415,"width":1152,"height":592},"옵션":{"left":2386,"top":-399,"width":531,"height":580},"벤치마크":{"left":463,"top":222,"width":994,"height":575}};
     await ensureAppium();
     _rootSid = await _createSession('Root');
     console.log(`[session] Root session ${_rootSid} ready`);
-        await launchApp("C:\\Program Files\\7-Zip\\7zFM.exe", [], "7-Zip", {"left":2370,"top":-415,"width":1152,"height":592});
 
         const page = new SevenZipPageByClass();
-            await _step('1:click 컴퓨터', () => page.click1());
-            await _step('2:click 문서', () => page.click2());
-            await _step('3:click 네트워크', () => page.click3());
-            await _step('4:click \\\\.', () => page.click4());
-            await _step('5:doubleClick 컴퓨터', () => page.click5());
-            await _step('6:doubleClick C:', () => page.click6());
-            await _step('7:scroll delta=-3', () => page.scroll7());
-            await _step('8:doubleClick Windows', () => page.click8());
-            await _step('9:expandCollapse 파일(F) -> 열기(O)\tEnter', () => page.click9());
-            await _step('10:expandCollapse 보기(V) -> 큰 아이콘(G)\tCtrl+1', () => page.click10());
-            await _step('11:expandCollapse 보기(V) -> 자세히(S)\tCtrl+4', () => page.click11());
+
+    // ════════════════════════════════════════════════════════════
+    // [W1] 7-Zip (main window)
+    // ════════════════════════════════════════════════════════════
+            await _step('1:doubleClick 컴퓨터', () => page.click1());
+            await _step('2:doubleClick C:', () => page.click2());
+            // [STEP 3] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
+            _failures.push('3:click:no-selector');
+            // [STEP 4] doubleClick: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
+            _failures.push('4:doubleClick:no-selector');
+            await _step('5:expandCollapse 도구(T) -> 옵션(P)...', () => page.click5());
+
+    // ════════════════════════════════════════════════════════════
+    // [W2] 옵션 (new window)
+    // ════════════════════════════════════════════════════════════
+            await _step('6:click 7-Zip (cross-window)', () => page.click6());
+            await _step('7:click 언어 (cross-window)', () => page.click7());
+            await _step('8:click 닫기 (cross-window)', () => page.click8());
+            await _step('9:click Malay : Bahasa Melayu (cross-window)', () => page.click9());
+            await _step('10:click 닫기 (cross-window)', () => page.click10());
+            await _step('11:scroll delta=5', () => page.scroll11());
+            await _step('12:click Korean : 한국어  *** (cross-window)', () => page.click12());
+
+    // ════════════════════════════════════════════════════════════
+    // [W3] 옵션 (new window)
+    // ════════════════════════════════════════════════════════════
+            await _step('switch to window: 옵션', async () => { await _switchWindow('옵션'); });
+            await _step('13:click 확인', () => page.click13());
+            await _step('14:expandCollapse 도구(T) -> 벤치마크(B)', () => page.click14());
+
+    // ════════════════════════════════════════════════════════════
+    // [W4] 벤치마크 (new window)
+    // ════════════════════════════════════════════════════════════
+            await _step('switch to window: 벤치마크', async () => { await _switchWindow('벤치마크'); });
+            await _step('15:click 도움말', () => page.click15());
+            await _step('16:click 취소', () => page.click16());
     } finally {
 
         for (const { sid } of Object.values(_sessionIds)) {

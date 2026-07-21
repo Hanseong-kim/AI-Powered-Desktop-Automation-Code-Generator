@@ -3319,10 +3319,23 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       // (확인됨: STEP 6+ 메인 창 더블클릭이 전부 click-not-found). hwnd로
       // 직접 찾는 osScopedInvoke는 title 충돌 자체가 없어 세션 모드에도
       // 안전하게 적용된다.
+      // 2026-07-21 (7-Zip "언어:" 콤보 재현): mergeCrossWindowTriggerClicks는
+      // e(트리거) 자신이 non-cross-window일 때만 병합하는데, 3단계 중첩
+      // (메인 창 → 옵션 다이얼로그 → 콤보 팝업)에서는 옵션 다이얼로그 안의
+      // 트리거 클릭 자체도 recordedRect(메인 창) 기준으로 이미 cross-window라
+      // 병합 프리레퀴짓을 못 만족해 이 분기(비병합 단독 클릭)로 떨어진다.
+      // 그 결과 아래 triggerTarget에만 있던 "automationId 있으면 상태-의존
+      // Name(열기/닫기) 버림" 보호가 이 target(비병합 클릭 자신)에는 적용
+      // 안 돼, DropDown 화살표 단독 클릭이 캡처 당시의 "닫기"(열림 상태)
+      // 이름을 그대로 실어 재생 시작 시점(닫힌 상태, 진짜 이름은 "열기")과
+      // 안 맞아 target-not-found로 실패했다(실측: PuTTY 2026-07-14와 동일
+      // 근본 원인이 병합 여부에 따라 다른 코드 경로에 다시 나타난 것).
+      // automationId가 있는 컨트롤은 그것만으로 충분히 특정되므로 병합
+      // 여부와 무관하게 항상 이 보호를 적용한다.
       const target = {
         automationId: e.element.automationId || '',
         className: e.element.className || '',
-        name: e.element.name || '',
+        name: e.element.automationId ? '' : (e.element.name || ''),
       };
       const trig = e.crossWindowTrigger;
       // 트리거의 Name은 신뢰하지 않는다 — Win32 ComboBox 드롭다운 버튼처럼

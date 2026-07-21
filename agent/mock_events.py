@@ -422,6 +422,31 @@ ANIM_EVENTS = [
                winLeft=1502, winTop=0, winWidth=418, winHeight=675),
 ]
 
+# Nested-dialog DropDown state-name bug (2026-07-21, real 7-Zip GUI repro:
+# Tools -> Options -> "Language:" ComboBox). Three levels deep (main window
+# -> Options dialog -> ComboLBox popup): the Options dialog itself already
+# has different geometry than the recorded main-window rect, so the DropDown
+# arrow's OWN click never satisfies mergeCrossWindowTriggerClicks's
+# "!isCrossWindowEvent(e)" trigger prerequisite and falls through as a
+# standalone (unmerged) cross-window click instead — the ONLY code path
+# that previously dropped the trigger's state-dependent captured Name
+# (PuTTY 2026-07-14 fix) was triggerTarget, built only for the MERGED case.
+# Real capture: automationId="DropDown", name="닫기" ("Close" — only true
+# while the list is already open; at replay start the real name is "열기"/
+# Open), so an AND-condition on both fields matches nothing.
+NESTED_DROPDOWN_APP = "MockNestedDropdown"
+NESTED_DROPDOWN_EVENTS = [
+    make_event("click", name="", automation_id="", class_name="",
+               window_title="Main", app_name=NESTED_DROPDOWN_APP, x=100, y=100, index=1,
+               winLeft=0, winTop=0, winWidth=800, winHeight=600),
+    # Options dialog opens with DIFFERENT geometry than the main window —
+    # every event captured inside it is cross-window relative to recordedRect,
+    # including the DropDown trigger itself.
+    make_event("click", name="닫기", automation_id="DropDown", class_name="",
+               window_title="Options", app_name=NESTED_DROPDOWN_APP, x=400, y=200, index=2,
+               winLeft=300, winTop=100, winWidth=400, winHeight=300),
+]
+
 
 # ---------------------------------------------------------------------------
 # Test steps
@@ -901,6 +926,44 @@ def step_wdio_generate_anim_settle():
             "geometry every click actually sees) — otherwise every click in "
             "a plain single-window recording gets routed through the slower "
             "COM osScopedInvoke path instead of a plain browser click",
+        )
+
+
+def step_wdio_generate_nested_dropdown():
+    print("\n[8d] Nested-dialog DropDown trigger must drop its captured "
+          "state-dependent Name even when NOT merged with a following item "
+          "(2026-07-21, real 7-Zip Options 'Language:' combo)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", {
+        "action": "session_meta", "app": NESTED_DROPDOWN_APP, "platform": PLATFORM,
+        "timestamp": time.time(), "isElectron": False,
+        "initialWindow": {"left": 0, "top": 0, "width": 800, "height": 600},
+    })
+    for ev in NESTED_DROPDOWN_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": NESTED_DROPDOWN_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (nested-dropdown) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped nested-dropdown checks)", False, body.get("message", ""))
+        return
+    files = body.get("files", [])
+    for f in files:
+        content = f.get("content", "")
+        check(
+            f"  {f.get('filename')} drops the DropDown trigger's state-dependent "
+            "Name even when unmerged",
+            '"automationId":"DropDown"' in content.replace(" ", "")
+            and '"name":"닫기"' not in content,
+            "expected the standalone (non-merged) cross-window click's target "
+            "to have automationId='DropDown' with an EMPTY name — the captured "
+            "Name ('닫기'/Close) only reflects the list's already-open state and "
+            "never matches at replay start (closed, real name '열기'/Open), so "
+            "an AND condition on both fields matches nothing (PuTTY 2026-07-14 "
+            "class of bug, reappearing here because this click falls through "
+            "to the unmerged branch instead of the triggerTarget-only fix path)",
         )
 
 
@@ -1458,6 +1521,7 @@ def main():
     step_wdio_generate()
     step_wdio_generate_app_state_reset()
     step_wdio_generate_anim_settle()
+    step_wdio_generate_nested_dropdown()
     step_wdio_generate_session()
     step_wdio_generate_window_collision()
     step_wdio_generate_delayed_hwnd()
