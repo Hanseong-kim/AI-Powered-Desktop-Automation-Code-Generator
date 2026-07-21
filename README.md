@@ -19,15 +19,17 @@ screen coordinates**.
 
 ## Verified Targets
 
-GUI-confirmed with `npx wdio run <AppName>/wdio.conf.js` (both `ById` and
-`ByClass` specs passing):
+GUI-confirmed with `node <AppName>TestById.js` — a standalone script, **no
+WebdriverIO test runner, no `wdio.conf.js`, no `describe`/`it`/`browser`
+required** (see §3 below for why this matters):
 
 | App | Type | Notes |
 |---|---|---|
 | Calculator | UWP | simple mode |
 | Notepad | UWP | simple mode |
 | PuTTY | native Win32 dialog | category tree nav, ComboBox dropdowns (same-window and cross-window popup), tree +/- toggle, proxy radio buttons |
-| FileZilla | native Win32 | folder tree nav, menu bar navigation via ExpandCollapsePattern |
+| FileZilla | native Win32, multi-window | folder tree nav, menu bar navigation via ExpandCollapsePattern, Site Manager dialog (separate HWND session) |
+| 7-Zip | native Win32 | file list navigation, double-click into folders |
 
 Other presets in the UI (Paint, Registry Editor, IDM, VSCode, GitHub Desktop,
 Free Download Manager, Claude Desktop) are wired up but not currently
@@ -56,7 +58,7 @@ Three cooperating processes:
 |---|---|---|
 | Python | 3.9+ | The agent **must** run from an Administrator terminal |
 | Node.js | 18+ | For the Express bridge, React UI, and generated tests |
-| WinAppDriver | 1.2.1 | Install it and enable Developer Mode (Settings → Privacy & security → For developers). No manual startup — the generated suite's `@wdio/appium-service` spawns Appium, which proxies to WinAppDriver. |
+| WinAppDriver | 1.2.1 | Install it and enable Developer Mode (Settings → Privacy & security → For developers). No manual startup — each generated script's own `ensureAppium()` spawns Appium, which proxies to WinAppDriver. |
 
 > No Java/Maven, no Playwright, no API key. Output is WebdriverIO JavaScript
 > only.
@@ -179,31 +181,43 @@ if `ById` fails on an app whose ids are unstable, try `ByClass`.
 
 ## 3. Running Generated Tests
 
+Each generated `*TestById.js` / `*TestByClass.js` is a **standalone Node.js
+script** — it does not use `describe`/`it`/`browser`/`expect`, does not read
+`wdio.conf.js`, and needs no test runner:
+
 ```powershell
-cd generated-wdio
-npm install          # first time only
-npx wdio run <AppName>/wdio.conf.js
-# e.g. npx wdio run Calculator/wdio.conf.js
+cd generated-wdio/<AppName>
+npm install          # first time only (installs the app's own package.json)
+node <AppName>TestById.js
+# e.g. node CalculatorTestById.js
 ```
 
-Appium starts automatically on port `4723` and proxies to WinAppDriver — no
-separate WinAppDriver terminal needed. The replay is **visual**: the app
-launches, its window is moved back to the recorded geometry, and each step
-clicks/types/scrolls the real UI.
+The script itself spawns Appium (`ensureAppium()`), creates the WinAppDriver
+session, replays every recorded step, and exits with a non-zero
+`process.exitCode` on failure — no separate Appium terminal, no
+`@wdio/appium-service`, no WDIO config to keep in sync. The replay is
+**visual**: the app launches, its window is moved back to the recorded
+geometry, and each step clicks/types/scrolls the real UI in order, printed as
+`[STEP] n:action label` as it happens.
 
-Run a single spec:
+> `wdio.conf.js` is still generated alongside the standalone scripts as a
+> legacy artifact, but `npx wdio run` is no longer the supported way to run
+> a test — use `node <file>.js` above.
+
+Run the alternative locator strategy the same way:
 
 ```powershell
-npx wdio run <AppName>/wdio.conf.js --spec ./<AppName>/<AppName>TestById.js
+node <AppName>TestByClass.js
 ```
 
 ### How a test decides PASS/FAIL
 
 - Every step is logged as `[STEP] n:action label`.
 - Injection failures, un-resolvable selectors, and window-management errors
-  are pushed into a `_failures` array; the test ends with
-  `expect(_failures).toEqual([])`, so **any silently broken step fails the
-  run** — there are no false PASSes.
+  are pushed into a `_failures` array; at the end, a non-empty array logs
+  `[FAIL]` and sets `process.exitCode = 1` — so **any silently broken step
+  fails the run** (and the process's own exit code), there are no false
+  PASSes. `[PASS] all steps completed` on stdout means a clean run.
 - Recoverable incidents (a popup was dismissed and the step retried
   successfully) are recorded in `_warnings` and printed, but do not fail the
   test.
@@ -212,8 +226,8 @@ npx wdio run <AppName>/wdio.conf.js --spec ./<AppName>/<AppName>TestById.js
 
 | Mode | When | How it replays |
 |---|---|---|
-| **Simple** | Single-window native app | `appium:app = exePath`; clicks via `browser.$(selector).click()` (UIA Invoke) |
-| **Session** | Multi-window flows or Electron-class apps | `appium:app = 'Root'`; each new HWND gets its own scoped WinAppDriver session; clicks/typing resolve the XPath **inside that window's session** (`_clickScoped`/`_typeScoped`) |
+| **Simple** | Single-window native app | `appium:app = exePath`; clicks via raw Appium REST (`element` + `element/click`, UIA Invoke) |
+| **Session** | Multi-window flows or Electron-class apps | `appium:app = 'Root'`; each new HWND gets its own scoped WinAppDriver session; clicks/typing resolve the XPath **inside that window's session** (`_clickScoped`/`_typeScoped`), with an explicit `switch to window: ...` step logged at every HWND boundary |
 
 Scrolling never uses pixels: the recorded scroll container is re-found via UIA
 and scrolled with `ScrollPattern.Scroll()`; legacy controls that lack
@@ -248,7 +262,8 @@ cd server; node server.js
 
 # Terminal 2
 python agent/mock_events.py
-# expect: 148/148 checks passed
+# expect: NNN/NNN checks passed (count grows as new bugs get regression
+# coverage — check the printed total, don't hardcode a number)
 ```
 
 `mock_events.py` POSTs synthetic recordings to the live server — including a
@@ -276,7 +291,7 @@ to delete; re-running the gate recreates them.
 | `Administrator rights: NO` | Agent not elevated | Reopen PowerShell → Run as Administrator |
 | Captured elements have empty `automationId`/`name` | Agent not elevated, or the app genuinely exposes nothing (see limitations) | Restart agent as Admin; check the agent log for `[inspect] anchor XPath ...` lines |
 | Test fails with `n:click:no-selector` | That event was captured with no selector and no anchor (coordinates are forbidden) | Delete the event row and re-record that interaction at a calmer pace |
-| `Connection refused` on port 4723 | Appium not up | Handled by `@wdio/appium-service`; check the console for `Appium started with ID: ...` |
+| `Connection refused` on port 4723 | Appium not up | Handled by the script's own `ensureAppium()`; check the console for `[appium] starting Appium...` |
 | `SessionNotCreatedException` | Wrong exe path / AUMID | Verify the path passed to Launch |
 | `NoSuchElementException` at replay | Locator mismatch or timing | Try the `ByClass` spec instead of `ById`; check the app's UI state matches recording |
 | Replay clicks something, a stray dialog appears, test still passes with `popup-dismissed` warning | Working as intended — Fail-and-Recover dismissed it and retried | Nothing to do; check `_warnings` output if curious |
