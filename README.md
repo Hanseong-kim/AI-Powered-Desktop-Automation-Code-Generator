@@ -146,7 +146,6 @@ re-recording.
 generated-wdio/<AppName>/
 ├── <AppName>TestById.js       # selectors prefer AutomationId (~id / XPath)
 ├── <AppName>TestByClass.js    # selectors prefer ClassName+Name XPath
-├── wdio.conf.js               # per-app config (Appium service, capabilities)
 ├── osScroll.py                # UIA ScrollPattern scroll (PostMessage wheel fallback)
 ├── osScopedInvoke.py          # click an item that opened in a SEPARATE top-level
 │                              #   window (native ComboBox dropdown / menu popup) —
@@ -206,9 +205,9 @@ session, replays every recorded step, and exits with a non-zero
 geometry, and each step clicks/types/scrolls the real UI in order, printed as
 `[STEP] n:action label` as it happens.
 
-> `wdio.conf.js` is still generated alongside the standalone scripts as a
-> legacy artifact, but `npx wdio run` is no longer the supported way to run
-> a test — use `node <file>.js` above.
+> `wdio.conf.js` is no longer generated at all (2026-07-21) — it was never
+> read by this execution path, so `npx wdio run` is not just unsupported,
+> there's nothing left for it to run.
 
 Run the alternative locator strategy the same way:
 
