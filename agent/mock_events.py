@@ -392,6 +392,36 @@ NATIVE_SESSION_META = {
     "initialWindow": {"left": 400, "top": 200, "width": 800, "height": 600},
 }
 
+# Launch-animation rect mismatch (2026-07-21, real Calculator GUI repro):
+# session_meta.initialWindow is captured the instant _discover_target_windows()
+# first sees the window's hwnd, which for a UWP app can be mid-reveal-animation
+# — its rect hasn't settled to the resting geometry the user actually clicks
+# against yet. Reproduced identically across 3 independent real Calculator
+# recordings: initialWindow always left=0, every click's own winLeft/Top/
+# Width/Height always differ by the same fixed offset (here: left 0->1502,
+# width +18, height +10) even though it's the SAME single window the whole
+# time — a naive recordedRect picked from session_meta alone misclassifies
+# every single click in simple (non-Electron, single-window) mode as
+# "(cross-window)", forcing 100% of clicks onto the slower COM-based
+# osScopedInvoke path instead of a plain browser click.
+ANIM_APP = "MockAnimSettle"
+ANIM_SESSION_META = {
+    "action": "session_meta",
+    "app": ANIM_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 0, "top": 1, "width": 400, "height": 665},
+}
+ANIM_EVENTS = [
+    make_event("click", name="Seven", automation_id="num7Button", class_name="Button",
+               window_title="Calculator", app_name=ANIM_APP, x=1520, y=440, index=1,
+               winLeft=1502, winTop=0, winWidth=418, winHeight=675),
+    make_event("click", name="Eight", automation_id="num8Button", class_name="Button",
+               window_title="Calculator", app_name=ANIM_APP, x=1560, y=440, index=2,
+               winLeft=1502, winTop=0, winWidth=418, winHeight=675),
+]
+
 
 # ---------------------------------------------------------------------------
 # Test steps
@@ -841,6 +871,36 @@ def step_wdio_generate_app_state_reset():
             "near the top of run() — the app-state-reset feature that used to "
             "live in wdio.conf.js's onWorkerStart hook must not be silently "
             "dropped now that wdio.conf.js itself is no longer generated",
+        )
+
+
+def step_wdio_generate_anim_settle():
+    print("\n[8c] session_meta launch-animation rect must not misclassify "
+          "same-window clicks as cross-window")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", ANIM_SESSION_META)
+    for ev in ANIM_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": ANIM_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (anim-settle) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped anim-settle checks)", False, body.get("message", ""))
+        return
+    files = body.get("files", [])
+    for f in files:
+        content = f.get("content", "")
+        check(
+            f"  {f.get('filename')} does not misclassify same-window clicks as (cross-window)",
+            "(cross-window)" not in content,
+            "recordedRect must prefer an actual click event's settled window "
+            "rect over session_meta.initialWindow (which can be captured "
+            "mid-launch-animation, before the window reaches the resting "
+            "geometry every click actually sees) — otherwise every click in "
+            "a plain single-window recording gets routed through the slower "
+            "COM osScopedInvoke path instead of a plain browser click",
         )
 
 
@@ -1397,6 +1457,7 @@ def main():
     step_post_events()
     step_wdio_generate()
     step_wdio_generate_app_state_reset()
+    step_wdio_generate_anim_settle()
     step_wdio_generate_session()
     step_wdio_generate_window_collision()
     step_wdio_generate_delayed_hwnd()

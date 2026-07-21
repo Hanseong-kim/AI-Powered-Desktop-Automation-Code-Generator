@@ -1475,6 +1475,21 @@ function isCrossWindowEvent(e, recordedRect) {
 // 프로세스 실행 안에서 트리거 클릭→항목 검색을 끊김 없이 처리하게 한다.
 // mergeExpandCollapseClicks가 이미 병합한 ComboBox/MenuItem 쌍(expandItemName
 // 있음)은 건드리지 않는다 — 그쪽은 osExpandCollapse()로 별도 처리.
+// 트리거 클릭 바로 다음의 "창-교차" 이벤트가, agent.py의 명시적 hwnd 세그먼트
+// 추적(rootHwndHex/_switchWindow, 2026-07-16)이 이미 별도 창으로 잡아낸
+// 진짜 최상위 창인 경우는 여기서 병합 대상이 아니다 — 이 함수는 그 자체로는
+// hwnd가 안 잡히는(untracked) 팝업(PuTTY ComboLBox 드롭다운처럼 rootHwndHex가
+// 아예 없는 경우)만을 위한 것. 2026-07-21: recordedRect가 session_meta 대신
+// 실제 이벤트 rect를 우선하도록 넓어지면서, MockCollision류(진짜 다른 창,
+// rootHwndHex 있음)까지 rect-diff만으로 여기 잘못 흡수되는 회귀가 나 이 가드를
+// 추가함 — rootHwndHex가 서로 다르면(둘 다 있고 다르면) 이미 스위칭 메커니즘의
+// 몫이므로 병합하지 않는다.
+function isUntrackedCrossWindowEvent(next, e, recordedRect) {
+  if (!isCrossWindowEvent(next, recordedRect)) return false;
+  if (next.rootHwndHex && e.rootHwndHex && next.rootHwndHex !== e.rootHwndHex) return false;
+  return true;
+}
+
 function mergeCrossWindowTriggerClicks(events, recordedRect) {
   const out = [];
   for (let i = 0; i < events.length; i++) {
@@ -1485,7 +1500,7 @@ function mergeCrossWindowTriggerClicks(events, recordedRect) {
       const next = events[i + 1];
       if (next && next.action === 'click'
           && (next.element?.name || next.element?.automationId)
-          && isCrossWindowEvent(next, recordedRect)) {
+          && isUntrackedCrossWindowEvent(next, e, recordedRect)) {
         console.log(`[cross-window-merge] merged click+click @index ${i} -> trigger '${e.element.name || e.element.automationId}' then find '${next.element.name || next.element.automationId}' in another window`);
         out.push({ ...next, crossWindowTrigger: e.element });
         i++; // consume the trigger click — embedded in the merged event
@@ -1503,7 +1518,7 @@ function mergeCrossWindowTriggerClicks(events, recordedRect) {
         if (after && after.action === 'click'
             && (after.element?.name || after.element?.automationId)
             && !after.expandItemName
-            && isCrossWindowEvent(after, recordedRect)) {
+            && isUntrackedCrossWindowEvent(after, e, recordedRect)) {
           console.log(`[cross-window-merge] merged click+scroll+click @index ${i} -> trigger '${e.element.name || e.element.automationId}' then find '${after.element.name || after.element.automationId}' in another window (dropped intervening scroll)`);
           out.push({ ...after, crossWindowTrigger: e.element });
           i += 2; // consume the trigger click and the intervening scroll
@@ -2938,12 +2953,24 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
   const _deduped = dedupeDoubleClicks(filterEvents(eventList));
 
   // 녹화 시점 창 기하: launchApp이 새로 띄운 창을 이 크기로 정규화하는 데 쓰인다
-  // (창이 최대화 상태로 뜨면 UI가 리플로우되어 rel 오프셋이 어긋나므로).
-  // 우선순위: Electron 이벤트의 실측 winLeft/Top/Width/Height → session_meta.initialWindow.
+  // (창이 최대화 상태로 뜨면 UI가 리플로우되어 rel 오프셋이 어긋나므로), 그리고
+  // isCrossWindowEvent()의 "메인 창" 기준이 된다.
+  // 우선순위: 실제 이벤트(클릭 등)의 실측 winLeft/Top/Width/Height →
+  // session_meta.initialWindow. 2026-07-21 실측(Calculator 3회 독립 녹화 전부
+  // 재현): session_meta는 _discover_target_windows()가 창 hwnd를 처음 발견한
+  // 그 순간 찍히는데, UWP는 그 시점에 launch/reveal 애니메이션이 아직 안
+  // 끝나 rect가 최종 정착 위치/크기가 아닐 수 있다(실측: initialWindow는 항상
+  // left=0인데 첫 클릭부터 모든 클릭은 항상 left=1502, width/height도 매번
+  // +18/+10 고정 오프셋 — 같은 창인데 애니메이션 도중 스냅샷과 정착 후
+  // 스냅샷이 달랐던 것). 이걸 그대로 recordedRect로 쓰면 simple 모드
+  // 단일창 앱의 클릭 100%가 "창이 바뀌었다"고 오판돼 무거운 COM
+  // osScopedInvoke 경로로 새버린다. 실제 클릭 이벤트의 rect는 클릭 시점에
+  // hit-test로 구한 값이라 항상 신뢰 가능 — Electron 여부와 무관하게 이벤트
+  // rect를 우선한다(예전엔 Electron 이벤트만 인정했는데, non-Electron 앱도
+  // 같은 애니메이션-타이밍 문제를 겪을 수 있어 제한할 이유가 없다).
   // mergeCrossWindowTriggerClicks가 이 recordedRect를 이벤트 병합 시점에
   // 필요로 하므로 두 merge*Click 함수보다 먼저 계산한다.
   const _rectEvent = _deduped.find(e =>
-    e.isElectron === true &&
     Number.isInteger(e.winLeft) && Number.isInteger(e.winTop) &&
     Number.isInteger(e.winWidth) && Number.isInteger(e.winHeight)
   );
@@ -3264,7 +3291,19 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
 `            await _step('${stepNum}:expandCollapse ${escapeStr(e.element?.name || '')}${itemName ? ' -> ' + escapeStr(itemName) : ''}', () => page.click${stepNum}());`
       );
     } else if (e.action === 'click' && isCrossWindowEvent(e, recordedRect)
+        && !e.rootHwndHex
         && (e.element?.name || e.element?.automationId)) {
+      // !e.rootHwndHex (2026-07-21): agent.py가 이 이벤트에 rootHwndHex를
+      // 붙였다는 건 _watch_windows()가 이미 그 창을 최상위 창으로 추적
+      // 중이라는 뜻 — 그런 경우는 위 segBoundary/_switchWindow()
+      // 메커니즘(2026-07-16)이 이미 정확히 처리한다(title 충돌 포함, 그게
+      // 그 기능이 생긴 이유). 이 분기는 rootHwndHex가 아예 없는, 창으로
+      // 추적조차 안 되는 진짜 "보이지 않는 팝업"(PuTTY ComboLBox 드롭다운
+      // 목록처럼 너무 짧게 살아 watcher가 못 잡는 경우)만을 위한 것 —
+      // recordedRect가 이제 session_meta 대신 실제 이벤트 rect를 우선하도록
+      // 넓어지면서(바로 위 recordedRect 계산 참고), rootHwndHex로 이미 제대로
+      // 추적되는 진짜 다른 창(예: 7-Zip 다이얼로그)까지 rect-diff만으로 여기
+      // 잘못 흡수돼 switch 스텝이 통째로 안 나가는 회귀가 나 이 가드를 추가함.
       // 창-교차 클릭 (2026-07-13, PuTTY "Remote character set:" 콤보박스
       // 조사) — 이 이벤트가 캡처된 창 크기/위치가 메인 창과 다름 → 클릭
       // 시점에 별도 최상위 창(팝업/드롭다운 목록)에 있었다는 뜻. 세션은

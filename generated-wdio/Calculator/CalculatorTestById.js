@@ -468,31 +468,79 @@ async function _step(label, fn) {
 
 class CalculatorPageById {
     async click1() {
-        await _clickBySid(_appSid, null, '~num5Button');
+        await _clickBySid(_appSid, null, '~num7Button');
+    }
+
+    async click2() {
+        await _clickBySid(_appSid, null, '~num8Button');
     }
 
     async click3() {
-        await _clickBySid(_appSid, null, '~plusButton');
+        await _clickBySid(_appSid, null, '~num9Button');
     }
 
     async click4() {
-        await _clickBySid(_appSid, null, '~num3Button');
+        await _clickBySid(_appSid, null, '~multiplyButton');
+    }
+
+    async click5() {
+        await _clickBySid(_appSid, null, '~num6Button');
     }
 
     async click6() {
-        await _clickBySid(_appSid, null, '~equalButton');
+        await _clickBySid(_appSid, null, '~num5Button');
     }
 
     async click7() {
-        await _clickBySid(_appSid, null, '//Text[@AutomationId="CalculatorResults" and @Name="Result display"]', true);
+        await _clickBySid(_appSid, null, '~num3Button');
     }
 
-    async scroll8() {
-        osScrollEl(_appHwnd, {"automationId":"","className":"ScrollViewer","name":""}, -3);
+    async click8() {
+        await _clickBySid(_appSid, null, '~equalButton');
+    }
+
+    async click9() {
+        await _clickBySid(_appSid, null, '~plusButton');
+    }
+
+    async click10() {
+        await _clickBySid(_appSid, null, '~num5Button');
     }
 
     async click11() {
-        await _clickBySid(_appSid, null, '//*[@AutomationId="NumberPad"]/Button[3]');
+        await _clickBySid(_appSid, null, '~num7Button');
+    }
+
+    async click12() {
+        await _clickBySid(_appSid, null, '~num8Button');
+    }
+
+    async click13() {
+        await _clickBySid(_appSid, null, '~num3Button');
+    }
+
+    async click14() {
+        await _clickBySid(_appSid, null, '~equalButton');
+    }
+
+    async click15() {
+        await _clickBySid(_appSid, null, '~divideButton');
+    }
+
+    async click16() {
+        await _clickBySid(_appSid, null, '~num1Button');
+    }
+
+    async click17() {
+        await _clickBySid(_appSid, null, '~num0Button', true);
+    }
+
+    async click18() {
+        await _clickBySid(_appSid, null, '~num0Button');
+    }
+
+    async click19() {
+        await _clickBySid(_appSid, null, '~equalButton');
     }
 }
 
@@ -513,21 +561,29 @@ async function run() {
     _appSid = await _createSession("");
     console.log(`[session] app session ${_appSid} ready`);
     await initAppHwnd();
-    normalizeWindowSimple(null);
+    normalizeWindowSimple({"left":1502,"top":0,"width":418,"height":675});
 
         const page = new CalculatorPageById();
-            osActivate("Calculator");
-            await _step('1:click Five', () => page.click1());
-            // [STEP 2] skip type on non-editable element
-            await _step('3:click Plus', () => page.click3());
-            await _step('4:click Three', () => page.click4());
-            // [STEP 5] skip type on non-editable element
-            await _step('6:click Equals', () => page.click6());
-            await _step('7:doubleClick Result display', () => page.click7());
-            await _step('8:scroll delta=-3', () => page.scroll8());
-            // [STEP 9] rightClick scope-out — replay skipped (event scope: Click/Type/DoubleClick/Scroll, 2026-07-10)
-            // [STEP 10] drag scope-out — replay skipped (event scope: Click/Type/DoubleClick/Scroll, 2026-07-10)
-            await _step('11:click ', () => page.click11());
+            osActivate("계산기");
+            await _step('1:click 7', () => page.click1());
+            await _step('2:click 8', () => page.click2());
+            await _step('3:click 9', () => page.click3());
+            await _step('4:click 곱', () => page.click4());
+            await _step('5:click 6', () => page.click5());
+            await _step('6:click 5', () => page.click6());
+            await _step('7:click 3', () => page.click7());
+            await _step('8:click 일치', () => page.click8());
+            await _step('9:click 더하기', () => page.click9());
+            await _step('10:click 5', () => page.click10());
+            await _step('11:click 7', () => page.click11());
+            await _step('12:click 8', () => page.click12());
+            await _step('13:click 3', () => page.click13());
+            await _step('14:click 일치', () => page.click14());
+            await _step('15:click 나누기', () => page.click15());
+            await _step('16:click 1', () => page.click16());
+            await _step('17:doubleClick 공', () => page.click17());
+            await _step('18:click 공', () => page.click18());
+            await _step('19:click 일치', () => page.click19());
     } finally {
 
         if (_appSid) { try { await _appiumFetch(`/session/${_appSid}`, { method: 'DELETE' }, 5000); } catch {} }
