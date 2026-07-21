@@ -186,11 +186,17 @@ script** — it does not use `describe`/`it`/`browser`/`expect`, does not read
 `wdio.conf.js`, and needs no test runner:
 
 ```powershell
-cd generated-wdio/<AppName>
-npm install          # first time only (installs the app's own package.json)
+cd generated-wdio
+npm install          # first time only — shared deps for every generated app
+cd <AppName>
 node <AppName>TestById.js
-# e.g. node CalculatorTestById.js
+# e.g. cd Calculator && node CalculatorTestById.js
 ```
+
+Each app folder's own `package.json` has no dependencies of its own (Node
+resolves `node_modules` up the directory tree) — it exists only for
+`node --run test:byid` convenience and a human-readable description; you
+don't need to run `npm install` inside the app folder itself.
 
 The script itself spawns Appium (`ensureAppium()`), creates the WinAppDriver
 session, replays every recorded step, and exits with a non-zero
