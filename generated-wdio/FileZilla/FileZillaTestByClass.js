@@ -1151,6 +1151,10 @@ class FileZillaPageByClass {
     }
 
     async click3() {
+        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"보기(V)"}, "RichEdit Control");
+    }
+
+    async click4() {
         osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"파일(F)"}, "사이트 관리자(S)...\tCtrl+S");
     }
 
@@ -1158,37 +1162,63 @@ class FileZillaPageByClass {
     // ════════════════════════════════════════════════════════════
     // [W2] 사이트 관리자 (new window)
     // ════════════════════════════════════════════════════════════
-    async click4() {
+    async click5() {
         await _clickScoped('사이트 관리자', '//Button[@ClassName="Button" and @Name="새 폴더(F)"]');
     }
 
-    async type5(value) {
+    async type6(value) {
         const ok = await _typeScopedOrCom('사이트 관리자', '~1', value);
         if (!ok) {
-            console.warn('[type5] scoped sendKeys failed — falling back to OS-level typing');
+            console.warn('[type6] scoped sendKeys failed — falling back to OS-level typing');
             osActivate('사이트 관리자', _hwndCache['사이트 관리자']);
             osType(value);
         }
     }
 
-    async click6() {
+    async click7() {
         await _clickScoped('사이트 관리자', '//Button[@ClassName="Button" and @Name="새 사이트(N)"]');
     }
 
-    async type7(value) {
+    async type8(value) {
         const ok = await _typeScopedOrCom('사이트 관리자', '~1', value);
         if (!ok) {
-            console.warn('[type7] scoped sendKeys failed — falling back to OS-level typing');
+            console.warn('[type8] scoped sendKeys failed — falling back to OS-level typing');
             osActivate('사이트 관리자', _hwndCache['사이트 관리자']);
             osType(value);
         }
     }
 
-    async click8() {
+    async click9() {
+        await _clickScoped('사이트 관리자', '//Edit[@ClassName="Edit" and @Name="호스트(H):"]');
+    }
+
+    async type10(value) {
+        const ok = await _typeScopedOrCom('사이트 관리자', '//Edit[@ClassName="Edit" and @Name="호스트(H):"]', value);
+        if (!ok) {
+            console.warn('[type10] scoped sendKeys failed — falling back to OS-level typing');
+            osActivate('사이트 관리자', _hwndCache['사이트 관리자']);
+            osType(value);
+        }
+    }
+
+    async click11() {
+        await _clickScoped('사이트 관리자', '//Edit[@ClassName="Edit" and @Name="포트(P):"]');
+    }
+
+    async type12(value) {
+        const ok = await _typeScopedOrCom('사이트 관리자', '//Edit[@ClassName="Edit" and @Name="포트(P):"]', value);
+        if (!ok) {
+            console.warn('[type12] scoped sendKeys failed — falling back to OS-level typing');
+            osActivate('사이트 관리자', _hwndCache['사이트 관리자']);
+            osType(value);
+        }
+    }
+
+    async click13() {
         await _clickScoped('사이트 관리자', '//Button[@ClassName="Button" and @Name="취소"]');
     }
 
-    async click9() {
+    async click14() {
         osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"북마크(B)"}, "북마크 추가(A)...\tCtrl+B");
     }
 
@@ -1196,28 +1226,40 @@ class FileZillaPageByClass {
     // ════════════════════════════════════════════════════════════
     // [W3] 새 북마크 (new window)
     // ════════════════════════════════════════════════════════════
-    async click10() {
+    async click15() {
         await _clickScoped('새 북마크', '//CheckBox[@ClassName="Button" and @Name="탐색 동기화 사용(S)"]');
     }
 
-    async click11() {
+    async click16() {
         await _clickScoped('새 북마크', '//CheckBox[@ClassName="Button" and @Name="디렉터리 비교(I)"]');
     }
 
-    async click12() {
-        await _clickScoped('새 북마크', '//CheckBox[@ClassName="Button" and @Name="탐색 동기화 사용(S)"]', true);
+    async click17() {
+        await _clickScoped('새 북마크', '//CheckBox[@ClassName="Button" and @Name="탐색 동기화 사용(S)"]');
     }
 
-    async click13() {
-        await _clickScoped('새 북마크', '//Group[@ClassName="Button" and @Name="경로"]');
-    }
-
-    async click14() {
+    async click18() {
         await _clickScoped('새 북마크', '//CheckBox[@ClassName="Button" and @Name="디렉터리 비교(I)"]');
     }
 
-    async click15() {
+    async click19() {
         await _clickScoped('새 북마크', '//Button[@ClassName="Button" and @Name="취소"]');
+    }
+
+    async click20() {
+        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"편집(E)"}, null);
+    }
+
+    async click21() {
+        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"보기(V)"}, null);
+    }
+
+    async click22() {
+        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"전송(T)"}, null);
+    }
+
+    async click23() {
+        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"북마크(B)"}, null);
     }
 }
 
@@ -1235,11 +1277,11 @@ async function run() {
         _warmupPowerShell();
 
     _mainTitleFrag = "FileZilla";
-    _dialogRects = {"FileZilla":{"left":510,"top":74,"width":1200,"height":947},"사이트 관리자":{"left":519,"top":228,"width":1182,"height":639},"새 북마크":{"left":890,"top":355,"width":440,"height":385}};
+    _dialogRects = {"FileZilla":{"left":352,"top":40,"width":1200,"height":947},"사이트 관리자":{"left":361,"top":194,"width":1182,"height":639},"새 북마크":{"left":732,"top":321,"width":440,"height":385}};
     await ensureAppium();
     _rootSid = await _createSession('Root');
     console.log(`[session] Root session ${_rootSid} ready`);
-        await launchApp("C:\\Program Files\\FileZilla FTP Client\\filezilla.exe", [], "FileZilla", {"left":510,"top":74,"width":1200,"height":947});
+        await launchApp("C:\\Program Files\\FileZilla FTP Client\\filezilla.exe", [], "FileZilla", {"left":352,"top":40,"width":1200,"height":947});
 
         const page = new FileZillaPageByClass();
 
@@ -1248,29 +1290,37 @@ async function run() {
     // ════════════════════════════════════════════════════════════
             await _step('1:expandCollapse 파일(F)', () => page.click1());
             await _step('2:expandCollapse 편집(E)', () => page.click2());
-            await _step('3:expandCollapse 파일(F) -> 사이트 관리자(S)...\tCtrl+S', () => page.click3());
+            await _step('3:expandCollapse 보기(V) -> RichEdit Control', () => page.click3());
+            await _step('4:expandCollapse 파일(F) -> 사이트 관리자(S)...\tCtrl+S', () => page.click4());
 
     // ════════════════════════════════════════════════════════════
     // [W2] 사이트 관리자 (new window)
     // ════════════════════════════════════════════════════════════
             await _step('switch to window: 사이트 관리자', async () => { await _switchWindow('사이트 관리자'); });
-            await _step('4:click 새 폴더(F)', () => page.click4());
-            await _step('5:type asdf\n', () => page.type5('asdf\n'));
-            await _step('6:click 새 사이트(N)', () => page.click6());
-            await _step('7:type asdf\n', () => page.type7('asdf\n'));
-            await _step('8:click 취소', () => page.click8());
-            await _step('9:expandCollapse 북마크(B) -> 북마크 추가(A)...\tCtrl+B', () => page.click9());
+            await _step('5:click 새 폴더(F)', () => page.click5());
+            await _step('6:type asdf\n', () => page.type6('asdf\n'));
+            await _step('7:click 새 사이트(N)', () => page.click7());
+            await _step('8:type qwer\n', () => page.type8('qwer\n'));
+            await _step('9:click 호스트(H):', () => page.click9());
+            await _step('10:type qwer', () => page.type10('qwer'));
+            await _step('11:click 포트(P):', () => page.click11());
+            await _step('12:type 234', () => page.type12('234'));
+            await _step('13:click 취소', () => page.click13());
+            await _step('14:expandCollapse 북마크(B) -> 북마크 추가(A)...\tCtrl+B', () => page.click14());
 
     // ════════════════════════════════════════════════════════════
     // [W3] 새 북마크 (new window)
     // ════════════════════════════════════════════════════════════
             await _step('switch to window: 새 북마크', async () => { await _switchWindow('새 북마크'); });
-            await _step('10:click 탐색 동기화 사용(S)', () => page.click10());
-            await _step('11:click 디렉터리 비교(I)', () => page.click11());
-            await _step('12:doubleClick 탐색 동기화 사용(S)', () => page.click12());
-            await _step('13:click 경로', () => page.click13());
-            await _step('14:click 디렉터리 비교(I)', () => page.click14());
-            await _step('15:click 취소', () => page.click15());
+            await _step('15:click 탐색 동기화 사용(S)', () => page.click15());
+            await _step('16:click 디렉터리 비교(I)', () => page.click16());
+            await _step('17:click 탐색 동기화 사용(S)', () => page.click17());
+            await _step('18:click 디렉터리 비교(I)', () => page.click18());
+            await _step('19:click 취소', () => page.click19());
+            await _step('20:expandCollapse 편집(E)', () => page.click20());
+            await _step('21:expandCollapse 보기(V)', () => page.click21());
+            await _step('22:expandCollapse 전송(T)', () => page.click22());
+            await _step('23:expandCollapse 북마크(B)', () => page.click23());
     } finally {
 
         for (const { sid } of Object.values(_sessionIds)) {

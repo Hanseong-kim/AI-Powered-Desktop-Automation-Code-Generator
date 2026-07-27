@@ -4396,12 +4396,12 @@ function safeName(str) {
 // diag). Old folders may still have the stale .ps1 on disk.
 const OBSOLETE_FILES = ['osClick.ps1', 'osDrag.ps1', 'osScopedInvoke.ps1', 'osScroll.ps1', 'osExpandCollapse.ps1', 'wdio.conf.js', 'osUiaReplay.py'];
 
-function saveFiles(files, dir) {
+function saveFiles(files, dir, extraObsolete = []) {
   const savedPaths = [];
   let saveError;
   try {
     fs.mkdirSync(dir, { recursive: true });
-    for (const name of OBSOLETE_FILES) {
+    for (const name of [...OBSOLETE_FILES, ...extraObsolete]) {
       const fp = path.join(dir, name);
       if (fs.existsSync(fp)) {
         fs.unlinkSync(fp);
@@ -4488,9 +4488,23 @@ app.post('/api/generate', (req, res) => {
     const escapePs1File = { filename: 'osEscape.ps1', content: OS_ESCAPE_PS1 };
     const expandCollapsePs1File = { filename: 'osExpandCollapse.py', content: OS_EXPANDCOLLAPSE_PY };
     const scopedInvokePyFile = { filename: 'osScopedInvoke.py', content: OS_SCOPEDINVOKE_PY };
+    const debugHelperFiles = [
+      scrollPyFile, winRectPs1File, moveWinPs1File, typePs1File, activatePs1File,
+      dismissPopupPs1File, escapePs1File, expandCollapsePs1File, scopedInvokePyFile,
+    ];
+    // 2026-07-27: the generated .js embeds these 9 scripts' text directly and
+    // self-extracts them to a temp dir at runtime (see STANDALONE_PREAMBLE's
+    // _helperFile()) — it no longer reads them from disk. They're written
+    // here purely for human inspection, so they go to a separate debug
+    // folder instead of cluttering the app's actual output folder (which
+    // should contain only what `node <file>.js` actually needs).
+    const debugHelpersOutDir = path.join(WDIO_BASE_DIR, '_debug-helpers', base);
     const { savedPaths: wdioPaths, saveError: wdioErr } = saveFiles(
-      [...wdioFiles, pkgJsonFile, scrollPyFile, winRectPs1File, moveWinPs1File, typePs1File, activatePs1File, dismissPopupPs1File, escapePs1File, expandCollapsePs1File, scopedInvokePyFile], wdioOutDir
+      [...wdioFiles, pkgJsonFile], wdioOutDir,
+      debugHelperFiles.map(f => f.filename), // auto-clean any pre-2026-07-27 copies left in the app folder
     );
+    const { savedPaths: debugPaths, saveError: debugErr } = saveFiles(debugHelperFiles, debugHelpersOutDir);
+    wdioPaths.push(...debugPaths);
 
     const warnings = !exe ? ['exePath missing — launchApp will be skipped'] : [];
 
@@ -4511,7 +4525,7 @@ app.post('/api/generate', (req, res) => {
       savedPaths: wdioPaths,
       folder: base,
       runCommand: `cd generated-wdio/${base} && node ${base}TestById.js`,
-      saveErrors: [wdioErr].filter(Boolean),
+      saveErrors: [wdioErr, debugErr].filter(Boolean),
       warnings,
     });
   } catch (e) {

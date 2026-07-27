@@ -1147,42 +1147,38 @@ class PuTTYPageById {
     }
 
     async click2() {
-        await _clickScoped('PuTTY Configuration', '//TreeItem[@Name="Appearance"]');
+        await _clickScoped('PuTTY Configuration', '//TreeItem[@Name="Features"]');
     }
 
     async click3() {
-        await _clickScoped('PuTTY Configuration', '//TreeItem[@Name="Translation"]');
+        await _clickScoped('PuTTY Configuration', '//TreeItem[@Name="Appearance"]');
     }
 
     async click4() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"ISO-8859-10:1998 (Latin-6, Nordic)"}, {"automationId":"DropDown","className":"","name":""});
+        await _clickScoped('PuTTY Configuration', '//TreeItem[@Name="Translation"]');
     }
 
     async click5() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"UTF-8"}, {"automationId":"DropDown","className":"","name":""});
+        await _clickScoped('PuTTY Configuration', '//TreeItem[@Name="Colours"]');
     }
 
     async click6() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"Getting started with PuTTY"}, {"automationId":"1011","className":"Button","name":""});
+        await _clickScoped('PuTTY Configuration', '//TreeItem[@Name="Proxy"]');
     }
 
     async click7() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"Configuring PuTTY"});
+        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"HTTP CONNECT"}, {"automationId":"DropDown","className":"","name":""});
     }
 
     async click8() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"Using public keys for SSH authentication"});
-    }
-
-    async click9() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"닫기"});
+        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"None"}, {"automationId":"DropDown","className":"","name":""});
     }
 
 
     // ════════════════════════════════════════════════════════════
     // [W2] PuTTY Configuration (new window)
     // ════════════════════════════════════════════════════════════
-    async click10() {
+    async click9() {
         await _clickScoped('PuTTY Configuration', '~1010');
     }
 
@@ -1190,7 +1186,7 @@ class PuTTYPageById {
     // ════════════════════════════════════════════════════════════
     // [W3] About PuTTY (new window)
     // ════════════════════════════════════════════════════════════
-    async click11() {
+    async click10() {
         await _clickScoped('About PuTTY', '~1');
     }
 }
@@ -1222,26 +1218,25 @@ async function run() {
     // ════════════════════════════════════════════════════════════
             await _step('switch to window: PuTTY Configuration', async () => { await _switchWindow('PuTTY Configuration'); });
             await _step('1:click Keyboard', () => page.click1());
-            await _step('2:click Appearance', () => page.click2());
-            await _step('3:click Translation', () => page.click3());
-            await _step('4:click ISO-8859-10:1998 (Latin-6, Nordic) (cross-window)', () => page.click4());
-            await _step('5:click UTF-8 (cross-window)', () => page.click5());
-            await _step('6:click Getting started with PuTTY (cross-window)', () => page.click6());
-            await _step('7:click Configuring PuTTY (cross-window)', () => page.click7());
-            await _step('8:click Using public keys for SSH authentication (cross-window)', () => page.click8());
-            await _step('9:click 닫기 (cross-window)', () => page.click9());
+            await _step('2:click Features', () => page.click2());
+            await _step('3:click Appearance', () => page.click3());
+            await _step('4:click Translation', () => page.click4());
+            await _step('5:click Colours', () => page.click5());
+            await _step('6:click Proxy', () => page.click6());
+            await _step('7:click HTTP CONNECT (cross-window)', () => page.click7());
+            await _step('8:click None (cross-window)', () => page.click8());
 
     // ════════════════════════════════════════════════════════════
     // [W2] PuTTY Configuration (new window)
     // ════════════════════════════════════════════════════════════
             await _step('switch to window: PuTTY Configuration', async () => { await _switchWindow('PuTTY Configuration'); });
-            await _step('10:click About', () => page.click10());
+            await _step('9:click About', () => page.click9());
 
     // ════════════════════════════════════════════════════════════
     // [W3] About PuTTY (new window)
     // ════════════════════════════════════════════════════════════
             await _step('switch to window: About PuTTY', async () => { await _switchWindow('About PuTTY'); });
-            await _step('11:click Close', () => page.click11());
+            await _step('10:click Close', () => page.click10());
     } finally {
 
         for (const { sid } of Object.values(_sessionIds)) {

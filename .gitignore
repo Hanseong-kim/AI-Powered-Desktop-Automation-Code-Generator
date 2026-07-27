@@ -28,8 +28,31 @@ generated-wdio/MockNestedDropdown/
 generated-wdio/MockSimpleRootHwnd/
 generated-wdio/MockTitleCollisionDialogRect/
 
+# 위와 동일한 산출물의 _debug-helpers 사본(2026-07-27 saveFiles 분리 이후 생성)
+generated-wdio/_debug-helpers/MockCalculator/
+generated-wdio/_debug-helpers/MockMulti/
+generated-wdio/_debug-helpers/MockNative/
+generated-wdio/_debug-helpers/MockCollision/
+generated-wdio/_debug-helpers/MockDelayedHwnd/
+generated-wdio/_debug-helpers/MockExpandRedundant/
+generated-wdio/_debug-helpers/SevenZipStateReset/
+generated-wdio/_debug-helpers/MockAnimSettle/
+generated-wdio/_debug-helpers/MockNestedDropdown/
+generated-wdio/_debug-helpers/MockSimpleRootHwnd/
+generated-wdio/_debug-helpers/MockTitleCollisionDialogRect/
+
 Claude code task server token opt.md
 Claude code task v2.md
+
+# 2026-07-27: 실행에 필요 없는 분석/도구 자료 — 로컬엔 남기되 git 추적은 해제
+# (실행에 필요한 것만 커밋한다는 방침, 사용자 확인 완료)
+poc/
+PoC2/
+.claude/commands/
+.claude/hooks/
+.claude/skills/
+start-dev.ps1
+AI_Powered_Desktop_Automation_Code_Generator_Assignment.docx
 
 ui/dist/
 docs/

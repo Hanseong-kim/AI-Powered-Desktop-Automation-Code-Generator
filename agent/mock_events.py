@@ -59,6 +59,16 @@ import re
 # more one-off symbol check each time this recurs, verify EVERY self-defined
 # helper the generated file calls (os*/_* names) actually has a definition
 # somewhere in the same file.
+# 2026-07-27: the 9 os*.ps1/os*.py scripts a generate writes purely for human
+# inspection — no longer read by the generated .js itself (it embeds them),
+# so they belong in generated-wdio/_debug-helpers/<App>/, not the app's own
+# output folder. Shared by both the simple- and session-mode generate checks.
+DEBUG_HELPER_NAMES = (
+    "osScroll.py", "osWindowRect.ps1", "osMoveWindow.ps1", "osType.ps1",
+    "osActivate.ps1", "osDismissPopup.ps1", "osEscape.ps1",
+    "osExpandCollapse.py", "osScopedInvoke.py",
+)
+
 _CALL_SITE_RE = re.compile(r"(?<![.\w$])((?:os[A-Z]\w*)|(?:_[A-Za-z]\w*))\s*\(")
 _DEF_RE = re.compile(r"(?:function\s+([A-Za-z_]\w*)\s*\(|(?:const|let)\s+([A-Za-z_]\w*)\s*=)")
 # 2026-07-27: the .js now embeds the os*.ps1/os*.py helper scripts verbatim
@@ -627,6 +637,12 @@ def step_wdio_generate():
     for stale in ("osClick.ps1", "osDrag.ps1", "osScopedInvoke.ps1", "osScroll.ps1", "osExpandCollapse.ps1", "wdio.conf.js"):
         with open(os.path.join(out_dir, stale), "w", encoding="utf-8") as fh:
             fh.write("# dummy stale coordinate helper planted by mock_events.py\n")
+    # 2026-07-27: pre-existing copies of the 9 embedded-helper scripts sitting
+    # directly in the app's own output folder (left by a generate from before
+    # saveFiles() started routing them to _debug-helpers/) must also be
+    # auto-removed on the next generate — plant one and check it's gone.
+    with open(os.path.join(out_dir, "osWindowRect.ps1"), "w", encoding="utf-8") as fh:
+        fh.write("# dummy pre-2026-07-27 helper copy planted by mock_events.py\n")
 
     status, body = request("POST", "/api/generate", {
         "appName": APP_NAME,
@@ -638,6 +654,17 @@ def step_wdio_generate():
         return
     check("ok == true", body.get("ok") is True)
     check("folder field present", bool(body.get("folder")), f"got {body.get('folder')}")
+    debug_dir = os.path.join(repo_root, "generated-wdio", "_debug-helpers", APP_NAME)
+    check(
+        "app's own output folder has no os*.ps1/os*.py helper copies",
+        not any(os.path.exists(os.path.join(out_dir, n)) for n in DEBUG_HELPER_NAMES),
+        f"checked {out_dir} for {DEBUG_HELPER_NAMES}",
+    )
+    check(
+        "the 9 helper scripts were written to generated-wdio/_debug-helpers/ instead",
+        all(os.path.exists(os.path.join(debug_dir, n)) for n in DEBUG_HELPER_NAMES),
+        f"checked {debug_dir} for {DEBUG_HELPER_NAMES}",
+    )
     check("runCommand field present", bool(body.get("runCommand")))
     run_command = body.get("runCommand", "")
     check(
@@ -1186,6 +1213,19 @@ def step_wdio_generate_session():
         return
     files = body.get("files", [])
     check("Two .js files returned (session)", len(files) == 2, f"got {len(files)}")
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    session_out_dir = os.path.join(repo_root, "generated-wdio", SESSION_APP)
+    session_debug_dir = os.path.join(repo_root, "generated-wdio", "_debug-helpers", SESSION_APP)
+    check(
+        "app's own output folder has no os*.ps1/os*.py helper copies (session)",
+        not any(os.path.exists(os.path.join(session_out_dir, n)) for n in DEBUG_HELPER_NAMES),
+        f"checked {session_out_dir} for {DEBUG_HELPER_NAMES}",
+    )
+    check(
+        "the 9 helper scripts were written to generated-wdio/_debug-helpers/ instead (session)",
+        all(os.path.exists(os.path.join(session_debug_dir, n)) for n in DEBUG_HELPER_NAMES),
+        f"checked {session_debug_dir} for {DEBUG_HELPER_NAMES}",
+    )
     for f in files:
         fname = f.get("filename", "")
         content = f.get("content", "")
@@ -1722,7 +1762,10 @@ def step_com_sendinput_helpers():
     """
     print("\n[11] COM-exception clicks replay visibly (dynamic ClickablePoint + SendInput)")
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    out_dir = os.path.join(repo_root, "generated-wdio", APP_NAME)
+    # 2026-07-27: these two scripts moved from the app's own output folder to
+    # generated-wdio/_debug-helpers/<App>/ (saveFiles() split) — they're no
+    # longer read by the generated .js at all, just kept here for inspection.
+    out_dir = os.path.join(repo_root, "generated-wdio", "_debug-helpers", APP_NAME)
 
     for py_name in ("osScopedInvoke.py", "osExpandCollapse.py"):
         path = os.path.join(out_dir, py_name)
