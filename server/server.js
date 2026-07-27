@@ -2263,10 +2263,39 @@ const OS_FOREGROUND_ENCODED = Buffer.from(
 const STANDALONE_PREAMBLE = `import { execSync, spawn } from 'child_process';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { homedir } from 'os';
-import { openSync, closeSync } from 'fs';
+import { homedir, tmpdir } from 'os';
+import { openSync, closeSync, mkdtempSync, writeFileSync, existsSync } from 'fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// 2026-07-27: this .js file is the whole deliverable — a user copying just
+// this one file elsewhere (a different folder, a colleague's machine) must
+// not need the os*.ps1/os*.py siblings this project also writes next to it
+// for human inspection. Every os*.ps1/os*.py invocation below resolves its
+// script through _helperFile(name) instead of join(__dirname, name): the
+// actual script text is embedded right here as a string, written out to a
+// per-process temp dir on first use and reused after that. saveFiles()
+// still writes the standalone .ps1/.py copies alongside this file (so they
+// stay inspectable/debuggable), but this file no longer depends on them
+// being there.
+const _H = {
+    'osWindowRect.ps1': ${JSON.stringify(OS_WINRECT_PS1)},
+    'osMoveWindow.ps1': ${JSON.stringify(OS_MOVEWINDOW_PS1)},
+    'osType.ps1': ${JSON.stringify(OS_TYPE_PS1)},
+    'osEscape.ps1': ${JSON.stringify(OS_ESCAPE_PS1)},
+    'osActivate.ps1': ${JSON.stringify(OS_ACTIVATE_PS1)},
+    'osDismissPopup.ps1': ${JSON.stringify(OS_DISMISS_POPUP_PS1)},
+    'osScroll.py': ${JSON.stringify(OS_SCROLL_PY)},
+    'osExpandCollapse.py': ${JSON.stringify(OS_EXPANDCOLLAPSE_PY)},
+    'osScopedInvoke.py': ${JSON.stringify(OS_SCOPEDINVOKE_PY)},
+};
+let _helperDir = null;
+function _helperFile(name) {
+    if (!_helperDir) _helperDir = mkdtempSync(join(tmpdir(), 'qaforge-helpers-'));
+    const p = join(_helperDir, name);
+    if (!existsSync(p)) writeFileSync(p, _H[name], 'utf8');
+    return p;
+}
 
 // 주입/헬스 실패 수집 — 마지막에 실질 assert로 검증.
 const _failures = [];
@@ -2544,7 +2573,7 @@ function osScrollEl(hwnd, target, delta) {
     try {
         const selB64 = Buffer.from(JSON.stringify(target || {}), 'utf8').toString('base64');
         const out = execSync(
-            \`python "\${join(__dirname, 'osScroll.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" --delta \${delta}\`,
+            \`python "\${_helperFile('osScroll.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" --delta \${delta}\`,
             { stdio: 'pipe', timeout: 20000 }
         ).toString().trim();
         if (out) console.log(out);
@@ -2572,7 +2601,7 @@ function osExpandCollapse(hwnd, target, itemName) {
         const selB64 = Buffer.from(JSON.stringify(target || {}), 'utf8').toString('base64');
         const itemArg = itemName ? \`--item-name-b64 "\${Buffer.from(itemName, 'utf8').toString('base64')}"\` : '';
         const out = execSync(
-            \`python "\${join(__dirname, 'osExpandCollapse.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${itemArg}\`,
+            \`python "\${_helperFile('osExpandCollapse.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${itemArg}\`,
             { stdio: 'pipe', timeout: 20000 }
         ).toString().trim();
         if (out) console.log(out);
@@ -2605,7 +2634,7 @@ function osScopedInvoke(hwnd, target, triggerTarget) {
             ? \`--trigger-sel-b64 "\${Buffer.from(JSON.stringify(triggerTarget), 'utf8').toString('base64')}"\`
             : '';
         const out = execSync(
-            \`python "\${join(__dirname, 'osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${triggerArg}\`,
+            \`python "\${_helperFile('osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${triggerArg}\`,
             { stdio: 'pipe', timeout: 20000 }
         ).toString().trim();
         if (out) console.log(out);
@@ -2652,7 +2681,7 @@ function osActivate(titleLike) {
     try {
         const args = _appHwnd ? \`-hwnd \${_appHwnd}\` : \`-titleLike "\${titleLike}"\`;
         execSync(
-            \`powershell -NoProfile -File "\${join(__dirname, 'osActivate.ps1')}" \${args}\`,
+            \`powershell -NoProfile -File "\${_helperFile('osActivate.ps1')}" \${args}\`,
             { stdio: 'pipe', timeout: 15000 }
         );
     } catch (e) {
@@ -2667,7 +2696,7 @@ function _resolveWinRect(titleLike) {
     try {
         const args = _appHwnd ? \`-hwnd \${_appHwnd}\` : \`-titleLike "\${titleLike}"\`;
         const out = execSync(
-            \`powershell -NoProfile -File "\${join(__dirname, 'osWindowRect.ps1')}" \${args}\`,
+            \`powershell -NoProfile -File "\${_helperFile('osWindowRect.ps1')}" \${args}\`,
             { stdio: 'pipe', timeout: 15000 }
         ).toString().trim();
         const m = out.match(/(-?\\d+)\\s+(-?\\d+)\\s+(-?\\d+)\\s+(-?\\d+)/);
@@ -2687,7 +2716,7 @@ function normalizeWindowSimple(rect) {
     if (!_appHwnd || !rect) return;
     try {
         execSync(
-            \`powershell -NoProfile -File "\${join(__dirname, 'osMoveWindow.ps1')}" -hwnd \${_appHwnd} -left \${rect.left} -top \${rect.top} -width \${rect.width} -height \${rect.height}\`,
+            \`powershell -NoProfile -File "\${_helperFile('osMoveWindow.ps1')}" -hwnd \${_appHwnd} -left \${rect.left} -top \${rect.top} -width \${rect.width} -height \${rect.height}\`,
             { stdio: 'pipe', timeout: 15000 }
         );
         const after = _resolveWinRect('');
@@ -2706,7 +2735,7 @@ function osType(text) {
     try {
         const b64 = Buffer.from(text, 'utf8').toString('base64');
         execSync(
-            \`powershell -NoProfile -File "\${join(__dirname, 'osType.ps1')}" -b64 "\${b64}"\`,
+            \`powershell -NoProfile -File "\${_helperFile('osType.ps1')}" -b64 "\${b64}"\`,
             { stdio: 'pipe', timeout: 15000 }
         );
     } catch (e) {
@@ -2725,7 +2754,7 @@ function osDismissPopup() {
     try {
         const args = _appHwnd ? \`-hwnd \${_appHwnd}\` : '';
         const out = execSync(
-            \`powershell -NoProfile -File "\${join(__dirname, 'osDismissPopup.ps1')}" \${args}\`,
+            \`powershell -NoProfile -File "\${_helperFile('osDismissPopup.ps1')}" \${args}\`,
             { stdio: 'pipe', timeout: 15000 }
         ).toString().trim();
         if (out.startsWith('DISMISSED')) { console.log('[popup]', out); return true; }
@@ -2741,7 +2770,7 @@ function osDismissPopup() {
 function osEscape() {
     try {
         execSync(
-            \`powershell -NoProfile -File "\${join(__dirname, 'osEscape.ps1')}"\`,
+            \`powershell -NoProfile -File "\${_helperFile('osEscape.ps1')}"\`,
             { stdio: 'pipe', timeout: 15000 }
         );
         return true;
@@ -2816,7 +2845,7 @@ function osScrollEl(hwnd, target, delta) {
     try {
         const selB64 = Buffer.from(JSON.stringify(target || {}), 'utf8').toString('base64');
         const out = execSync(
-            \`python "\${join(__dirname, 'osScroll.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" --delta \${delta}\`,
+            \`python "\${_helperFile('osScroll.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" --delta \${delta}\`,
             { stdio: 'pipe', timeout: 20000 }
         ).toString().trim();
         if (out) console.log(out);
@@ -2853,7 +2882,7 @@ function osExpandCollapse(hwnd, target, itemName) {
         const selB64 = Buffer.from(JSON.stringify(target || {}), 'utf8').toString('base64');
         const itemArg = itemName ? \`--item-name-b64 "\${Buffer.from(itemName, 'utf8').toString('base64')}"\` : '';
         const out = execSync(
-            \`python "\${join(__dirname, 'osExpandCollapse.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${itemArg}\`,
+            \`python "\${_helperFile('osExpandCollapse.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${itemArg}\`,
             { stdio: 'pipe', timeout: 20000 }
         ).toString().trim();
         if (out) console.log(out);
@@ -2884,7 +2913,7 @@ function osScopedInvoke(hwnd, target, triggerTarget) {
             ? \`--trigger-sel-b64 "\${Buffer.from(JSON.stringify(triggerTarget), 'utf8').toString('base64')}"\`
             : '';
         const out = execSync(
-            \`python "\${join(__dirname, 'osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${triggerArg}\`,
+            \`python "\${_helperFile('osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${triggerArg}\`,
             { stdio: 'pipe', timeout: 20000 }
         ).toString().trim();
         if (out) console.log(out);
@@ -2913,7 +2942,7 @@ function osScopedType(hwnd, target, text) {
         const selB64 = Buffer.from(JSON.stringify(target || {}), 'utf8').toString('base64');
         const textB64 = Buffer.from(text ?? '', 'utf8').toString('base64');
         const out = execSync(
-            \`python "\${join(__dirname, 'osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" --text-b64 "\${textB64}"\`,
+            \`python "\${_helperFile('osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" --text-b64 "\${textB64}"\`,
             { stdio: 'pipe', timeout: 20000 }
         ).toString().trim();
         if (out) console.log(out);
@@ -3365,7 +3394,7 @@ function _listWindowHwnds(frag) {
     if (!frag) return [];
     try {
         const out = execSync(
-            \`powershell -NoProfile -File "\${join(__dirname, 'osWindowRect.ps1')}" -titleLike "\${frag}" -listOnly\`,
+            \`powershell -NoProfile -File "\${_helperFile('osWindowRect.ps1')}" -titleLike "\${frag}" -listOnly\`,
             { stdio: 'pipe', timeout: 15000 }
         ).toString().trim();
         if (!out) return [];
@@ -3389,7 +3418,7 @@ function _sleep(ms) {
 function _windowOwner(hwndNum) {
     try {
         const out = execSync(
-            \`powershell -NoProfile -File "\${join(__dirname, 'osWindowRect.ps1')}" -hwnd \${hwndNum} -ownerOnly\`,
+            \`powershell -NoProfile -File "\${_helperFile('osWindowRect.ps1')}" -hwnd \${hwndNum} -ownerOnly\`,
             { stdio: 'pipe', timeout: 15000 }
         ).toString().trim();
         return Number(out) || 0;
@@ -3404,7 +3433,7 @@ function _resolveWinRect(frag) {
     try {
         const args = hwnd ? \`-hwnd \${hwnd}\` : \`-titleLike "\${frag}"\`;
         const out = execSync(
-            \`powershell -NoProfile -File "\${join(__dirname, 'osWindowRect.ps1')}" \${args}\`,
+            \`powershell -NoProfile -File "\${_helperFile('osWindowRect.ps1')}" \${args}\`,
             { stdio: 'pipe', timeout: 15000 }
         ).toString().trim();
         const m = out.match(/(-?\\d+)\\s+(-?\\d+)\\s+(-?\\d+)\\s+(-?\\d+)/);
@@ -3428,7 +3457,7 @@ function normalizeWindow(frag, left, top, width, height) {
     try {
         const target = hwnd ? \`-hwnd \${hwnd}\` : \`-titleLike "\${frag}"\`;
         execSync(
-            \`powershell -NoProfile -File "\${join(__dirname, 'osMoveWindow.ps1')}" \${target} -left \${left} -top \${top} -width \${width} -height \${height}\`,
+            \`powershell -NoProfile -File "\${_helperFile('osMoveWindow.ps1')}" \${target} -left \${left} -top \${top} -width \${width} -height \${height}\`,
             { stdio: 'pipe', timeout: 15000 }
         );
     } catch (e) {
@@ -3444,7 +3473,7 @@ function osActivate(titleLike, hwnd) {
     try {
         const args = hwnd ? \`-hwnd \${hwnd}\` : \`-titleLike "\${titleLike}"\`;
         execSync(
-            \`powershell -NoProfile -File "\${join(__dirname, 'osActivate.ps1')}" \${args}\`,
+            \`powershell -NoProfile -File "\${_helperFile('osActivate.ps1')}" \${args}\`,
             { stdio: 'pipe', timeout: 15000 }
         );
     } catch (e) {
@@ -3549,7 +3578,7 @@ function osType(text) {
     try {
         const b64 = Buffer.from(text, 'utf8').toString('base64');
         execSync(
-            \`powershell -NoProfile -File "\${join(__dirname, 'osType.ps1')}" -b64 "\${b64}"\`,
+            \`powershell -NoProfile -File "\${_helperFile('osType.ps1')}" -b64 "\${b64}"\`,
             { stdio: 'pipe', timeout: 15000 }
         );
     } catch (e) {
@@ -3575,7 +3604,7 @@ function osDismissPopup() {
         const tracked = [...new Set(Object.values(_hwndCache))].filter(Boolean);
         if (tracked.length) args += \` -exclude "\${tracked.join(',')}"\`;
         const out = execSync(
-            \`powershell -NoProfile -File "\${join(__dirname, 'osDismissPopup.ps1')}" \${args}\`,
+            \`powershell -NoProfile -File "\${_helperFile('osDismissPopup.ps1')}" \${args}\`,
             { stdio: 'pipe', timeout: 15000 }
         ).toString().trim();
         if (out.startsWith('DISMISSED')) { console.log('[popup]', out); return true; }
@@ -3591,7 +3620,7 @@ function osDismissPopup() {
 function osEscape() {
     try {
         execSync(
-            \`powershell -NoProfile -File "\${join(__dirname, 'osEscape.ps1')}"\`,
+            \`powershell -NoProfile -File "\${_helperFile('osEscape.ps1')}"\`,
             { stdio: 'pipe', timeout: 15000 }
         );
         return true;

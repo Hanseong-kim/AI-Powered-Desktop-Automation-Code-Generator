@@ -61,9 +61,22 @@ import re
 # somewhere in the same file.
 _CALL_SITE_RE = re.compile(r"(?<![.\w$])((?:os[A-Z]\w*)|(?:_[A-Za-z]\w*))\s*\(")
 _DEF_RE = re.compile(r"(?:function\s+([A-Za-z_]\w*)\s*\(|(?:const|let)\s+([A-Za-z_]\w*)\s*=)")
+# 2026-07-27: the .js now embeds the os*.ps1/os*.py helper scripts verbatim
+# as JSON-stringified JS string literals (const _H = {...}) so the file is
+# copy-portable without its sibling scripts. That embedded PowerShell/Python
+# source text isn't JS — scanning it for JS call-site/definition patterns
+# produces false positives (e.g. a Python `def _enable_per_monitor_dpi_awareness():`
+# looks like an undefined JS call). Strip that one block before any textual
+# JS-content check.
+_EMBEDDED_HELPERS_RE = re.compile(r"const _H = \{[\s\S]*?\n\};\n")
+
+
+def _strip_embedded_helpers(content):
+    return _EMBEDDED_HELPERS_RE.sub("", content)
 
 
 def check_helpers_defined(fname, content):
+    content = _strip_embedded_helpers(content)
     called = set(_CALL_SITE_RE.findall(content))
     defined = set()
     for a, b in _DEF_RE.findall(content):
@@ -654,6 +667,28 @@ def step_wdio_generate():
         check(f"  {fname} has content", bool(content.strip()))
         check_helpers_defined(fname, content)
         check(
+            f"  {fname} is portable — no sibling os*.ps1/os*.py file dependency",
+            "join(__dirname, 'os" not in content,
+            "generated file must resolve its os*.ps1/os*.py helpers through "
+            "_helperFile(name), which embeds the script text and writes it to "
+            "a temp dir at runtime — a join(__dirname, 'osX...') reference "
+            "means copying just this .js elsewhere breaks it (2026-07-27: "
+            "reported when moving FileZillaTestByClass.js out of its folder)",
+        )
+        check(
+            f"  {fname} defines _helperFile() and embeds all 9 helper scripts",
+            "function _helperFile(name)" in content
+            and all(
+                f"'{n}':" in content
+                for n in (
+                    "osWindowRect.ps1", "osMoveWindow.ps1", "osType.ps1",
+                    "osEscape.ps1", "osActivate.ps1", "osDismissPopup.ps1",
+                    "osScroll.py", "osExpandCollapse.py", "osScopedInvoke.py",
+                )
+            ),
+            "missing _helperFile() or one of the 9 embedded helper-script entries",
+        )
+        check(
             f"  {fname} clicks via _clickBySid (single _appSid, no browser.$)",
             "_clickBySid(_appSid" in content,
             "simple-mode click must resolve XPath via the raw Appium REST "
@@ -1155,6 +1190,13 @@ def step_wdio_generate_session():
         fname = f.get("filename", "")
         content = f.get("content", "")
         check_helpers_defined(fname, content)
+        check(
+            f"  {fname} is portable — no sibling os*.ps1/os*.py file dependency",
+            "join(__dirname, 'os" not in content,
+            "generated file must resolve its os*.ps1/os*.py helpers through "
+            "_helperFile(name) instead of a sibling-file join(__dirname, ...) "
+            "reference (2026-07-27)",
+        )
         check(
             f"  {fname} uses HWND-segmented window sessions",
             "getWindowSession" in content and "launchApp" in content,
@@ -1859,6 +1901,7 @@ def step_wad_boundary_intact():
             continue
         with open(path, encoding="utf-8") as fh:
             js = fh.read()
+        js = _strip_embedded_helpers(js)
         check(
             f"  {js_name} still clicks through WinAppDriver (WAD-primary intact)",
             "/element/" in js and "/click" in js,
