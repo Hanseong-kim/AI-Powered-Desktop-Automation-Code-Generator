@@ -166,6 +166,15 @@ def send_input_click(uia, el, tag):
     except Exception:
         pass
 
+    # 라벨은 반드시 주입 **전에** 읽는다. 메뉴 항목/다이얼로그 버튼은 클릭
+    # 즉시 파괴돼 그 뒤의 프로퍼티 읽기가 실패하고, 로그가 '?'로 남아 추적이
+    # 불가능해진다(2026-07-24 FileZilla 실측: 메뉴 항목/예(Y)/취소 전부 '?',
+    # 살아남는 콤보 화살표만 '닫기'로 정상 출력).
+    try:
+        label = el.CurrentName or el.CurrentAutomationId or "?"
+    except Exception:
+        label = "?"
+
     pt = clickable_point(el)
     if not pt:
         return bail("no-clickable-point")
@@ -217,10 +226,6 @@ def send_input_click(uia, el, tag):
     time.sleep(0.04)
     send(MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)
 
-    try:
-        label = el.CurrentName or el.CurrentAutomationId or "?"
-    except Exception:
-        label = "?"
     print("[COM-SendInput] " + tag + " clicked '" + label + "' at (%d,%d)" % (x, y))
     time.sleep(0.05)
     return True
@@ -341,6 +346,46 @@ def invoke_item(uia, mod, el):
     return False
 
 
+# 2026-07-24 실측(PuTTY): 콤보박스 드롭다운 화살표의 automationId는 창 안의
+# 모든 콤보가 "DropDown"으로 공유한다 — 상태 의존 Name("닫기")은 2026-07-14
+# 가드가 이미 떼어내므로 AND 조건으로 좁힐 수도 없다. FindFirst는 트리의 첫
+# 번째(= Translation 패널의 "Remote character set") 화살표만 계속 잡았고,
+# Proxy 패널 항목을 고르는 스텝 두 개가 "같은 콤보를 반복해서 여는" 증상으로
+# 실패했다(재생 로그가 매번 동일한 좌표 (1223,412)를 찍은 것이 증거).
+# PuTTY류 다이얼로그는 비활성 패널의 컨트롤을 화면에서 내리므로, 후보가
+# 여럿이면 offscreen이 아닌 것을 고른다. 여러 후보를 차례로 클릭해보는 방식은
+# 쓰지 않는다 — 실패한 후보가 드롭다운을 열어둔 채로 남아 다음 후보 클릭이
+# 그 팝업 해제에 먹히기 때문.
+def pick_trigger(uia, root, cond):
+    try:
+        arr = root.FindAll(TreeScope_Subtree, cond)
+    except Exception:
+        arr = None
+    if not arr:
+        return None
+    cands = []
+    for i in range(arr.Length):
+        try:
+            cands.append(arr.GetElement(i))
+        except Exception:
+            pass
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0]
+    visible = []
+    for c in cands:
+        try:
+            if not c.CurrentIsOffscreen:
+                visible.append(c)
+        except Exception:
+            visible.append(c)
+    print(f"[osScopedInvoke] WARN trigger selector matched {len(cands)} elements "
+          f"({len(visible)} on screen) — the automationId is reused across "
+          f"controls; picking the first on-screen one")
+    return (visible or cands)[0]
+
+
 # 2026-07-17: owned 다이얼로그(WAD가 scoped session을 거부하는 창)에 타이핑하기
 # 위한 COM 경로. 기존에는 getWindowSession()이 owned 창을 만나면 WinAppDriver
 # Root 세션 REST로 전체 데스크톱 XPath 검색을 폴백으로 썼는데, 실측(2026-07-17
@@ -349,6 +394,40 @@ def invoke_item(uia, mod, el):
 # Root 세션 자체가 모든 element 조회에 고정 비용을 갖는 것으로 보임. hwnd는
 # 이미 EnumWindows로 알고 있으므로, 같은 COM 스택(osScopedInvoke의 클릭 경로와
 # 동일)으로 즉시 타이핑하면 이 15~20초를 완전히 우회한다.
+# 2026-07-24 실측(poc/diag_filezilla_rename.py, FileZilla Site Manager):
+# "새 사이트(N)" 직후 뜨는 인라인 이름변경 상자는
+#   - 캡처 시점에는 automationId="1"로 기록되지만
+#   - 재생 시점의 라이브 요소는 automationId="" (name도 "")
+# 즉 그 id는 런타임에 변하는 값이라 셀렉터로 절대 매칭되지 않는다(ListItem
+# 슬롯 인덱스와 같은 부류). 대신 이 상자는 **나타나는 순간 항상 키보드 포커스를
+# 가진다**(인라인 rename의 정의상 그렇다) — 좌표를 쓰지 않고 이 상자를 집는
+# 가장 신뢰할 수 있는 방법이다. 타이핑 대상을 못 찾았을 때만, 그리고 포커스
+# 요소가 우리 프로세스의 입력 컨트롤일 때만 쓴다(남의 창에 타이핑 방지).
+INPUT_CONTROL_TYPES = {50004, 50030, 50003}  # Edit, Document, ComboBox
+
+
+def focused_input(uia, main_pid):
+    try:
+        el = uia.GetFocusedElement()
+    except Exception:
+        return None
+    if not el:
+        return None
+    try:
+        if el.CurrentProcessId != main_pid:
+            return None
+        if el.CurrentControlType not in INPUT_CONTROL_TYPES:
+            return None
+        aid = el.CurrentAutomationId
+        cls = el.CurrentClassName
+    except Exception:
+        return None
+    print(f"[osScopedInvoke] target not found — falling back to the focused "
+          f"input control (id='{aid}' class='{cls}'); an inline rename box "
+          f"exposes a runtime-varying AutomationId, so focus is the stable handle")
+    return el
+
+
 def type_item(uia, mod, el, text):
     ensure_visible(uia, mod, el)
     try:
@@ -421,11 +500,7 @@ def main():
         trigger_sel = json.loads(base64.b64decode(args.trigger_sel_b64).decode("utf-8"))
         trigger_cond = resolve_cond(uia, trigger_sel)
         if trigger_cond is not None:
-            trigger = None
-            try:
-                trigger = root.FindFirst(TreeScope_Subtree, trigger_cond)
-            except Exception:
-                trigger = None
+            trigger = pick_trigger(uia, root, trigger_cond)
             if trigger:
                 invoke_item(uia, mod, trigger)
             else:
@@ -449,9 +524,16 @@ def main():
     # 여유가 없었다 — _step()의 범용 Fail-and-Recover(ESC)에 기대면 이름변경
     # 상자에서 ESC가 변경 자체를 취소시켜 재시도도 함께 실패하므로(esc-recovery
     # 후 osScopedType 재실패로 실측 확인), 스크립트 자체에 짧은 재시도를 둔다.
+    # 2026-07-24 실측: FileZilla 이름변경 상자는 "새 사이트(N)" 클릭 후
+    # **2260ms**만에 나타났다(poc/diag_filezilla_rename.py) — 기존 예산
+    # 4회(~0.9초)로는 구조적으로 못 잡는다. 타이핑은 20회(~6초)까지 기다리고
+    # (REST 경로 _findScoped의 8초 폴링보다는 짧게), 클릭은 10회(~2.7초)로
+    # 둔다. _step()의 ESC 복구는 이 대상에서 오히려 해로워 이제 건너뛰므로
+    # (_escWouldHarm) 재시도 여유는 이 스크립트 안에서 확보해야 한다.
+    attempts = 20 if args.text_b64 else 10
     main_pid = wintypes.DWORD()
     user32.GetWindowThreadProcessId(main_h, ctypes.byref(main_pid))
-    for attempt in range(4):
+    for attempt in range(attempts):
         if attempt > 0:
             time.sleep(0.3)
 
@@ -494,6 +576,16 @@ def main():
                     sys.exit(0)
             except Exception:
                 continue
+
+    # 마지막 수단(타이핑 전용): 포커스를 가진 입력 컨트롤. 인라인 이름변경
+    # 상자처럼 automationId가 런타임에 변하는 대상은 셀렉터로는 영원히 못
+    # 찾지만 포커스는 항상 갖고 있다. 클릭에는 적용하지 않는다 — "포커스된
+    # 무언가를 대신 클릭"은 엉뚱한 동작을 조용히 수행할 위험이 크다.
+    if args.text_b64:
+        el = focused_input(uia, main_pid.value)
+        if el and act(el):
+            print(f"[osScopedInvoke] {verb} the focused input control")
+            sys.exit(0)
 
     print(f"osScopedInvoke: target not found under main window or any other top-level window (sel={args.sel_b64})", file=sys.stderr)
     sys.exit(2)

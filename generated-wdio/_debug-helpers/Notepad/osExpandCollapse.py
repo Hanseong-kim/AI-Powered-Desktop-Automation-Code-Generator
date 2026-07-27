@@ -138,6 +138,15 @@ def send_input_click(uia, el, tag):
     except Exception:
         pass
 
+    # 라벨은 반드시 주입 **전에** 읽는다. 메뉴 항목/다이얼로그 버튼은 클릭
+    # 즉시 파괴돼 그 뒤의 프로퍼티 읽기가 실패하고, 로그가 '?'로 남아 추적이
+    # 불가능해진다(2026-07-24 FileZilla 실측: 메뉴 항목/예(Y)/취소 전부 '?',
+    # 살아남는 콤보 화살표만 '닫기'로 정상 출력).
+    try:
+        label = el.CurrentName or el.CurrentAutomationId or "?"
+    except Exception:
+        label = "?"
+
     pt = clickable_point(el)
     if not pt:
         return bail("no-clickable-point")
@@ -189,10 +198,6 @@ def send_input_click(uia, el, tag):
     time.sleep(0.04)
     send(MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)
 
-    try:
-        label = el.CurrentName or el.CurrentAutomationId or "?"
-    except Exception:
-        label = "?"
     print("[COM-SendInput] " + tag + " clicked '" + label + "' at (%d,%d)" % (x, y))
     time.sleep(0.05)
     return True

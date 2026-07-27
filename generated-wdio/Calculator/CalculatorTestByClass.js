@@ -1142,7 +1142,7 @@ class CalculatorPageByClass {
     }
 
     async click3() {
-        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="5"]');
+        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="6"]');
     }
 
     async click4() {
@@ -1154,7 +1154,7 @@ class CalculatorPageByClass {
     }
 
     async click6() {
-        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="6"]');
+        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="8"]');
     }
 
     async click7() {
@@ -1166,55 +1166,55 @@ class CalculatorPageByClass {
     }
 
     async click9() {
-        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="나누기"]');
-    }
-
-    async click10() {
-        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="9"]');
-    }
-
-    async click11() {
-        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="8"]');
-    }
-
-    async click12() {
-        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="7"]');
-    }
-
-    async click13() {
-        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="일치"]');
-    }
-
-    async click14() {
         await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="더하기"]');
     }
 
-    async click15() {
+    async click10() {
         await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="3"]');
     }
 
-    async click16() {
+    async click11() {
+        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="2"]');
+    }
+
+    async click12() {
         await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="5"]');
     }
 
-    async click17() {
+    async click13() {
+        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="8"]');
+    }
+
+    async click14() {
+        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="9"]');
+    }
+
+    async click15() {
         await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="일치"]');
     }
 
-    async click18() {
+    async click16() {
         await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="빼기"]');
     }
 
+    async click17() {
+        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="9"]');
+    }
+
+    async click18() {
+        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="8"]');
+    }
+
     async click19() {
-        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="공"]');
+        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="5"]');
     }
 
     async click20() {
-        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="소수점 구분 기호"]');
+        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="6"]');
     }
 
     async click21() {
-        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="9"]');
+        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="3"]');
     }
 
     async click22() {
@@ -1222,22 +1222,26 @@ class CalculatorPageByClass {
     }
 
     async click23() {
-        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="더하기"]');
+        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="나누기"]');
     }
 
     async click24() {
-        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="공"]');
+        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="9"]');
     }
 
     async click25() {
-        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="소수점 구분 기호"]');
+        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="8"]');
     }
 
     async click26() {
-        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="9"]', true);
+        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="5"]');
     }
 
     async click27() {
+        await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="2"]');
+    }
+
+    async click28() {
         await _clickScoped('계산기', '//Button[@ClassName="Button" and @Name="일치"]');
     }
 }
@@ -1260,39 +1264,40 @@ async function run() {
     await ensureAppium();
     _rootSid = await _createSession('Root');
     console.log(`[session] Root session ${_rootSid} ready`);
-        await launchApp("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", [], "계산기", {"left":1182,"top":196,"width":418,"height":675});
+        await launchApp("C:\\Windows\\System32\\calc.exe", [], "계산기", {"left":1182,"top":196,"width":418,"height":675});
 
         const page = new CalculatorPageByClass();
             await _step('switch to window: 계산기', async () => { await _switchWindow('계산기'); });
             await _step('1:click 7', () => page.click1());
             await _step('2:click 8', () => page.click2());
-            await _step('3:click 5', () => page.click3());
+            await _step('3:click 6', () => page.click3());
             await _step('4:click 곱', () => page.click4());
             await _step('5:click 9', () => page.click5());
-            await _step('6:click 6', () => page.click6());
+            await _step('6:click 8', () => page.click6());
             await _step('7:click 3', () => page.click7());
             await _step('8:click 일치', () => page.click8());
-            await _step('9:click 나누기', () => page.click9());
-            await _step('10:click 9', () => page.click10());
-            await _step('11:click 8', () => page.click11());
-            await _step('12:click 7', () => page.click12());
-            await _step('13:click 일치', () => page.click13());
-            await _step('14:click 더하기', () => page.click14());
-            await _step('15:click 3', () => page.click15());
-            await _step('16:click 5', () => page.click16());
-            await _step('17:click 일치', () => page.click17());
-            await _step('18:click 빼기', () => page.click18());
-            await _step('19:click 공', () => page.click19());
-            await _step('20:click 소수점 구분 기호', () => page.click20());
-            await _step('21:click 9', () => page.click21());
+            await _step('9:click 더하기', () => page.click9());
+            await _step('10:click 3', () => page.click10());
+            await _step('11:click 2', () => page.click11());
+            await _step('12:click 5', () => page.click12());
+            await _step('13:click 8', () => page.click13());
+            await _step('14:click 9', () => page.click14());
+            await _step('15:click 일치', () => page.click15());
+            await _step('16:click 빼기', () => page.click16());
+            await _step('17:click 9', () => page.click17());
+            await _step('18:click 8', () => page.click18());
+            await _step('19:click 5', () => page.click19());
+            await _step('20:click 6', () => page.click20());
+            await _step('21:click 3', () => page.click21());
             await _step('22:click 일치', () => page.click22());
-            await _step('23:click 더하기', () => page.click23());
-            await _step('24:click 공', () => page.click24());
-            await _step('25:click 소수점 구분 기호', () => page.click25());
-            await _step('26:doubleClick 9', () => page.click26());
-            await _step('27:click 일치', () => page.click27());
-            // [STEP 28] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
-            _failures.push('28:click:no-selector');
+            await _step('23:click 나누기', () => page.click23());
+            await _step('24:click 9', () => page.click24());
+            await _step('25:click 8', () => page.click25());
+            await _step('26:click 5', () => page.click26());
+            await _step('27:click 2', () => page.click27());
+            await _step('28:click 일치', () => page.click28());
+            // [STEP 29] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
+            _failures.push('29:click:no-selector');
     } finally {
 
         for (const { sid } of Object.values(_sessionIds)) {

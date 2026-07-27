@@ -2,6 +2,7 @@ import { execSync, spawn } from 'child_process';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
+import { openSync, closeSync } from 'fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -28,6 +29,7 @@ function _warmupPowerShell() {
 // host/port from anymore.
 const _APPIUM = 'http://127.0.0.1:4723';
 let _spawnedAppium = null;
+let _appiumLogFd = null;
 // Root-session id (multi-window replay) / single-app-session id (simple
 // replay) — set once in run()'s startup, consumed everywhere below.
 let _rootSid = null;
@@ -58,7 +60,18 @@ async function ensureAppium() {
     // pre-existing latent bug shared with wdio.conf.js's identical args —
     // just never hit because nothing had actually spawned Appium with these
     // exact CLI args end-to-end this session before ensureAppium() did.
-    _spawnedAppium = spawn(process.execPath, [appiumBin, '--allow-insecure', '*:winappdriver', '--port', '4723'], { stdio: 'pipe' });
+    // stdio must NOT be 'pipe' — nothing here ever reads _spawnedAppium's
+    // stdout/stderr, and Appium logs every request/response verbosely. Once
+    // the OS pipe buffer fills, the child blocks on write() forever and the
+    // whole HTTP server goes unresponsive mid-run (2026-07-27: root cause of
+    // replays hanging/timing out at a different step every time — the
+    // threshold is cumulative log bytes, not step count). Redirect to a log
+    // file fd instead: never blocks, and doubles as the Appium-server-side
+    // log this project has repeatedly needed for post-mortems.
+    const appiumLogPath = join(__dirname, 'appium.log');
+    _appiumLogFd = openSync(appiumLogPath, 'w');
+    console.log(`[appium] logging to ${appiumLogPath}`);
+    _spawnedAppium = spawn(process.execPath, [appiumBin, '--allow-insecure', '*:winappdriver', '--port', '4723'], { stdio: ['ignore', _appiumLogFd, _appiumLogFd] });
     _spawnedAppium.on('error', (e) => console.warn('[appium] spawn error:', String(e.message || e).substring(0, 150)));
     const deadline = Date.now() + 30000;
     while (Date.now() < deadline) {
@@ -75,6 +88,10 @@ function _killSpawnedAppium() {
     if (_spawnedAppium) {
         try { _spawnedAppium.kill(); } catch {}
         _spawnedAppium = null;
+    }
+    if (_appiumLogFd !== null) {
+        try { closeSync(_appiumLogFd); } catch {}
+        _appiumLogFd = null;
     }
 }
 
@@ -135,7 +152,23 @@ async function _isSessionAlive(sid) {
 // 셀렉터로 요소를 찾아 element id를 돌려준다 — 좌표 산출 없음 (2026-07-10
 // 좌표 실행 금지). sid/rootElId만 받는 일반형이라 세션 모드(title-keyed
 // 캐시)와 simple 모드(단일 _appSid) 양쪽에서 그대로 재사용된다.
+// 세션이 응답 불능이 됐을 때 남은 스텝마다 20초씩 더 태우지 않기 위한 게이트.
+// 2026-07-24 Calculator 실측: STEP 19부터 모든 element 조회가 20초 타임아웃
+// (not-found 아님)으로 끝났고, 같은 시점에 독립 COM UIA 클라이언트는 동일한
+// 버튼(num8Button)을 46ms만에 찾았다 — 앱은 멀쩡하고 WinAppDriver 세션만 죽은
+// 상태다. 그런데도 재생은 남은 6스텝 × 2회 × 20초 = 약 4분을 더 기다린 뒤에야
+// 끝났고, 로그에는 "왜"에 대한 단서가 없었다. 연속 타임아웃이 임계치를 넘으면
+// 세션을 죽은 것으로 확정하고 이후 조회를 즉시 실패시킨다(거짓 PASS 없이,
+// 원인은 그대로 드러낸 채 빠르게 끝난다).
+let _sessionDead = false;
+let _consecutiveTimeouts = 0;
+const _SESSION_DEAD_AFTER = 3;
+
 async function _findElement(sid, rootElId, selector) {
+    if (_sessionDead) {
+        _failures.push('session-unresponsive:' + String(selector).substring(0, 60));
+        return null;
+    }
     try {
         const raw = selector.replace(/^['"]|['"]$/g, '');
         const using = raw.startsWith('~') ? 'accessibility id' : 'xpath';
@@ -144,10 +177,26 @@ async function _findElement(sid, rootElId, selector) {
             ? `/session/${sid}/element/${rootElId}/element`
             : `/session/${sid}/element`;
         const el = await _appiumPost(path, { using, value });
+        _consecutiveTimeouts = 0;
         if (!el) return null;
         return el.ELEMENT || el['element-6066-11e4-a52e-4f735466cecf'] || null;
     } catch (e) {
-        console.warn('[findElement] lookup failed:', String(e.message || e).substring(0, 120));
+        const msg = String(e.message || e);
+        console.warn('[findElement] lookup failed:', msg.substring(0, 120));
+        if (msg.includes('timed out after')) {
+            _consecutiveTimeouts += 1;
+            if (_consecutiveTimeouts >= _SESSION_DEAD_AFTER) {
+                _sessionDead = true;
+                console.error(
+                    `[session] ${_consecutiveTimeouts} consecutive element lookups timed out — ` +
+                    'treating the WinAppDriver session as unresponsive and failing the ' +
+                    'remaining steps immediately instead of waiting 20s each. The app ' +
+                    'itself may well be fine: run poc/diag_calc_alive.py against it to ' +
+                    'tell "app died" from "driver died".');
+            }
+        } else {
+            _consecutiveTimeouts = 0;
+        }
         return null;
     }
 }
@@ -184,6 +233,38 @@ async function _typeScoped(sid, rootElId, selector, text) {
         await _appiumPost(`/session/${sid}/element/${elId}/value`, { text });
         return true;
     } catch (e) { console.warn('[type] scoped sendKeys failed:', String(e.message || e).substring(0, 100)); return false; }
+}
+
+// _step()의 ESC 복구가 오히려 재시도를 망치는 스텝 종류를 가려낸다.
+// 2026-07-24 FileZilla 실측: "새 사이트(N)" 직후의 인라인 이름변경 상자에
+// 타이핑하는 스텝이 1차 실패 → ESC 복구 → 2차 실패로 끝났는데, 이름변경
+// 상자에서 ESC는 이름변경 자체를 취소하므로 2차 시도는 구조적으로 실패가
+// 보장된다(이 현상 자체는 2026-07-17에 osScopedInvoke.py 주석으로 이미
+// 기록돼 있었으나 정작 _step()에는 반영돼 있지 않았다). 팝업 해제 스캔은
+// 그대로 두고 ESC만 건너뛴다.
+function _escWouldHarm(label) {
+    return /^\d+:type\b/.test(label);
+}
+
+// Current foreground window handle (user32!GetForegroundWindow via a base64
+// -EncodedCommand — no quote-escaping, read-only). _step() uses it to decide
+// whether an ESC would land on a real popup or on the main dialog itself.
+// 2026-07-27: moved here from SIMPLE_HEADER — SESSION_HEADER's _step() calls
+// this too (2026-07-24 parity fix) but the definition itself never followed,
+// leaving session-mode output with a call site and no definition (same
+// pattern as the 2026-07-16 osExpandCollapse "Bug D").
+function osForegroundHwnd() {
+    try {
+        const out = execSync(
+            `powershell -NoProfile -EncodedCommand QQBkAGQALQBUAHkAcABlACAAQAAiAAoAdQBzAGkAbgBnACAAUwB5AHMAdABlAG0AOwAKAHUAcwBpAG4AZwAgAFMAeQBzAHQAZQBtAC4AUgB1AG4AdABpAG0AZQAuAEkAbgB0AGUAcgBvAHAAUwBlAHIAdgBpAGMAZQBzADsACgBwAHUAYgBsAGkAYwAgAGMAbABhAHMAcwAgAEYAZwAgAHsAIABbAEQAbABsAEkAbQBwAG8AcgB0ACgAIgB1AHMAZQByADMAMgAuAGQAbABsACIAKQBdACAAcAB1AGIAbABpAGMAIABzAHQAYQB0AGkAYwAgAGUAeAB0AGUAcgBuACAASQBuAHQAUAB0AHIAIABHAGUAdABGAG8AcgBlAGcAcgBvAHUAbgBkAFcAaQBuAGQAbwB3ACgAKQA7ACAAfQAKACIAQAAgAC0ARQByAHIAbwByAEEAYwB0AGkAbwBuACAAUwBpAGwAZQBuAHQAbAB5AEMAbwBuAHQAaQBuAHUAZQAKAFsARgBnAF0AOgA6AEcAZQB0AEYAbwByAGUAZwByAG8AdQBuAGQAVwBpAG4AZABvAHcAKAApAC4AVABvAEkAbgB0ADYANAAoACkA`,
+            { stdio: 'pipe', timeout: 15000 }
+        ).toString().trim();
+        const m = out.match(/-?\d+/);
+        return m ? (parseInt(m[0], 10) || 0) : 0;
+    } catch (e) {
+        console.warn('[osForegroundHwnd] failed:', String(e.message || e).substring(0, 100));
+        return 0;
+    }
 }
 
 // 프로그래매틱 스크롤 — osScroll.py가 대상 창 hwnd 아래에서 녹화된 컨테이너를
@@ -1001,10 +1082,22 @@ async function _step(label, fn) {
     const dismissed = osDismissPopup();
     if (dismissed) {
         _warnings.push('popup-dismissed:' + label);
+    } else if (_escWouldHarm(label)) {
+        _warnings.push('esc-skipped:' + label);
     } else {
-        osActivate('', _hwndCache[_mainTitleFrag]);
-        osEscape();
-        _warnings.push('esc-recovery:' + label);
+        // 2026-07-24 parity fix: SIMPLE_HEADER got the foreground guard on
+        // 2026-07-14 (RC-C) but this copy kept the unconditional
+        // osActivate('')+ESC — the very pattern that closed PuTTY every time.
+        // Only ESC when a DIFFERENT top-level window (a real popup) holds the
+        // foreground; our own main window has nothing to dismiss.
+        const mainHwnd = _hwndCache[_mainTitleFrag];
+        const fg = osForegroundHwnd();
+        if (mainHwnd && fg === mainHwnd) {
+            _warnings.push('esc-skipped-main-foreground:' + label);
+        } else {
+            osEscape();
+            _warnings.push('esc-recovery:' + label);
+        }
     }
     _failures.length = before;
     await fn();
@@ -1013,19 +1106,22 @@ async function _step(label, fn) {
 // Windows in this recording:
 //   [W1] "FileZilla" (main)
 //   [W2] "사이트 관리자" (opened during recording)
-//   [W3] "사이트 관리자 항목 삭제" (opened during recording)
-//   [W4] "사이트 관리자" (opened during recording)
+//   [W3] "새 북마크" (opened during recording)
 
 class FileZillaPageByClass {
-    async click2() {
+
+    // ════════════════════════════════════════════════════════════
+    // [W1] FileZilla (main window)
+    // ════════════════════════════════════════════════════════════
+    async click1() {
         osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"파일(F)"}, null);
     }
 
-    async click3() {
+    async click2() {
         osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"편집(E)"}, null);
     }
 
-    async click4() {
+    async click3() {
         osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"파일(F)"}, "사이트 관리자(S)...\tCtrl+S");
     }
 
@@ -1033,37 +1129,66 @@ class FileZillaPageByClass {
     // ════════════════════════════════════════════════════════════
     // [W2] 사이트 관리자 (new window)
     // ════════════════════════════════════════════════════════════
-    async click5() {
-        await _clickScoped('사이트 관리자', '//Button[@ClassName="Button" and @Name="새 사이트(N)"]');
+    async click4() {
+        await _clickScoped('사이트 관리자', '//Button[@ClassName="Button" and @Name="새 폴더(F)"]');
     }
 
-    async type6(value) {
+    async type5(value) {
         const ok = await _typeScopedOrCom('사이트 관리자', '~1', value);
         if (!ok) {
-            console.warn('[type6] scoped sendKeys failed — falling back to OS-level typing');
+            console.warn('[type5] scoped sendKeys failed — falling back to OS-level typing');
             osActivate('사이트 관리자', _hwndCache['사이트 관리자']);
             osType(value);
         }
     }
 
-    async click7() {
-        await _clickScoped('사이트 관리자', '//Button[@ClassName="Button" and @Name="삭제(D)"]');
+    async click6() {
+        await _clickScoped('사이트 관리자', '//Button[@ClassName="Button" and @Name="새 사이트(N)"]');
     }
 
+    async type7(value) {
+        const ok = await _typeScopedOrCom('사이트 관리자', '~1', value);
+        if (!ok) {
+            console.warn('[type7] scoped sendKeys failed — falling back to OS-level typing');
+            osActivate('사이트 관리자', _hwndCache['사이트 관리자']);
+            osType(value);
+        }
+    }
 
-    // ════════════════════════════════════════════════════════════
-    // [W3] 사이트 관리자 항목 삭제 (new window)
-    // ════════════════════════════════════════════════════════════
     async click8() {
-        await _clickScoped('사이트 관리자 항목 삭제', '//Button[@ClassName="Button" and @Name="예(Y)"]');
+        await _clickScoped('사이트 관리자', '//Button[@ClassName="Button" and @Name="취소"]');
+    }
+
+    async click9() {
+        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"북마크(B)"}, "북마크 추가(A)...\tCtrl+B");
     }
 
 
     // ════════════════════════════════════════════════════════════
-    // [W4] 사이트 관리자 (new window)
+    // [W3] 새 북마크 (new window)
     // ════════════════════════════════════════════════════════════
-    async click9() {
-        await _clickScoped('사이트 관리자', '//Button[@ClassName="Button" and @Name="취소"]');
+    async click10() {
+        await _clickScoped('새 북마크', '//CheckBox[@ClassName="Button" and @Name="탐색 동기화 사용(S)"]');
+    }
+
+    async click11() {
+        await _clickScoped('새 북마크', '//CheckBox[@ClassName="Button" and @Name="디렉터리 비교(I)"]');
+    }
+
+    async click12() {
+        await _clickScoped('새 북마크', '//CheckBox[@ClassName="Button" and @Name="탐색 동기화 사용(S)"]', true);
+    }
+
+    async click13() {
+        await _clickScoped('새 북마크', '//Group[@ClassName="Button" and @Name="경로"]');
+    }
+
+    async click14() {
+        await _clickScoped('새 북마크', '//CheckBox[@ClassName="Button" and @Name="디렉터리 비교(I)"]');
+    }
+
+    async click15() {
+        await _clickScoped('새 북마크', '//Button[@ClassName="Button" and @Name="취소"]');
     }
 }
 
@@ -1081,7 +1206,7 @@ async function run() {
         _warmupPowerShell();
 
     _mainTitleFrag = "FileZilla";
-    _dialogRects = {"FileZilla":{"left":510,"top":74,"width":1200,"height":947},"사이트 관리자":{"left":519,"top":228,"width":1182,"height":639},"사이트 관리자 항목 삭제":{"left":950,"top":472,"width":320,"height":151}};
+    _dialogRects = {"FileZilla":{"left":510,"top":74,"width":1200,"height":947},"사이트 관리자":{"left":519,"top":228,"width":1182,"height":639},"새 북마크":{"left":890,"top":355,"width":440,"height":385}};
     await ensureAppium();
     _rootSid = await _createSession('Root');
     console.log(`[session] Root session ${_rootSid} ready`);
@@ -1092,30 +1217,31 @@ async function run() {
     // ════════════════════════════════════════════════════════════
     // [W1] FileZilla (main window)
     // ════════════════════════════════════════════════════════════
-            // [STEP 1] drag scope-out — replay skipped (event scope: Click/Type/DoubleClick/Scroll, 2026-07-10)
-            await _step('2:expandCollapse 파일(F)', () => page.click2());
-            await _step('3:expandCollapse 편집(E)', () => page.click3());
-            await _step('4:expandCollapse 파일(F) -> 사이트 관리자(S)...\tCtrl+S', () => page.click4());
+            await _step('1:expandCollapse 파일(F)', () => page.click1());
+            await _step('2:expandCollapse 편집(E)', () => page.click2());
+            await _step('3:expandCollapse 파일(F) -> 사이트 관리자(S)...\tCtrl+S', () => page.click3());
 
     // ════════════════════════════════════════════════════════════
     // [W2] 사이트 관리자 (new window)
     // ════════════════════════════════════════════════════════════
             await _step('switch to window: 사이트 관리자', async () => { await _switchWindow('사이트 관리자'); });
-            await _step('5:click 새 사이트(N)', () => page.click5());
-            await _step('6:type asdf\n', () => page.type6('asdf\n'));
-            await _step('7:click 삭제(D)', () => page.click7());
+            await _step('4:click 새 폴더(F)', () => page.click4());
+            await _step('5:type asdf\n', () => page.type5('asdf\n'));
+            await _step('6:click 새 사이트(N)', () => page.click6());
+            await _step('7:type asdf\n', () => page.type7('asdf\n'));
+            await _step('8:click 취소', () => page.click8());
+            await _step('9:expandCollapse 북마크(B) -> 북마크 추가(A)...\tCtrl+B', () => page.click9());
 
     // ════════════════════════════════════════════════════════════
-    // [W3] 사이트 관리자 항목 삭제 (new window)
+    // [W3] 새 북마크 (new window)
     // ════════════════════════════════════════════════════════════
-            await _step('switch to window: 사이트 관리자 항목 삭제', async () => { await _switchWindow('사이트 관리자 항목 삭제'); });
-            await _step('8:click 예(Y)', () => page.click8());
-
-    // ════════════════════════════════════════════════════════════
-    // [W4] 사이트 관리자 (new window)
-    // ════════════════════════════════════════════════════════════
-            await _step('switch to window: 사이트 관리자', async () => { await _switchWindow('사이트 관리자'); });
-            await _step('9:click 취소', () => page.click9());
+            await _step('switch to window: 새 북마크', async () => { await _switchWindow('새 북마크'); });
+            await _step('10:click 탐색 동기화 사용(S)', () => page.click10());
+            await _step('11:click 디렉터리 비교(I)', () => page.click11());
+            await _step('12:doubleClick 탐색 동기화 사용(S)', () => page.click12());
+            await _step('13:click 경로', () => page.click13());
+            await _step('14:click 디렉터리 비교(I)', () => page.click14());
+            await _step('15:click 취소', () => page.click15());
     } finally {
 
         for (const { sid } of Object.values(_sessionIds)) {
