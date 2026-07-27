@@ -70,8 +70,18 @@ All UIA/COM runs on the worker thread after `CoInitialize`.
 - **Documentation honesty**: never write GUI-unverified work as "DONE" in docs.
 - **`generated-wdio/*` 직접 편집 금지**: 매 Generate 호출마다 덮어써지는 산출물이므로
   수정은 항상 `server/server.js`/`agent/agent.py` 원본에서.
-- **좌표 기반 실행 금지 (2026-07-10 스테이크홀더 지시)**: `osClick(x,y)`/`osClickRel` 등
-  좌표 재생은 폴백으로도 사용 금지. 100% AutomationId/ClassName 기반 동적 XPath.
+- **좌표 기반 실행 금지 (2026-07-10 스테이크홀더 지시, 2026-07-24 재정의)**:
+  `osClick(x,y)`/`osClickRel` 등 좌표 재생은 폴백으로도 사용 금지. 100%
+  AutomationId/ClassName 기반 동적 XPath.
+  **2026-07-24 재정의 — 금지 대상은 "스크립트/JSON에 하드코딩되어 저장된 static
+  좌표"다.** 런타임에 XPath/AutomationId로 요소를 resolve한 뒤 UIA가 계산하는
+  **dynamic ClickablePoint + SendInput**은 §3 위반이 아니라 정상적인 input
+  emulation으로 인정된다(WAD `element/click`의 내부 동작을 모방하는 방식). 단
+  **WAD가 붙지 못하는 COM 예외 구간 한정**(owned 다이얼로그/네이티브 팝업 —
+  `COM_INPUT_PY`의 `send_input_click()`), 안전 검증(offscreen/WindowFromPoint
+  PID/ElementFromPoint 왕복) 실패 시 기존 `Invoke()`/`Select()`로 폴백, 로그에
+  `[COM-SendInput]` 표시 필수. 좌표가 재생 코드/캡처 JSON에 저장되지 않는다는
+  불변식은 그대로다 — 매 실행마다 새로 계산해 즉시 소비하고 버린다.
   유니크 ID가 없는 요소는 ID를 가진 이웃 anchor 요소 기준 relative XPath로 해결.
   **재생 경로는 2026-07-11 마이그레이션 완료** (코드 레벨 — GUI 재검증은 §4 Next
   actions). 캡처의 x/y는 dedupe/진단용으로만 유지되고 재생 코드에는 절대 안 나간다.
