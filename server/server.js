@@ -2293,7 +2293,20 @@ let _helperDir = null;
 function _helperFile(name) {
     if (!_helperDir) _helperDir = mkdtempSync(join(tmpdir(), 'qaforge-helpers-'));
     const p = join(_helperDir, name);
-    if (!existsSync(p)) writeFileSync(p, _H[name], 'utf8');
+    if (!existsSync(p)) {
+        // powershell -File reads a BOM-less file as the system ANSI codepage
+        // (CP949 here), not UTF-8 — which mangles osDismissPopup.ps1's Korean
+        // button names ('취소'/'아니요'/'닫기'/'확인'/'예') into mojibake and
+        // breaks the PS parser outright with UnexpectedToken. saveFiles() has
+        // prepended a BOM for exactly this reason since 2026-07-08; this
+        // extraction path must do the same or the popup Fail-and-Recover
+        // mechanism silently dies (confirmed 2026-07-27 by reproducing the
+        // same parse error against a temp-extracted copy).
+        const body = name.endsWith('.ps1') && !_H[name].startsWith('\\ufeff')
+            ? '\\ufeff' + _H[name]
+            : _H[name];
+        writeFileSync(p, body, 'utf8');
+    }
     return p;
 }
 

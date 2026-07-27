@@ -715,6 +715,21 @@ def step_wdio_generate():
             ),
             "missing _helperFile() or one of the 9 embedded helper-script entries",
         )
+        # 2026-07-27: saveFiles() has prepended a UTF-8 BOM to .ps1 files since
+        # 2026-07-08 because `powershell -File` reads a BOM-less file as the
+        # system ANSI codepage (CP949), mangling osDismissPopup.ps1's Korean
+        # button names and killing the PS parser outright. The new temp-
+        # extraction path (_helperFile) initially wrote plain utf8 and silently
+        # broke the whole popup Fail-and-Recover mechanism — reproduced against
+        # a real temp copy before fixing. Guard the extraction path too.
+        check(
+            f"  {fname} writes extracted .ps1 helpers with a UTF-8 BOM",
+            "\\ufeff" in content and ".endsWith('.ps1')" in content,
+            "_helperFile() must prepend a BOM for .ps1 files — without it "
+            "powershell reads them as CP949 and osDismissPopup.ps1's Korean "
+            "button names ('취소'/'아니요'/'닫기') become mojibake that fails "
+            "to parse, disabling popup recovery with only a warning in the log",
+        )
         check(
             f"  {fname} clicks via _clickBySid (single _appSid, no browser.$)",
             "_clickBySid(_appSid" in content,
