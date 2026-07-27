@@ -680,6 +680,28 @@ def top_window_at(x, y):
         return 0
 
 
+def tracked_window_containing(x, y, hwnds):
+    """First tracked hwnd whose window rect contains the screen point.
+
+    Used only as a contradiction detector: if top_window_at() says the point
+    belongs to a foreign window while the point is geometrically inside a
+    window we are actively recording, the two disagree and the event must not
+    be dropped silently (2026-07-24 PuTTY: the click that switched to the
+    Proxy panel vanished from the capture with no warning, so the generated
+    test simply had no panel-switch step and every later step failed).
+    """
+    for h in list(hwnds or []):
+        try:
+            if not win32gui.IsWindowVisible(h):
+                continue
+            left, top, right, bottom = win32gui.GetWindowRect(h)
+        except Exception:
+            continue
+        if left <= x < right and top <= y < bottom:
+            return h
+    return 0
+
+
 def foreground_top_window():
     try:
         fg = ctypes.windll.user32.GetForegroundWindow()
@@ -1639,6 +1661,7 @@ class Recorder:
         # foreground window being the target at capture time.
         if action != "type" and x is not None:
             top = top_window_at(x, y)
+            contradiction = False
 
             # UWP lazy frame adoption: the ApplicationFrameWindow that input
             # actually routes to is owned by ApplicationFrameHost.exe (a
@@ -1690,17 +1713,52 @@ class Recorder:
                         f"title='{win32gui.GetWindowText(top)}' — accepted "
                         "before known-other-window gate")
                 else:
-                    log(f"[skip] {action} known-other-window top={top} "
-                        f"title='{win32gui.GetWindowText(top)}' x={x} y={y}")
-                    if not self._probed_skip:
-                        self._probed_skip = True
-                        probe_window("clickwin", top)
-                    return
+                    # 2026-07-24 (PuTTY): the point can be geometrically INSIDE
+                    # a window we are recording while top_window_at() names a
+                    # foreign one. Dropping such an event silently deletes a
+                    # real user action from the capture — the generated test
+                    # then looks complete but skips, say, the click that
+                    # switched dialog panels, and every later step fails for
+                    # reasons nothing in the output explains. Keep the event,
+                    # but blank the selector: the element we hit-tested belongs
+                    # to the OTHER window, so replaying it would click a
+                    # stranger's UI. A selector-less event becomes an explicit
+                    # FAIL step in codegen (same treatment as light-dismiss
+                    # loss), which is the honest outcome.
+                    inside = tracked_window_containing(x, y, self.target_hwnds)
+                    if inside:
+                        try:
+                            rect = win32gui.GetWindowRect(inside)
+                        except Exception:
+                            rect = None
+                        log(f"[skip-contradiction] {action} at ({x},{y}) is INSIDE "
+                            f"tracked window hwnd={inside} rect={rect}, but "
+                            f"top_window_at returned {top} "
+                            f"title='{win32gui.GetWindowText(top)}' "
+                            f"(fg={foreground_top_window()}, elem_rect={elem.get('rect')}) "
+                            "— emitting a no-selector FAIL step instead of "
+                            "dropping the event")
+                        elem = dict(elem)
+                        elem["automationId"] = ""
+                        elem["name"] = ""
+                        elem["className"] = ""
+                        contradiction = True
+                    else:
+                        log(f"[skip] {action} known-other-window top={top} "
+                            f"title='{win32gui.GetWindowText(top)}' x={x} y={y}")
+                        if not self._probed_skip:
+                            self._probed_skip = True
+                            probe_window("clickwin", top)
+                        return
             # Accept if the point is over a target window OR the target app is
             # foreground. The OR covers UWP (CoreWindow GA_ROOT != tracked
             # ApplicationFrameWindow, so point matching alone fails) and the
             # first click that raises a background target window.
-            if not (self._point_is_target(x, y) or self._foreground_is_target()):
+            # `contradiction` already established that the point is inside a
+            # tracked window — this pointer-based check uses the same
+            # top_window_at() that just disagreed, so letting it drop the event
+            # here would undo the branch above.
+            if not (contradiction or self._point_is_target(x, y) or self._foreground_is_target()):
                 log(f"[skip] {action} top={top_window_at(x, y)} "
                     f"fg={foreground_top_window()} x={x} y={y} — not target app")
                 return

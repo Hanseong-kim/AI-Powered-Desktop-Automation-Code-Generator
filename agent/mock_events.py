@@ -14,6 +14,7 @@ always runs, no API key or environment variable needed.
 import io
 import json
 import os
+import py_compile
 import sys
 import time
 
@@ -24,7 +25,14 @@ import urllib.error
 import urllib.request
 
 BASE = "http://localhost:3002"
-APP_NAME = "Calculator"
+# NOTE: deliberately NOT "Calculator". The regression gate calls /api/generate
+# without an exePath, so whatever folder it writes to gets overwritten with a
+# synthetic, exePath-less build. Using the real preset's name meant a routine
+# `python agent/mock_events.py` run silently clobbered generated-wdio/Calculator
+# (real capture -> `Capability: app cannot be empty` at replay time, diagnosed
+# 2026-07-24). Every scenario in this file must own an output folder that no
+# real recording preset uses, and that folder must be gitignored.
+APP_NAME = "MockCalculator"
 PLATFORM = "Windows"
 
 PASS = "\033[32mPASS\033[0m"
@@ -40,6 +48,32 @@ def check(label, ok, detail=""):
         line += f"  ({detail})"
     print(line)
     _results.append(ok)
+
+
+import re
+
+# 2026-07-27: generalized regression gate for the "call site added, definition
+# never followed" class of bug (osExpandCollapse 2026-07-16 "Bug D",
+# osForegroundHwnd 2026-07-27 — both times a helper got called from one
+# header/branch but only ever defined in the other). Rather than adding one
+# more one-off symbol check each time this recurs, verify EVERY self-defined
+# helper the generated file calls (os*/_* names) actually has a definition
+# somewhere in the same file.
+_CALL_SITE_RE = re.compile(r"(?<![.\w$])((?:os[A-Z]\w*)|(?:_[A-Za-z]\w*))\s*\(")
+_DEF_RE = re.compile(r"(?:function\s+([A-Za-z_]\w*)\s*\(|(?:const|let)\s+([A-Za-z_]\w*)\s*=)")
+
+
+def check_helpers_defined(fname, content):
+    called = set(_CALL_SITE_RE.findall(content))
+    defined = set()
+    for a, b in _DEF_RE.findall(content):
+        defined.add(a or b)
+    missing = sorted(n for n in called if n not in defined)
+    check(
+        f"  {fname} has no undefined helper call sites",
+        not missing,
+        f"called but never defined in this file: {missing}" if missing else "",
+    )
 
 
 def request(method, path, body=None, timeout=8):
@@ -618,6 +652,7 @@ def step_wdio_generate():
         content = f.get("content", "")
         check(f"  {fname} ends with .js", fname.endswith(".js"), f"got '{fname}'")
         check(f"  {fname} has content", bool(content.strip()))
+        check_helpers_defined(fname, content)
         check(
             f"  {fname} clicks via _clickBySid (single _appSid, no browser.$)",
             "_clickBySid(_appSid" in content,
@@ -1119,6 +1154,7 @@ def step_wdio_generate_session():
     for f in files:
         fname = f.get("filename", "")
         content = f.get("content", "")
+        check_helpers_defined(fname, content)
         check(
             f"  {fname} uses HWND-segmented window sessions",
             "getWindowSession" in content and "launchApp" in content,
@@ -1633,12 +1669,269 @@ def step_delete_event():
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+def step_com_sendinput_helpers():
+    """COM 예외 구간의 시각적 클릭 재생 (2026-07-24, dynamic ClickablePoint + SendInput).
+
+    WAD가 붙지 못하는 owned 다이얼로그/네이티브 팝업에서 순수 COM
+    InvokePattern.Invoke()는 커서 이동도 눌림 효과도 없어 "사람이 보면서
+    재생을 확인할 수 있어야 한다"(§6)를 구조적으로 못 채웠다. send_input_click()이
+    그 구간 앞에 붙되, (a) 기존 프로그래매틱 폴백을 대체하지 않고, (b) WAD가
+    담당하는 메인 경로는 건드리지 않는다는 것이 이 체크의 요지.
+    """
+    print("\n[11] COM-exception clicks replay visibly (dynamic ClickablePoint + SendInput)")
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out_dir = os.path.join(repo_root, "generated-wdio", APP_NAME)
+
+    for py_name in ("osScopedInvoke.py", "osExpandCollapse.py"):
+        path = os.path.join(out_dir, py_name)
+        if not os.path.exists(path):
+            check(f"  {py_name} generated", False, f"missing at {path}")
+            continue
+        with open(path, encoding="utf-8") as fh:
+            src = fh.read()
+
+        try:
+            py_compile.compile(path, doraise=True)
+            check(f"  {py_name} compiles", True)
+        except Exception as e:
+            check(f"  {py_name} compiles", False, str(e))
+
+        # 정의와 호출부를 각각 확인한다 — 2026-07-16 버그 D(호출부만 있고
+        # SESSION_HEADER에 정의가 없어 ReferenceError)의 교훈.
+        check(
+            f"  {py_name} defines send_input_click()",
+            "def send_input_click(" in src,
+            "the shared COM_INPUT_PY snippet was not interpolated into this template",
+        )
+        check(
+            f"  {py_name} calls send_input_click() from invoke_item()",
+            "if send_input_click(uia, el," in src,
+            "the helper is defined but never wired into the click path — clicks "
+            "in the COM exception window would stay invisible (§6)",
+        )
+        check(
+            f"  {py_name} injects real input (SendInput + dynamic ClickablePoint)",
+            "SendInput" in src and "GetClickablePoint" in src,
+            "visible replay requires actual input injection at the point UIA "
+            "computes at runtime, not a programmatic pattern call",
+        )
+        check(
+            f"  {py_name} raises DPI awareness before resolving points",
+            "SetProcessDpiAwarenessContext" in src and "enable_per_monitor_dpi()" in src,
+            "a DPI-unaware python process gets virtualized UIA rects while "
+            "SendInput absolute coords are physical pixels — the two disagree "
+            "on any scaled display (agent.py:_enable_per_monitor_dpi_awareness)",
+        )
+        check(
+            f"  {py_name} verifies the point belongs to the target before injecting",
+            "WindowFromPoint" in src and "ElementFromPoint" in src,
+            "without the hit-test round-trip, a covered/stale point clicks "
+            "whatever happens to be there — exactly the 2026-07-15 accident "
+            "(clicked the user's own Explorer window and reported success)",
+        )
+        check(
+            f"  {py_name} keeps the programmatic fallback chain intact",
+            "IUIAutomationInvokePattern" in src
+            and "IUIAutomationSelectionItemPattern" in src
+            and "IUIAutomationLegacyIAccessiblePattern" in src,
+            "SendInput must sit IN FRONT OF the existing chain, not replace it "
+            "— when the safety checks fail the step must still work, just "
+            "invisibly (2026-07-24 stakeholder instruction)",
+        )
+        check(
+            f"  {py_name} tags the exception path in the execution log",
+            "[COM-SendInput]" in src,
+            "runs that left the WAD boundary must be traceable in the log",
+        )
+        # 2026-07-24 FileZilla 실측: 메뉴 항목/다이얼로그 버튼은 클릭 즉시
+        # 파괴돼, 주입 후에 Name을 읽으면 로그가 전부 '?'로 남는다.
+        label_at = src.find("label = el.CurrentName")
+        send_at = src.find("MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE")
+        check(
+            f"  {py_name} reads the log label BEFORE injecting input",
+            label_at != -1 and send_at != -1 and label_at < send_at,
+            "the clicked element is often destroyed by its own click (menu "
+            "item, dialog button) — reading its Name afterwards logs '?' and "
+            "destroys the traceability the exception path exists to provide",
+        )
+
+    path = os.path.join(out_dir, "osScopedInvoke.py")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            src = fh.read()
+        check(
+            "  osScopedInvoke.py disambiguates a reused trigger AutomationId",
+            "def pick_trigger(" in src and "FindAll" in src
+            and "pick_trigger(uia, root, trigger_cond)" in src,
+            "PuTTY gives every ComboBox dropdown arrow the same "
+            "automationId='DropDown' and its Name is state-dependent (dropped "
+            "by the 2026-07-14 guard), so FindFirst always re-opened the FIRST "
+            "combo — two Proxy-panel steps failed while the log showed the "
+            "same coordinates every time (2026-07-24)",
+        )
+        check(
+            "  osScopedInvoke.py retry budget covers a slow inline rename box",
+            "attempts = 20 if args.text_b64 else 10" in src,
+            "measured 2026-07-24 (poc/diag_filezilla_rename.py): FileZilla's "
+            "inline rename box appears 2260ms after the '새 사이트(N)' click, so "
+            "the old 4-attempt (~0.9s) budget could never see it; typing now "
+            "waits ~6s while clicks stay at ~2.7s",
+        )
+        check(
+            "  osScopedInvoke.py falls back to the focused input when typing",
+            "def focused_input(" in src and "focused_input(uia, main_pid.value)" in src,
+            "the rename box is captured with automationId='1' but exposes an "
+            "EMPTY automationId at replay time (measured) — no selector can "
+            "ever match it; it always holds keyboard focus, which is the only "
+            "stable, coordinate-free handle on it",
+        )
+        check(
+            "  osScopedInvoke.py restricts that fallback to typing and to our PID",
+            "if args.text_b64:\n        el = focused_input" in src
+            and "el.CurrentProcessId != main_pid" in src,
+            "clicking 'whatever has focus' would silently perform the wrong "
+            "action, and typing into another process's focused control would "
+            "leak keystrokes out of the app under test",
+        )
+
+
+def step_esc_recovery_guards():
+    """ESC 복구가 스스로 재시도를 망치지 않아야 한다 (2026-07-24).
+
+    FileZilla 인라인 이름변경 상자에서 ESC는 이름변경 자체를 취소하므로,
+    type 스텝의 Fail-and-Recover가 ESC를 보내면 2차 시도는 실패가 보장된다.
+    또한 SESSION_HEADER의 _step()은 2026-07-14 RC-C 수정(전경 창 가드)이
+    SIMPLE_HEADER에만 적용돼 무조건 osActivate+ESC를 보내고 있었다.
+    """
+    print("\n[12] _step() ESC recovery guards (type steps / session-mode parity)")
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    targets = [
+        (APP_NAME, f"{APP_NAME}TestById.js", "simple"),
+        (SESSION_APP, f"{SESSION_APP}TestById.js", "session"),
+    ]
+    for app, js_name, mode in targets:
+        path = os.path.join(repo_root, "generated-wdio", app, js_name)
+        if not os.path.exists(path):
+            check(f"  {js_name} generated", False, f"missing at {path}")
+            continue
+        with open(path, encoding="utf-8") as fh:
+            js = fh.read()
+        # 정의부와 호출부를 각각 확인 — 2026-07-16 버그 D 교훈
+        check(
+            f"  [{mode}] defines _escWouldHarm()",
+            "function _escWouldHarm(label)" in js,
+            "the shared preamble helper is missing from this header",
+        )
+        check(
+            f"  [{mode}] _step() actually consults it",
+            "_escWouldHarm(label)" in js and "esc-skipped:" in js,
+            "defining the guard without calling it leaves the ESC that "
+            "cancels an inline rename in place",
+        )
+        check(
+            f"  [{mode}] never sends ESC while our own window is foreground",
+            "esc-skipped-main-foreground:" in js,
+            "an unconditional ESC on a dialog-based main window (PuTTY "
+            "Configuration) means ESC == Cancel == app closed; the session "
+            "header kept doing this until 2026-07-24",
+        )
+    session_js = os.path.join(repo_root, "generated-wdio", SESSION_APP,
+                              f"{SESSION_APP}TestById.js")
+    if os.path.exists(session_js):
+        with open(session_js, encoding="utf-8") as fh:
+            js = fh.read()
+        check(
+            "  [session] no longer force-activates the main window before ESC",
+            "osActivate('', _hwndCache[_mainTitleFrag]);\n        osEscape();" not in js,
+            "raising the main dialog to the foreground and THEN sending ESC is "
+            "exactly what closed PuTTY on every failed step (2026-07-14 RC-C)",
+        )
+
+def step_wad_boundary_intact():
+    """WAD-primary 경계는 그대로여야 한다 — SendInput은 COM 구간 전용이다."""
+    print("\n[13] WAD-primary boundary unchanged by the COM input path")
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out_dir = os.path.join(repo_root, "generated-wdio", APP_NAME)
+    for js_name in (f"{APP_NAME}TestById.js", f"{APP_NAME}TestByClass.js"):
+        path = os.path.join(out_dir, js_name)
+        if not os.path.exists(path):
+            check(f"  {js_name} generated", False, f"missing at {path}")
+            continue
+        with open(path, encoding="utf-8") as fh:
+            js = fh.read()
+        check(
+            f"  {js_name} still clicks through WinAppDriver (WAD-primary intact)",
+            "/element/" in js and "/click" in js,
+            "the main-window path must keep using WAD element/click — COM is a "
+            "narrow exception, never a replacement engine (server.js boundary "
+            "comment, 2026-07-24)",
+        )
+        check(
+            f"  {js_name} contains no input injection of its own",
+            "SendInput" not in js and "mouse_event" not in js,
+            "input emulation belongs only in the COM helper scripts",
+        )
+        check(
+            f"  {js_name} passes no static coordinates to the COM helpers",
+            "--x " not in js and "--y " not in js and "'--x'" not in js,
+            "the redefined §3 rule still forbids recorded/static coordinates — "
+            "points must be computed at replay time from the resolved element",
+        )
+        # 2026-07-24 Calculator: 세션이 죽은 뒤에도 남은 스텝마다 20초씩
+        # 기다리느라 4분을 더 태웠다(같은 시점 독립 COM은 46ms에 응답).
+        check(
+            f"  {js_name} stops waiting once the session is provably dead",
+            "_sessionDead" in js and "session-unresponsive:" in js
+            and "_SESSION_DEAD_AFTER" in js,
+            "consecutive 20s timeouts mean the driver stopped answering; "
+            "continuing to poll it just buries the real failure under minutes "
+            "of dead waiting",
+        )
+
+
+def step_output_folders_isolated():
+    """Every folder this gate generates into must be gitignored.
+
+    The gate calls /api/generate without an exePath, so its output folder is
+    overwritten with a synthetic, unrunnable build on every run. A real
+    recording preset's folder (generated-wdio/Calculator, .../FileZilla, ...)
+    is tracked in git and holds a real capture — if a scenario here ever
+    targets one, that capture is silently destroyed (happened on 2026-07-24
+    via APP_NAME = "Calculator"). "Is it gitignored?" is the cheap, durable
+    proxy for "is this folder mine to clobber?".
+    """
+    print("\n[0] Mock output folders are isolated from real recording presets")
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ignored = set()
+    with open(os.path.join(repo_root, ".gitignore"), encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line.startswith("generated-wdio/"):
+                ignored.add(line[len("generated-wdio/"):].rstrip("/"))
+
+    targets = sorted({
+        APP_NAME, SESSION_APP, COLLISION_APP, DELAYED_HWND_APP,
+        EXPAND_REDUNDANT_APP, NATIVE_APP, ANIM_APP, NESTED_DROPDOWN_APP,
+        SIMPLE_ROOTHWND_APP, TITLE_COLLISION_DIALOGRECT_APP,
+        "SevenZipStateReset",
+    })
+    for name in targets:
+        check(
+            f"  generated-wdio/{name}/ is gitignored (safe to clobber)",
+            name in ignored,
+            "this scenario writes an exePath-less synthetic build into a "
+            "folder git tracks — if it is a real recording preset, running "
+            "this gate destroys that capture",
+        )
+
+
 def main():
     print("=" * 54)
     print("  mock_events.py - QAForge pipeline regression test")
     print("=" * 54)
     print(f"  Target: {BASE}")
 
+    step_output_folders_isolated()
     step_server_online()
     step_clear_events()
     step_post_events()
@@ -1661,6 +1954,9 @@ def main():
     step_wdio_generate_delayed_hwnd()
     step_wdio_generate_expand_redundant_trigger()
     step_wdio_generate_native()
+    step_com_sendinput_helpers()
+    step_esc_recovery_guards()
+    step_wad_boundary_intact()
 
     passed = sum(_results)
     total = len(_results)

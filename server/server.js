@@ -811,6 +811,205 @@ foreach ($h in $candidates) {
 if (-not $dismissed) { Write-Output "NONE" }
 `;
 
+// ── 시각적 클릭 재생 (dynamic ClickablePoint + SendInput) ────────────────────
+// 2026-07-24 스테이크홀더 결정으로 §3 좌표 규칙이 재정의됐다: 금지되는 것은
+// "스크립트/JSON에 하드코딩되어 저장된 static 좌표"(녹화 x/y 재생)이고, UIA가
+// 런타임에 XPath/AutomationId로 요소를 resolve한 뒤 계산하는 dynamic
+// ClickablePoint + SendInput은 정상적인 input emulation으로 인정된다 —
+// WinAppDriver의 element/click이 내부적으로 하는 일이 정확히 이것이기 때문.
+//
+// 이 스니펫은 WAD가 붙지 못하는 좁은 COM 예외 구간(owned 다이얼로그 / 부모
+// 세션에 안 잡히는 네이티브 팝업)에서만 쓰인다. 순수 COM InvokePattern.Invoke()는
+// 커서 이동도 눌림 효과도 없는 프로그래매틱 호출이라 "사람이 보면서 재생을
+// 확인할 수 있어야 한다"는 요구(§6)를 구조적으로 못 채웠고, 이 스니펫이 그
+// 구간의 재생 품질만 WAD 수준으로 끌어올린다(WAD를 대체하는 게 아니다).
+//
+// osScopedInvoke.py와 osExpandCollapse.py 양쪽에 ${COM_INPUT_PY}로 삽입된다
+// (STANDALONE_PREAMBLE이 두 JS 헤더에 병합되는 것과 같은 패턴) — invoke_item()이
+// 이미 두 벌 복제돼 있어 세 번째 복제를 만들지 않기 위함. 삽입 위치는 양쪽 다
+// `user32 = ctypes.windll.user32` 직후이며, 이 스니펫은 user32/wintypes/time에만
+// 의존한다.
+const COM_INPUT_PY = `
+# ── dynamic ClickablePoint + SendInput (2026-07-24) ─────────────────────────
+# 녹화된 좌표는 여기 어디에도 들어오지 않는다. 좌표는 매 실행마다 UIA가 방금
+# resolve한 요소로부터 계산해 즉시 소비하고 버린다 — 창이 이동/리사이즈되거나
+# 해상도가 바뀌어도 항상 새로 계산되므로 §3 금지의 원래 취지(저장된 좌표가
+# 재생 시점에 어긋나는 것)를 건드리지 않는다.
+SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
+SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 78, 79
+MOUSEEVENTF_MOVE = 0x0001
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_VIRTUALDESK = 0x4000
+MOUSEEVENTF_ABSOLUTE = 0x8000
+INPUT_MOUSE = 0
+
+ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
+
+
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG),
+                ("mouseData", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD), ("dwExtraInfo", ULONG_PTR)]
+
+
+class _INPUTUNION(ctypes.Union):
+    _fields_ = [("mi", MOUSEINPUT)]
+
+
+class INPUT(ctypes.Structure):
+    _anonymous_ = ("u",)
+    _fields_ = [("type", wintypes.DWORD), ("u", _INPUTUNION)]
+
+
+def enable_per_monitor_dpi():
+    # agent.py의 _enable_per_monitor_dpi_awareness()와 동일한 근거로 필수:
+    # 파이썬 프로세스는 기본 DPI-unaware라 125% 스케일 환경에서 UIA가 돌려주는
+    # rect/ClickablePoint가 가상화된 논리 좌표로 오는 반면 SendInput의 절대
+    # 좌표계는 물리 픽셀이다 — 격상하지 않으면 두 좌표계가 어긋나 엉뚱한
+    # 지점을 클릭한다. UIA 객체를 만들기 전에 호출해야 한다.
+    try:
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+        return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        pass
+
+
+def clickable_point(el):
+    """UIA가 지금 이 순간 계산한 클릭 지점. 실패하면 None."""
+    try:
+        res = el.GetClickablePoint()
+    except Exception:
+        res = None
+    # comtypes는 [out] 파라미터 2개(POINT, BOOL)를 튜플로 돌려주지만 바인딩
+    # 버전에 따라 POINT 하나만 오는 경우도 있어 양쪽을 모두 받아준다.
+    if res is not None:
+        pt, got = (res if isinstance(res, (tuple, list)) and len(res) == 2 else (res, 1))
+        if got and pt is not None:
+            try:
+                return int(pt.x), int(pt.y)
+            except Exception:
+                pass
+    try:
+        r = el.CurrentBoundingRectangle
+        if r.right > r.left and r.bottom > r.top:
+            return (r.left + r.right) // 2, (r.top + r.bottom) // 2
+    except Exception:
+        pass
+    return None
+
+
+def _same_or_descendant(uia, ancestor, el, max_up=6):
+    cur = el
+    try:
+        walker = uia.RawViewWalker
+    except Exception:
+        walker = None
+    for _ in range(max_up + 1):
+        try:
+            if uia.CompareElements(ancestor, cur):
+                return True
+        except Exception:
+            return False
+        if not walker:
+            return False
+        try:
+            cur = walker.GetParentElement(cur)
+        except Exception:
+            return False
+        if not cur:
+            return False
+    return False
+
+
+def send_input_click(uia, el, tag):
+    """UIA로 방금 찾은 요소를 실제 마우스 입력으로 클릭한다.
+
+    안전 검증을 하나라도 통과 못 하면 사유를 남기고 False — 호출자는 기존
+    프로그래매틱 Invoke()/Select() 체인으로 폴백한다(에러로 튕기는 것보다
+    비시각적으로라도 동작하는 게 낫다는 2026-07-24 지시).
+    """
+    def bail(reason):
+        print("[COM-SendInput] fallback: " + reason + " - using programmatic Invoke/Select", file=sys.stderr)
+        return False
+
+    if os.environ.get("QAFORGE_COM_CLICK") == "invoke":
+        return bail("forced-programmatic (QAFORGE_COM_CLICK=invoke)")
+    try:
+        if el.CurrentIsOffscreen:
+            return bail("offscreen")
+    except Exception:
+        pass
+
+    # 라벨은 반드시 주입 **전에** 읽는다. 메뉴 항목/다이얼로그 버튼은 클릭
+    # 즉시 파괴돼 그 뒤의 프로퍼티 읽기가 실패하고, 로그가 '?'로 남아 추적이
+    # 불가능해진다(2026-07-24 FileZilla 실측: 메뉴 항목/예(Y)/취소 전부 '?',
+    # 살아남는 콤보 화살표만 '닫기'로 정상 출력).
+    try:
+        label = el.CurrentName or el.CurrentAutomationId or "?"
+    except Exception:
+        label = "?"
+
+    pt = clickable_point(el)
+    if not pt:
+        return bail("no-clickable-point")
+    x, y = pt
+    vx = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+    vy = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+    vw = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+    vh = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+    if vw <= 1 or vh <= 1 or not (vx <= x < vx + vw and vy <= y < vy + vh):
+        return bail("point-outside-virtual-screen (%d,%d)" % (x, y))
+
+    # 그 지점이 정말 대상 요소의 것인지 두 겹으로 확인한다. 2026-07-15에
+    # osScopedInvoke가 완전히 남남인 사용자 창(탐색기/VS Code)을 클릭하고
+    # "성공"으로 보고한 사고, 2026-07-13에 클릭 지점이 요소 rect 밖이라
+    # 물리적으로 no-op이던 이벤트가 재생 때는 요소 중심을 클릭해 엉뚱한 패널을
+    # 연 트랩 — 둘 다 이 검증으로 구조적으로 막힌다.
+    winpt = wintypes.POINT(int(x), int(y))
+    try:
+        hwnd_at = user32.WindowFromPoint(winpt)
+        pid_at = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd_at, ctypes.byref(pid_at))
+        if pid_at.value != el.CurrentProcessId:
+            return bail("covered-by-other-window (pid %d at point, target pid %d)"
+                        % (pid_at.value, el.CurrentProcessId))
+    except Exception as e:
+        return bail("window-hit-test-failed (%s)" % e)
+
+    try:
+        at_point = uia.ElementFromPoint(winpt)
+    except Exception as e:
+        return bail("element-from-point-failed (%s)" % e)
+    if not at_point or not _same_or_descendant(uia, el, at_point):
+        return bail("point-resolves-elsewhere")
+
+    nx = int(round((x - vx) * 65535.0 / (vw - 1)))
+    ny = int(round((y - vy) * 65535.0 / (vh - 1)))
+
+    def send(flags):
+        inp = INPUT(type=INPUT_MOUSE)
+        inp.mi = MOUSEINPUT(nx, ny, 0, flags, 0, 0)
+        return user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+
+    # 사람이 눈으로 따라갈 수 있도록 이동/누름/뗌 사이에 간격을 둔다(§6).
+    if not send(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK):
+        return bail("SendInput(move) rejected")
+    time.sleep(0.04)
+    if not send(MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK):
+        return bail("SendInput(down) rejected")
+    time.sleep(0.04)
+    send(MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)
+
+    print("[COM-SendInput] " + tag + " clicked '" + label + "' at (%d,%d)" % (x, y))
+    time.sleep(0.05)
+    return True
+`;
+
 // ExpandCollapsePattern 재생 헬퍼 (2026-07-13 진단, poc/diag_expandcollapse.py
 // 실측 기반) — ComboBox 드롭다운/메뉴바 MenuItem/트리 +- 토글은 일반 클릭
 // (InvokePattern)만으로는 재현 안 됨: PuTTY의 Win32 ComboBox는 드롭다운
@@ -826,7 +1025,7 @@ if (-not $dismissed) { Write-Output "NONE" }
 // 118-129 — list rows, toolbar buttons never appear), so it could not see
 // PuTTY's SysTreeView32 "Window" TreeItem and always failed with "target element
 // not found" (confirmed 2026-07-14 GUI run STEP 11). COM UIA sees them.
-const OS_EXPANDCOLLAPSE_PY = `import sys, json, base64, argparse, ctypes, time
+const OS_EXPANDCOLLAPSE_PY = `import os, sys, json, base64, argparse, ctypes, time
 from ctypes import wintypes
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
@@ -843,11 +1042,14 @@ UIA_ClassNameProperty = 30012
 UIA_InvokePatternId = 10000
 UIA_ExpandCollapsePatternId = 10005
 UIA_SelectionItemPatternId = 10010
+UIA_LegacyIAccessiblePatternId = 10018
+UIA_SELECTIONFLAG_TAKESELECTION = 1
+UIA_ScrollPatternId = 10004
 TreeScope_Descendants = 4
 ExpandCollapseState_Expanded = 1
 
 user32 = ctypes.windll.user32
-
+${COM_INPUT_PY}
 
 def top_windows():
     found = []
@@ -860,6 +1062,50 @@ def top_windows():
 
     user32.EnumWindows(cb, 0)
     return found
+
+
+# 2026-07-24: WAD의 element/click은 오프스크린(스크롤로 안 보이는) 요소를
+# 자동으로 스크롤-인-뷰한 뒤 클릭한다(암묵적 동작) — 이 파일이 다루는 COM
+# 경로(WAD 세션이 못 보는 팝업/새 창의 좁은 예외)에는 그 자동 스크롤이 없어,
+# Expand() 이후 메뉴/드롭다운 항목이 화면 밖에 있으면 Invoke 전에 조상
+# ScrollPattern으로 끌어와야 한다. 좌표는 쓰지 않는다(§3).
+def find_scrollable_ancestor(uia, el, max_up=8):
+    try:
+        walker = uia.RawViewWalker
+    except Exception:
+        return None
+    cur = el
+    for _ in range(max_up):
+        try:
+            cur.GetCurrentPattern(UIA_ScrollPatternId)
+            return cur
+        except Exception:
+            pass
+        try:
+            cur = walker.GetParentElement(cur)
+            if not cur:
+                return None
+        except Exception:
+            return None
+    return None
+
+
+def ensure_visible(uia, mod, el):
+    try:
+        if not el.CurrentIsOffscreen:
+            return
+    except Exception:
+        return
+    print("[osExpandCollapse] target is offscreen — attempting scroll-into-view via ancestor ScrollPattern", file=sys.stderr)
+    ancestor = find_scrollable_ancestor(uia, el)
+    if not ancestor:
+        return
+    try:
+        sp = ancestor.GetCurrentPattern(UIA_ScrollPatternId).QueryInterface(mod.IUIAutomationScrollPattern)
+        sp.SetScrollPercent(50.0, 50.0)
+        time.sleep(0.2)
+    except Exception:
+        pass
 
 
 def field_conds(uia, sel):
@@ -901,11 +1147,16 @@ def resolve_target(uia, root, sel):
     return None
 
 
-def invoke_item(mod, el):
+def invoke_item(uia, mod, el):
+    ensure_visible(uia, mod, el)
     try:
         el.SetFocus()
     except Exception:
         pass
+    # 시각적 재생 우선(2026-07-24, §6) — 성공하면 반드시 여기서 반환한다.
+    # 이어서 Invoke()까지 부르면 같은 동작이 두 번 실행된다.
+    if send_input_click(uia, el, "osExpandCollapse"):
+        return True
     try:
         el.GetCurrentPattern(UIA_InvokePatternId).QueryInterface(mod.IUIAutomationInvokePattern).Invoke()
         return True
@@ -913,6 +1164,17 @@ def invoke_item(mod, el):
         pass
     try:
         el.GetCurrentPattern(UIA_SelectionItemPatternId).QueryInterface(mod.IUIAutomationSelectionItemPattern).Select()
+        return True
+    except Exception:
+        pass
+    try:
+        legacy = el.GetCurrentPattern(UIA_LegacyIAccessiblePatternId).QueryInterface(mod.IUIAutomationLegacyIAccessiblePattern)
+        try:
+            legacy.Select(UIA_SELECTIONFLAG_TAKESELECTION)
+            return True
+        except Exception:
+            pass
+        legacy.DoDefaultAction()
         return True
     except Exception:
         return False
@@ -929,13 +1191,34 @@ def main():
         print("osExpandCollapse: --hwnd is required", file=sys.stderr)
         sys.exit(2)
 
+    enable_per_monitor_dpi()
     comtypes.CoInitialize()
     mod = comtypes.client.GetModule("UIAutomationCore.dll")
     uia = comtypes.client.CreateObject(
         "{ff48dba4-60ef-4201-aa87-54103eef594e}", interface=mod.IUIAutomation
     )
 
-    root = uia.ElementFromHandle(args.hwnd)
+    # 2026-07-24 실측(FileZilla 재현): 방금 그 hwnd에 WinAppDriver scoped
+    # session이 막 생성된 직후(재생 로그: "scoped session on 0x301010 ready
+    # in 1354ms" 다음 STEP에서 곧바로) 이 프로세스의 별도 IUIAutomation COM
+    # 클라이언트가 같은 hwnd에 ElementFromHandle()을 호출하면 간헐적으로
+    # COMError(-2147220991)가 난다 — WinAppDriver의 내부 UIA 클라이언트가 그
+    # 창에 이벤트 구독을 마치기 전 레이스로 추정(에러 메시지 자체가 "이벤트
+    # 구독자를 불러올 수 없음"). 셀렉터/로직 문제가 아니라 타이밍 문제이므로,
+    # 실패로 단정하기 전에 짧게 재시도한다(osScopedInvoke.py의 4회 재시도와
+    # 같은 근거).
+    root = None
+    for attempt in range(4):
+        if attempt > 0:
+            time.sleep(0.3)
+        try:
+            root = uia.ElementFromHandle(args.hwnd)
+        except Exception as e:
+            root = None
+            if attempt == 3:
+                print(f"osExpandCollapse: ElementFromHandle failed: {e}", file=sys.stderr)
+        if root:
+            break
     if not root:
         print("osExpandCollapse: ElementFromHandle failed", file=sys.stderr)
         sys.exit(2)
@@ -946,16 +1229,32 @@ def main():
         print(f"osExpandCollapse: target element not found (sel={args.sel_b64})", file=sys.stderr)
         sys.exit(2)
 
+    item_name = None
+    if args.item_name_b64:
+        item_name = base64.b64decode(args.item_name_b64).decode("utf-8")
+
+    # 2026-07-23 실측(FileZilla "네트워크 구성 마법사(N)..." 재현): agent.py의
+    # expandCollapse 태깅은 UIA의 "IsExpandCollapsePatternAvailable" 구조적
+    # 응답만 보는데, wx는 서브메뉴가 없는 리프 커맨드 MenuItem에도 이걸 true로
+    # 보고하는 경우가 있다(실제 GetCurrentPattern()/Expand() 호출 시점에야
+    # 드러남 — 캡처 시점 검사와 재생 시점 COM 호출 결과가 다름). item_name이
+    # 없는 단독 토글 이벤트(병합 안 된 경우)에서 이게 벌어지면, 그 클릭은
+    # 원래 "메뉴 펼치기"가 아니라 "커맨드 실행"이었다는 뜻이므로, 실패로
+    # 끝내는 대신 평범한 클릭(Invoke/Select/LegacyIAccessible)으로 폴백해
+    # 실제 유저가 한 동작(메뉴 항목 실행)을 재현한다. item_name이 있는
+    # (병합된 진짜 서브메뉴) 경우는 mergeExpandCollapseClicks의 rootHwndHex
+    # 창-경계 가드가 이제 이런 리프 커맨드를 트리거로 병합하지 않으므로
+    # 여기까지 오지 않는다 — 그 경로는 기존처럼 실패로 남겨 무엇이 잘못됐는지
+    # 숨기지 않는다.
     try:
         ecp = target.GetCurrentPattern(UIA_ExpandCollapsePatternId).QueryInterface(
             mod.IUIAutomationExpandCollapsePattern)
     except Exception:
+        if not item_name and invoke_item(uia, mod, target):
+            print("[osExpandCollapse] ExpandCollapsePattern unavailable — invoked as a plain command instead")
+            sys.exit(0)
         print("osExpandCollapse: ExpandCollapsePattern not supported on target", file=sys.stderr)
         sys.exit(2)
-
-    item_name = None
-    if args.item_name_b64:
-        item_name = base64.b64decode(args.item_name_b64).decode("utf-8")
 
     # 새 팝업 창(네이티브 TrackPopupMenu 등) 감지용 베이스라인은 Expand() 전에
     # 찍는다 — FileZilla 메뉴바처럼 하위 항목이 그 팝업 서브트리에만 생기는 경우.
@@ -969,6 +1268,9 @@ def main():
             time.sleep(0.2)
             ecp.Expand()
     except Exception as e:
+        if not item_name and invoke_item(uia, mod, target):
+            print("[osExpandCollapse] Expand() failed — invoked as a plain command instead")
+            sys.exit(0)
         print(f"osExpandCollapse: Expand() failed: {e}", file=sys.stderr)
         sys.exit(2)
     time.sleep(0.4)
@@ -986,7 +1288,7 @@ def main():
         item = root.FindFirst(TreeScope_Descendants, item_cond)
     except Exception:
         item = None
-    if item and invoke_item(mod, item):
+    if item and invoke_item(uia, mod, item):
         print(f"[osExpandCollapse] invoked '{item_name}' under main window subtree")
         sys.exit(0)
 
@@ -1001,7 +1303,7 @@ def main():
             if not popup_root:
                 continue
             item = popup_root.FindFirst(TreeScope_Descendants, item_cond)
-            if item and invoke_item(mod, item):
+            if item and invoke_item(uia, mod, item):
                 print(f"[osExpandCollapse] invoked '{item_name}' under new popup hwnd={h}")
                 sys.exit(0)
         except Exception:
@@ -1039,7 +1341,8 @@ if __name__ == "__main__":
 // (comtypes COM IUIAutomation)으로 대조 진단(`diag_com_scopedinvoke.py`)한
 // 결과 ComboBox 자식 2개(Edit + DropDown 버튼) 정상 인식, Invoke까지 성공 —
 // PS1을 폐기하고 이 스택으로 교체.
-const OS_SCOPEDINVOKE_PY = `import sys, json, base64, argparse, ctypes, time
+
+const OS_SCOPEDINVOKE_PY = `import os, sys, json, base64, argparse, ctypes, time
 from ctypes import wintypes
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
@@ -1057,6 +1360,17 @@ UIA_ControlTypeProperty = 30003
 UIA_InvokePatternId = 10000
 UIA_SelectionItemPatternId = 10010
 UIA_ValuePatternId = 10002
+UIA_LegacyIAccessiblePatternId = 10018
+# 2026-07-23 실측(FileZilla Site Manager "고급/전송 설정/문자셋/일반" 카테고리
+# 탭 재현, controlType=50019=TabItem): wxWidgets의 커스텀-드로잉 Notebook 탭은
+# UIA TabItem으로 노출되지만 InvokePattern도 SelectionItemPattern도 실제로는
+# 구현하지 않는다(QueryInterface는 성공 조건에 따라 예외 없이 통과할 때도 있으나
+# Invoke()/Select() 호출 자체가 아무 효과 없이 조용히 끝나거나 예외를 던짐 —
+# 둘 다 두 로그에서 8회 재시도 전부 실패로 확인됨). wx는 MSAA(IAccessible) 쪽은
+# 안정적으로 구현하므로 LegacyIAccessiblePattern(Select 우선, 안 되면
+# DoDefaultAction)을 좌표 없는 마지막 폴백으로 시도한다 — 여전히 픽셀 좌표는
+# 전혀 쓰지 않는다(§3 Hard Rules 준수, UIA/MSAA 프로퍼티 기반 탐색만 사용).
+UIA_SELECTIONFLAG_TAKESELECTION = 1
 # 2026-07-17 (2차) 실측(FileZilla Site Manager 재생 타임스탬프 진단):
 # osScopedInvoke가 "target not found"로 보고한 실패 중 다수가 사실은 요소를
 # 매번 찾았는데(item=found) Invoke/SelectionItemPattern 둘 다 미지원이라
@@ -1068,6 +1382,7 @@ UIA_ValuePatternId = 10002
 # 3차 교훈: UIA 패턴 "지원 여부"만으로 태깅하면 과다신호가 되므로 실증된
 # ControlType으로만 좁힌다).
 PASSIVE_CONTROL_TYPES = {50004, 50030, 50033, 50018, 50023}  # Edit, Document, Pane, Tab, Tree
+UIA_ScrollPatternId = 10004
 TreeScope_Descendants = 4
 # Element(1)|Children(2)|Descendants(4) — TreeScope_Descendants alone can
 # never match the root element being searched from (UIA standard behavior),
@@ -1079,7 +1394,7 @@ TreeScope_Descendants = 4
 TreeScope_Subtree = 7
 
 user32 = ctypes.windll.user32
-
+${COM_INPUT_PY}
 
 def top_windows():
     found = []
@@ -1110,13 +1425,61 @@ def resolve_cond(uia, sel):
     return cond
 
 
-def invoke_item(mod, el):
+# 2026-07-24: osExpandCollapse.py와 동일한 근거로 이식 — 이 파일의 COM 경로
+# (owned 다이얼로그/새 팝업창의 좁은 예외)에는 WAD의 암묵적 오프스크린
+# 스크롤-인-뷰가 없다. Invoke/Select/LegacyIAccessible 시도 전에 조상
+# ScrollPattern으로 한 번 끌어와 본다 — 좌표는 쓰지 않는다(§3).
+def find_scrollable_ancestor(uia, el, max_up=8):
+    try:
+        walker = uia.RawViewWalker
+    except Exception:
+        return None
+    cur = el
+    for _ in range(max_up):
+        try:
+            cur.GetCurrentPattern(UIA_ScrollPatternId)
+            return cur
+        except Exception:
+            pass
+        try:
+            cur = walker.GetParentElement(cur)
+            if not cur:
+                return None
+        except Exception:
+            return None
+    return None
+
+
+def ensure_visible(uia, mod, el):
+    try:
+        if not el.CurrentIsOffscreen:
+            return
+    except Exception:
+        return
+    print("[osScopedInvoke] target is offscreen — attempting scroll-into-view via ancestor ScrollPattern", file=sys.stderr)
+    ancestor = find_scrollable_ancestor(uia, el)
+    if not ancestor:
+        return
+    try:
+        sp = ancestor.GetCurrentPattern(UIA_ScrollPatternId).QueryInterface(mod.IUIAutomationScrollPattern)
+        sp.SetScrollPercent(50.0, 50.0)
+        time.sleep(0.2)
+    except Exception:
+        pass
+
+
+def invoke_item(uia, mod, el):
+    ensure_visible(uia, mod, el)
     focus_ok = False
     try:
         el.SetFocus()
         focus_ok = True
     except Exception:
         pass
+    # 시각적 재생 우선(2026-07-24, §6) — 성공하면 반드시 여기서 반환한다.
+    # 이어서 Invoke()까지 부르면 같은 동작이 두 번 실행된다.
+    if send_input_click(uia, el, "osScopedInvoke"):
+        return True
     try:
         el.GetCurrentPattern(UIA_InvokePatternId).QueryInterface(mod.IUIAutomationInvokePattern).Invoke()
         return True
@@ -1128,13 +1491,64 @@ def invoke_item(mod, el):
     except Exception:
         pass
     try:
+        legacy = el.GetCurrentPattern(UIA_LegacyIAccessiblePatternId).QueryInterface(mod.IUIAutomationLegacyIAccessiblePattern)
+        try:
+            legacy.Select(UIA_SELECTIONFLAG_TAKESELECTION)
+            return True
+        except Exception:
+            pass
+        legacy.DoDefaultAction()
+        return True
+    except Exception:
+        pass
+    try:
         ctrl_type = el.CurrentControlType
     except Exception:
         ctrl_type = None
     if focus_ok and ctrl_type in PASSIVE_CONTROL_TYPES:
         return True
-    print(f"[osScopedInvoke] found element (controlType={ctrl_type}) but no actionable pattern (Invoke/Select) succeeded", file=sys.stderr)
+    print(f"[osScopedInvoke] found element (controlType={ctrl_type}) but no actionable pattern (Invoke/Select/LegacyIAccessible) succeeded", file=sys.stderr)
     return False
+
+
+# 2026-07-24 실측(PuTTY): 콤보박스 드롭다운 화살표의 automationId는 창 안의
+# 모든 콤보가 "DropDown"으로 공유한다 — 상태 의존 Name("닫기")은 2026-07-14
+# 가드가 이미 떼어내므로 AND 조건으로 좁힐 수도 없다. FindFirst는 트리의 첫
+# 번째(= Translation 패널의 "Remote character set") 화살표만 계속 잡았고,
+# Proxy 패널 항목을 고르는 스텝 두 개가 "같은 콤보를 반복해서 여는" 증상으로
+# 실패했다(재생 로그가 매번 동일한 좌표 (1223,412)를 찍은 것이 증거).
+# PuTTY류 다이얼로그는 비활성 패널의 컨트롤을 화면에서 내리므로, 후보가
+# 여럿이면 offscreen이 아닌 것을 고른다. 여러 후보를 차례로 클릭해보는 방식은
+# 쓰지 않는다 — 실패한 후보가 드롭다운을 열어둔 채로 남아 다음 후보 클릭이
+# 그 팝업 해제에 먹히기 때문.
+def pick_trigger(uia, root, cond):
+    try:
+        arr = root.FindAll(TreeScope_Subtree, cond)
+    except Exception:
+        arr = None
+    if not arr:
+        return None
+    cands = []
+    for i in range(arr.Length):
+        try:
+            cands.append(arr.GetElement(i))
+        except Exception:
+            pass
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0]
+    visible = []
+    for c in cands:
+        try:
+            if not c.CurrentIsOffscreen:
+                visible.append(c)
+        except Exception:
+            visible.append(c)
+    print(f"[osScopedInvoke] WARN trigger selector matched {len(cands)} elements "
+          f"({len(visible)} on screen) — the automationId is reused across "
+          f"controls; picking the first on-screen one")
+    return (visible or cands)[0]
 
 
 # 2026-07-17: owned 다이얼로그(WAD가 scoped session을 거부하는 창)에 타이핑하기
@@ -1145,7 +1559,42 @@ def invoke_item(mod, el):
 # Root 세션 자체가 모든 element 조회에 고정 비용을 갖는 것으로 보임. hwnd는
 # 이미 EnumWindows로 알고 있으므로, 같은 COM 스택(osScopedInvoke의 클릭 경로와
 # 동일)으로 즉시 타이핑하면 이 15~20초를 완전히 우회한다.
-def type_item(mod, el, text):
+# 2026-07-24 실측(poc/diag_filezilla_rename.py, FileZilla Site Manager):
+# "새 사이트(N)" 직후 뜨는 인라인 이름변경 상자는
+#   - 캡처 시점에는 automationId="1"로 기록되지만
+#   - 재생 시점의 라이브 요소는 automationId="" (name도 "")
+# 즉 그 id는 런타임에 변하는 값이라 셀렉터로 절대 매칭되지 않는다(ListItem
+# 슬롯 인덱스와 같은 부류). 대신 이 상자는 **나타나는 순간 항상 키보드 포커스를
+# 가진다**(인라인 rename의 정의상 그렇다) — 좌표를 쓰지 않고 이 상자를 집는
+# 가장 신뢰할 수 있는 방법이다. 타이핑 대상을 못 찾았을 때만, 그리고 포커스
+# 요소가 우리 프로세스의 입력 컨트롤일 때만 쓴다(남의 창에 타이핑 방지).
+INPUT_CONTROL_TYPES = {50004, 50030, 50003}  # Edit, Document, ComboBox
+
+
+def focused_input(uia, main_pid):
+    try:
+        el = uia.GetFocusedElement()
+    except Exception:
+        return None
+    if not el:
+        return None
+    try:
+        if el.CurrentProcessId != main_pid:
+            return None
+        if el.CurrentControlType not in INPUT_CONTROL_TYPES:
+            return None
+        aid = el.CurrentAutomationId
+        cls = el.CurrentClassName
+    except Exception:
+        return None
+    print(f"[osScopedInvoke] target not found — falling back to the focused "
+          f"input control (id='{aid}' class='{cls}'); an inline rename box "
+          f"exposes a runtime-varying AutomationId, so focus is the stable handle")
+    return el
+
+
+def type_item(uia, mod, el, text):
+    ensure_visible(uia, mod, el)
     try:
         el.SetFocus()
     except Exception:
@@ -1173,6 +1622,7 @@ def main():
     ap.add_argument("--text-b64", default=None)
     args = ap.parse_args()
 
+    enable_per_monitor_dpi()
     comtypes.CoInitialize()
     mod = comtypes.client.GetModule("UIAutomationCore.dll")
     uia = comtypes.client.CreateObject(
@@ -1183,7 +1633,21 @@ def main():
     if not main_h:
         print("osScopedInvoke: --hwnd is required", file=sys.stderr)
         sys.exit(2)
-    root = uia.ElementFromHandle(main_h)
+    # 2026-07-24: osExpandCollapse.py와 동일한 방어 — 방금 그 hwnd에
+    # WinAppDriver scoped session이 막 생성된 직후 이 프로세스의 별도
+    # IUIAutomation COM 클라이언트가 ElementFromHandle()을 호출하면 간헐적으로
+    # COMError(-2147220991, 이벤트 구독자 관련)가 실측됨 — 셀렉터/로직 문제가
+    # 아니라 타이밍 레이스이므로 실패 단정 전에 짧게 재시도한다.
+    root = None
+    for attempt in range(4):
+        if attempt > 0:
+            time.sleep(0.3)
+        try:
+            root = uia.ElementFromHandle(main_h)
+        except Exception:
+            root = None
+        if root:
+            break
     if not root:
         print("osScopedInvoke: ElementFromHandle failed", file=sys.stderr)
         sys.exit(2)
@@ -1201,13 +1665,9 @@ def main():
         trigger_sel = json.loads(base64.b64decode(args.trigger_sel_b64).decode("utf-8"))
         trigger_cond = resolve_cond(uia, trigger_sel)
         if trigger_cond is not None:
-            trigger = None
-            try:
-                trigger = root.FindFirst(TreeScope_Subtree, trigger_cond)
-            except Exception:
-                trigger = None
+            trigger = pick_trigger(uia, root, trigger_cond)
             if trigger:
-                invoke_item(mod, trigger)
+                invoke_item(uia, mod, trigger)
             else:
                 # 트리거를 못 찾으면 드롭다운이 아예 안 열려 이후 아이템
                 # 검색이 원인불명으로 실패하는 것처럼 보인다 — 눈에 보이게
@@ -1218,8 +1678,8 @@ def main():
     # osScopedType() JS wrapper 전용 (2026-07-17, owned 다이얼로그 안 Edit
     # 컨트롤에 타이핑하기 위해 도입 — Root 세션 REST 폴백의 15~20초 고정
     # 비용을 피한다. 검색 로직((a)(b) 둘 다)은 클릭과 완전히 동일).
-    act = (lambda el: type_item(mod, el, base64.b64decode(args.text_b64).decode("utf-8"))) \
-        if args.text_b64 else (lambda el: invoke_item(mod, el))
+    act = (lambda el: type_item(uia, mod, el, base64.b64decode(args.text_b64).decode("utf-8"))) \
+        if args.text_b64 else (lambda el: invoke_item(uia, mod, el))
     verb = 'typed into' if args.text_b64 else 'invoked'
 
     # 최대 4회 시도(즉시 1회 + 300ms 간격 재시도 3회, 총 최대 ~0.9초) — 2026-07-17
@@ -1230,9 +1690,16 @@ def main():
     # 여유가 없었다 — _step()의 범용 Fail-and-Recover(ESC)에 기대면 이름변경
     # 상자에서 ESC가 변경 자체를 취소시켜 재시도도 함께 실패하므로(esc-recovery
     # 후 osScopedType 재실패로 실측 확인), 스크립트 자체에 짧은 재시도를 둔다.
+    # 2026-07-24 실측: FileZilla 이름변경 상자는 "새 사이트(N)" 클릭 후
+    # **2260ms**만에 나타났다(poc/diag_filezilla_rename.py) — 기존 예산
+    # 4회(~0.9초)로는 구조적으로 못 잡는다. 타이핑은 20회(~6초)까지 기다리고
+    # (REST 경로 _findScoped의 8초 폴링보다는 짧게), 클릭은 10회(~2.7초)로
+    # 둔다. _step()의 ESC 복구는 이 대상에서 오히려 해로워 이제 건너뛰므로
+    # (_escWouldHarm) 재시도 여유는 이 스크립트 안에서 확보해야 한다.
+    attempts = 20 if args.text_b64 else 10
     main_pid = wintypes.DWORD()
     user32.GetWindowThreadProcessId(main_h, ctypes.byref(main_pid))
-    for attempt in range(4):
+    for attempt in range(attempts):
         if attempt > 0:
             time.sleep(0.3)
 
@@ -1275,6 +1742,16 @@ def main():
                     sys.exit(0)
             except Exception:
                 continue
+
+    # 마지막 수단(타이핑 전용): 포커스를 가진 입력 컨트롤. 인라인 이름변경
+    # 상자처럼 automationId가 런타임에 변하는 대상은 셀렉터로는 영원히 못
+    # 찾지만 포커스는 항상 갖고 있다. 클릭에는 적용하지 않는다 — "포커스된
+    # 무언가를 대신 클릭"은 엉뚱한 동작을 조용히 수행할 위험이 크다.
+    if args.text_b64:
+        el = focused_input(uia, main_pid.value)
+        if el and act(el):
+            print(f"[osScopedInvoke] {verb} the focused input control")
+            sys.exit(0)
 
     print(f"osScopedInvoke: target not found under main window or any other top-level window (sel={args.sel_b64})", file=sys.stderr)
     sys.exit(2)
@@ -1457,7 +1934,25 @@ function mergeExpandCollapseClicks(events) {
       const itemRect = next?.element?.rect;
       const looksLikeSiblingNotItem = Array.isArray(triggerRect) && Array.isArray(itemRect)
         && itemRect[1] < triggerRect[3];
-      if (next && next.action === 'click' && itemName && !looksLikeSiblingNotItem) {
+      // Cross-window guard (2026-07-23, FileZilla "방화벽 및 라우터 설정
+      // 마법사" 재현): a leaf command MenuItem (e.g. "네트워크 구성
+      // 마법사(N)...") can still get expandCollapse=true tagged by
+      // agent.py — UIA reports ExpandCollapsePattern as structurally
+      // "available" even though invoking it just launches a brand-new
+      // dialog, not a real dropdown (same false-positive class as
+      // isUntrackedCrossWindowEvent's rootHwndHex guard already handles
+      // for mergeCrossWindowTriggerClicks — this function never had the
+      // same check). Without this, the click that follows in that new
+      // dialog (e.g. its own "다음(N) >" button) sits well below the
+      // trigger's row, so the row-based sibling guard above doesn't catch
+      // it, and the two get merged into one osExpandCollapse() call that
+      // tries to Expand() a leaf command and hunt for the button as if it
+      // were a submenu item — both fail. rootHwndHex is ground truth for
+      // "these two clicks happened in different top-level windows"; when
+      // both are known and differ, this is never a real dropdown item.
+      const crossesWindow = next?.rootHwndHex && e.rootHwndHex
+        && next.rootHwndHex !== e.rootHwndHex;
+      if (next && next.action === 'click' && itemName && !looksLikeSiblingNotItem && !crossesWindow) {
         console.log(`[expand-merge] merged click+click @index ${i} -> expand '${e.element.name}' then select '${itemName}'`);
         out.push({ ...e, expandItemName: itemName });
         i++; // consume the merged-in item-selection event
@@ -1465,6 +1960,9 @@ function mergeExpandCollapseClicks(events) {
       }
       if (looksLikeSiblingNotItem) {
         console.log(`[expand-merge] rejected merge @index ${i}: '${e.element.name}' + '${itemName}' sit at the same row (sibling click, not a dropdown item) — keeping '${e.element.name}' as a plain toggle`);
+      }
+      if (crossesWindow) {
+        console.log(`[expand-merge] rejected merge @index ${i}: '${e.element.name}' + '${itemName}' are in different windows (rootHwndHex ${e.rootHwndHex} vs ${next.rootHwndHex}) — '${itemName}' opened a new dialog, not a dropdown item — keeping '${e.element.name}' as a plain toggle`);
       }
     }
     out.push(e);
@@ -1673,10 +2171,22 @@ function wdioSelectorByClass(el) {
   const tag = (el.controlType && /^[A-Za-z]+$/.test(el.controlType)) ? el.controlType : '*';
   if (el.className && isStableClassName(el.className) && el.name)
     return `'//${tag}[@ClassName="${escapeAttr(el.className)}" and @Name="${escapeAttr(el.name)}"]'`;
-  if (el.className && isStableClassName(el.className)) return `'//${tag}[@ClassName="${escapeAttr(el.className)}"]'`;
-  if (el.name)         return `'//${tag}[@Name="${escapeAttr(el.name)}"]'`;
+  // 2026-07-24 실측(FileZilla Site Manager 인라인 이름변경 상자 재현): className은
+  // 있는데 name이 비어있는 요소(예: SysTreeView32 in-place-rename Edit,
+  // automationId="1")에서 예전엔 여기서 곧장 bare className XPath
+  // (`//Edit[@ClassName="Edit"]`)를 반환했다 — 같은 창에 Edit 클래스 요소가
+  // 여러 개(Host/Port/User/Password/Comment 필드 등) 있으면 항상 "문서 순서상
+  // 첫 번째"에 매칭돼 엉뚱한 필드가 클릭/타이핑됨(녹화 때는 실제 사용자가 눈으로
+  // 보고 맞는 상자에 입력하니 문제가 안 드러나고, 재생 때만 조용히 틀린 요소에
+  // 입력됨 — [PASS]는 뜨지만 실제로는 유실). 같은 이벤트의 ById 변형은
+  // automationId="1"을 써서 `~1`로 정확히 매칭했다(wdioSelectorById는 원래도
+  // automationId를 name/className보다 먼저 시도) — ByClass도 bare className으로
+  // 폴백하기 전에 유니크할 가능성이 훨씬 높은 automationId를 먼저 시도하도록
+  // 순서를 맞춘다. className+name 조합(위 분기, 이미 유니크)은 그대로 최우선.
   const isSlotIndex = /^\d+$/.test(el.automationId || '') && SLOT_INDEX_CONTROL_TYPES.has(el.controlType);
   if (el.automationId && !isSlotIndex) return `'~${escapeAttr(el.automationId)}'`;
+  if (el.className && isStableClassName(el.className)) return `'//${tag}[@ClassName="${escapeAttr(el.className)}"]'`;
+  if (el.name)         return `'//${tag}[@Name="${escapeAttr(el.name)}"]'`;
   return anchorSelector(el);
 }
 
@@ -1754,6 +2264,7 @@ const STANDALONE_PREAMBLE = `import { execSync, spawn } from 'child_process';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
+import { openSync, closeSync } from 'fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -1780,6 +2291,7 @@ function _warmupPowerShell() {
 // host/port from anymore.
 const _APPIUM = 'http://127.0.0.1:4723';
 let _spawnedAppium = null;
+let _appiumLogFd = null;
 // Root-session id (multi-window replay) / single-app-session id (simple
 // replay) — set once in run()'s startup, consumed everywhere below.
 let _rootSid = null;
@@ -1810,7 +2322,18 @@ async function ensureAppium() {
     // pre-existing latent bug shared with wdio.conf.js's identical args —
     // just never hit because nothing had actually spawned Appium with these
     // exact CLI args end-to-end this session before ensureAppium() did.
-    _spawnedAppium = spawn(process.execPath, [appiumBin, '--allow-insecure', '*:winappdriver', '--port', '4723'], { stdio: 'pipe' });
+    // stdio must NOT be 'pipe' — nothing here ever reads _spawnedAppium's
+    // stdout/stderr, and Appium logs every request/response verbosely. Once
+    // the OS pipe buffer fills, the child blocks on write() forever and the
+    // whole HTTP server goes unresponsive mid-run (2026-07-27: root cause of
+    // replays hanging/timing out at a different step every time — the
+    // threshold is cumulative log bytes, not step count). Redirect to a log
+    // file fd instead: never blocks, and doubles as the Appium-server-side
+    // log this project has repeatedly needed for post-mortems.
+    const appiumLogPath = join(__dirname, 'appium.log');
+    _appiumLogFd = openSync(appiumLogPath, 'w');
+    console.log(\`[appium] logging to \${appiumLogPath}\`);
+    _spawnedAppium = spawn(process.execPath, [appiumBin, '--allow-insecure', '*:winappdriver', '--port', '4723'], { stdio: ['ignore', _appiumLogFd, _appiumLogFd] });
     _spawnedAppium.on('error', (e) => console.warn('[appium] spawn error:', String(e.message || e).substring(0, 150)));
     const deadline = Date.now() + 30000;
     while (Date.now() < deadline) {
@@ -1827,6 +2350,10 @@ function _killSpawnedAppium() {
     if (_spawnedAppium) {
         try { _spawnedAppium.kill(); } catch {}
         _spawnedAppium = null;
+    }
+    if (_appiumLogFd !== null) {
+        try { closeSync(_appiumLogFd); } catch {}
+        _appiumLogFd = null;
     }
 }
 
@@ -1887,7 +2414,23 @@ async function _isSessionAlive(sid) {
 // 셀렉터로 요소를 찾아 element id를 돌려준다 — 좌표 산출 없음 (2026-07-10
 // 좌표 실행 금지). sid/rootElId만 받는 일반형이라 세션 모드(title-keyed
 // 캐시)와 simple 모드(단일 _appSid) 양쪽에서 그대로 재사용된다.
+// 세션이 응답 불능이 됐을 때 남은 스텝마다 20초씩 더 태우지 않기 위한 게이트.
+// 2026-07-24 Calculator 실측: STEP 19부터 모든 element 조회가 20초 타임아웃
+// (not-found 아님)으로 끝났고, 같은 시점에 독립 COM UIA 클라이언트는 동일한
+// 버튼(num8Button)을 46ms만에 찾았다 — 앱은 멀쩡하고 WinAppDriver 세션만 죽은
+// 상태다. 그런데도 재생은 남은 6스텝 × 2회 × 20초 = 약 4분을 더 기다린 뒤에야
+// 끝났고, 로그에는 "왜"에 대한 단서가 없었다. 연속 타임아웃이 임계치를 넘으면
+// 세션을 죽은 것으로 확정하고 이후 조회를 즉시 실패시킨다(거짓 PASS 없이,
+// 원인은 그대로 드러낸 채 빠르게 끝난다).
+let _sessionDead = false;
+let _consecutiveTimeouts = 0;
+const _SESSION_DEAD_AFTER = 3;
+
 async function _findElement(sid, rootElId, selector) {
+    if (_sessionDead) {
+        _failures.push('session-unresponsive:' + String(selector).substring(0, 60));
+        return null;
+    }
     try {
         const raw = selector.replace(/^['"]|['"]$/g, '');
         const using = raw.startsWith('~') ? 'accessibility id' : 'xpath';
@@ -1896,10 +2439,26 @@ async function _findElement(sid, rootElId, selector) {
             ? \`/session/\${sid}/element/\${rootElId}/element\`
             : \`/session/\${sid}/element\`;
         const el = await _appiumPost(path, { using, value });
+        _consecutiveTimeouts = 0;
         if (!el) return null;
         return el.ELEMENT || el['element-6066-11e4-a52e-4f735466cecf'] || null;
     } catch (e) {
-        console.warn('[findElement] lookup failed:', String(e.message || e).substring(0, 120));
+        const msg = String(e.message || e);
+        console.warn('[findElement] lookup failed:', msg.substring(0, 120));
+        if (msg.includes('timed out after')) {
+            _consecutiveTimeouts += 1;
+            if (_consecutiveTimeouts >= _SESSION_DEAD_AFTER) {
+                _sessionDead = true;
+                console.error(
+                    \`[session] \${_consecutiveTimeouts} consecutive element lookups timed out — \` +
+                    'treating the WinAppDriver session as unresponsive and failing the ' +
+                    'remaining steps immediately instead of waiting 20s each. The app ' +
+                    'itself may well be fine: run poc/diag_calc_alive.py against it to ' +
+                    'tell "app died" from "driver died".');
+            }
+        } else {
+            _consecutiveTimeouts = 0;
+        }
         return null;
     }
 }
@@ -1936,6 +2495,38 @@ async function _typeScoped(sid, rootElId, selector, text) {
         await _appiumPost(\`/session/\${sid}/element/\${elId}/value\`, { text });
         return true;
     } catch (e) { console.warn('[type] scoped sendKeys failed:', String(e.message || e).substring(0, 100)); return false; }
+}
+
+// _step()의 ESC 복구가 오히려 재시도를 망치는 스텝 종류를 가려낸다.
+// 2026-07-24 FileZilla 실측: "새 사이트(N)" 직후의 인라인 이름변경 상자에
+// 타이핑하는 스텝이 1차 실패 → ESC 복구 → 2차 실패로 끝났는데, 이름변경
+// 상자에서 ESC는 이름변경 자체를 취소하므로 2차 시도는 구조적으로 실패가
+// 보장된다(이 현상 자체는 2026-07-17에 osScopedInvoke.py 주석으로 이미
+// 기록돼 있었으나 정작 _step()에는 반영돼 있지 않았다). 팝업 해제 스캔은
+// 그대로 두고 ESC만 건너뛴다.
+function _escWouldHarm(label) {
+    return /^\\d+:type\\b/.test(label);
+}
+
+// Current foreground window handle (user32!GetForegroundWindow via a base64
+// -EncodedCommand — no quote-escaping, read-only). _step() uses it to decide
+// whether an ESC would land on a real popup or on the main dialog itself.
+// 2026-07-27: moved here from SIMPLE_HEADER — SESSION_HEADER's _step() calls
+// this too (2026-07-24 parity fix) but the definition itself never followed,
+// leaving session-mode output with a call site and no definition (same
+// pattern as the 2026-07-16 osExpandCollapse "Bug D").
+function osForegroundHwnd() {
+    try {
+        const out = execSync(
+            \`powershell -NoProfile -EncodedCommand ${OS_FOREGROUND_ENCODED}\`,
+            { stdio: 'pipe', timeout: 15000 }
+        ).toString().trim();
+        const m = out.match(/-?\\d+/);
+        return m ? (parseInt(m[0], 10) || 0) : 0;
+    } catch (e) {
+        console.warn('[osForegroundHwnd] failed:', String(e.message || e).substring(0, 100));
+        return 0;
+    }
 }
 `;
 
@@ -2160,22 +2751,8 @@ function osEscape() {
     }
 }
 
-// Current foreground window handle (user32!GetForegroundWindow via a base64
-// -EncodedCommand — no quote-escaping, read-only). _step() uses it to decide
-// whether an ESC would land on a real popup or on the main dialog itself.
-function osForegroundHwnd() {
-    try {
-        const out = execSync(
-            \`powershell -NoProfile -EncodedCommand ${OS_FOREGROUND_ENCODED}\`,
-            { stdio: 'pipe', timeout: 15000 }
-        ).toString().trim();
-        const m = out.match(/-?\\d+/);
-        return m ? (parseInt(m[0], 10) || 0) : 0;
-    } catch (e) {
-        console.warn('[osForegroundHwnd] failed:', String(e.message || e).substring(0, 100));
-        return 0;
-    }
-}
+// osForegroundHwnd() now lives in STANDALONE_PREAMBLE (shared by both
+// headers) — see above.
 
 // Wraps a single replay step: on the happy path (no exception, no new
 // _failures entry) this costs nothing extra. On failure, scans for and
@@ -2193,6 +2770,8 @@ async function _step(label, fn) {
     const dismissed = osDismissPopup();
     if (dismissed) {
         _warnings.push('popup-dismissed:' + label);
+    } else if (_escWouldHarm(label)) {
+        _warnings.push('esc-skipped:' + label);
     } else {
         // No known popup button found. On a dialog-based main window (PuTTY
         // Configuration) ESC == Cancel == close the app, so an unconditional
@@ -2371,6 +2950,7 @@ async function getWindowSession(title) {
     // owned:true entries have no Appium sid (sid: null, COM-routed instead) —
     // nothing to health-check, reuse the cached hwnd directly.
     if (cached && cached.owned) return cached;
+    if (cached && cached.rootFallback) return cached;
     if (cached && await _isSessionAlive(cached.sid)) return cached;
     delete _sessionIds[title];
     _ensureDialog(title);
@@ -2386,8 +2966,22 @@ async function getWindowSession(title) {
     // this is normally just a cache read.
     let hwndNum = _hwndCache[title];
     if (!hwndNum) {
-        const hs = _listWindowHwnds(title);
-        if (hs.length) { hwndNum = hs[0]; _hwndCache[title] = hwndNum; }
+        // 2026-07-23 실측(FileZilla "비밀번호를 기억할까요?" 다이얼로그 재현):
+        // _switchWindow() 직후 곧바로 단 1회 EnumWindows 스캔만 하면, 클릭
+        // 직후 팝업이 아직 렌더링되기 전인 경우(비동기 창 생성) 못 찾고
+        // hwndNum이 끝까지 비어 있는 채로 아래 "Root scan"(매 시도 15~20초
+        // 고정비용, §4 2026-07-17 2차 실측)으로 영구히 떨어진다 — 게다가 그
+        // 폴백조차 매번 다시 desktop-wide XPath를 훑으므로 이후 스텝마다
+        // 반복해서 20초씩 걸린다(두 실패 로그 모두에서 재현). 창 생성은
+        // 보통 수백 ms 안에 끝나므로, 비용이 훨씬 싼 EnumWindows(단일 PS
+        // 호출 ~수십ms)을 짧게 폴링해 먼저 hwnd를 잡는다 — 못 찾을 때만
+        // 기존 Root-scan 폴백으로 넘어간다(동작 변화 없음, 지연만 흡수).
+        for (let attempt = 0; attempt < 10 && !hwndNum; attempt++) {
+            if (attempt > 0) await _sleep(200);
+            const hs = _listWindowHwnds(title);
+            if (hs.length) hwndNum = hs[0];
+        }
+        if (hwndNum) _hwndCache[title] = hwndNum;
     }
     // Owned windows (native dialogs owned by the app's main window) can
     // never become scoped sessions — WAD rejects them, but only after the
@@ -2446,18 +3040,27 @@ async function getWindowSession(title) {
     // title) — fall back to the original desktop-UIA XPath scan + Root
     // session reuse.
     console.log(\`[session] Root scan for: "\${title}"\`);
-    const shortTitle = title.slice(0, 30).replace(/"/g, '');
+    // 2026-07-24 실측(FileZilla "사이트 관리자 - 데이터 이상" 창 재현): 이
+    // Root-session REST 조회는 매치 여부와 무관하게 매번 15~20초 고정비용이다
+    // (§4 2026-07-17 2차). 위 EnumWindows 폴링(최대 2초)이 이미 이 title을
+    // 못 찾았다면, 그 창은 십중팔구 실제로 존재하지 않는다(예: 녹화 때는 실제
+    // Enter 키 입력이 유발한 검증 에러 창이었는데, 재생의 SetValue()는 개행을
+    // 실제 키 입력으로 보내지 않아 그 창 자체가 안 뜬 경우) — 이런 경우 두 개의
+    // XPath 후보를 순차로 20초씩 태우는 건 이미 죽은 단서를 두 번 쫓는 것.
+    // contains() 폴백(더 느슨한 매치)까지는 시도하지 않고 정확매치 1회로
+    // 줄여 최악 지연을 40초 → 20초로 낮춘다 — "존재 자체가 의심스러운 창"에
+    // 대한 재시도 예산은 아껴서, 그 예산을 아래 캐싱(찾았든 못 찾았든 이
+    // title에 대해 다시 스캔하지 않음)으로 돌린다.
     let hwnd = null;
     let matchedElId = null;
-    for (const sel of [\`//*[@Name="\${title}"]\`, \`//*[contains(@Name,"\${shortTitle}")]\`]) {
-        try {
-            const elId = await _findElement(_rootSid, null, sel);
-            if (!elId) continue;
+    try {
+        const elId = await _findElement(_rootSid, null, \`//*[@Name="\${title}"]\`);
+        if (elId) {
             const r = await (await _appiumFetch(\`/session/\${_rootSid}/element/\${elId}/attribute/NativeWindowHandle\`)).json();
             const rawNum = parseInt(r.value, 10);
-            if (rawNum) { hwnd = '0x' + rawNum.toString(16); matchedElId = elId; break; }
-        } catch {}
-    }
+            if (rawNum) { hwnd = '0x' + rawNum.toString(16); matchedElId = elId; }
+        }
+    } catch {}
     const scanHwndNum = hwnd ? parseInt(hwnd, 16) : 0;
     // Same owned-window pre-check as the EnumWindows path above.
     if (scanHwndNum && !_scopedFailHwnds.has(scanHwndNum)) {
@@ -2488,7 +3091,14 @@ async function getWindowSession(title) {
     // rootElId; hwnd 0 = /location is already screen-absolute.
     if (!hwnd) console.warn(\`[session] Window "\${title}" not found — falling back to Root\`);
     _warnings.push('session-fallback:' + title);
-    _sessionIds[title] = { sid: _rootSid, rootElId: matchedElId, hwnd: 0 };
+    // 2026-07-24: rootFallback:true — 다음 호출부터는 맨 위의 _isSessionAlive()
+    // 헬스체크(최대 1.5초 REST 호출, 실패 시 캐시를 버리고 이 함수 전체를
+    // 처음부터 재실행)를 건너뛰고 이 결과를 그대로 재사용한다. 이 title이 이번
+    // 스캔에서 못 찾아졌다면(matchedElId=null) 다음 스텝에서 다시 찾아질 리
+    // 없으므로, 매 스텝마다 EnumWindows 재폴링 + 최대 20초 Root-scan을 반복하는
+    // 대신(사용자 실측: "사이트 관리자 - 데이터 이상" 창에서 스텝마다 20초씩
+    // 반복 — 이하 §4 2026-07-24) 이번 결과를 이 title에 대해 고정시킨다.
+    _sessionIds[title] = { sid: _rootSid, rootElId: matchedElId, hwnd: 0, rootFallback: true };
     return _sessionIds[title];
 }
 
@@ -2558,9 +3168,24 @@ async function _findScoped(title, selector, timeoutMs = 8000) {
         const s = await getWindowSession(title);
         // Dialog window itself wasn't found (no hwnd, no matched element):
         // a lookup would scan the ENTIRE desktop tree from Root at 10s+ per
-        // call. Drop the useless cache entry and fail fast.
+        // call. Fail fast instead of attempting it.
+        //
+        // 2026-07-24: this used to also delete _sessionIds[title] right
+        // here — meaning EVERY subsequent step that targets the same
+        // permanently-missing window (e.g. FileZilla's "사이트 관리자 -
+        // 데이터 이상" error dialog, which never opens on replay because
+        // SetValue() doesn't send the real Enter keystroke that triggered it
+        // during recording) re-ran the full EnumWindows+Root-scan discovery
+        // from scratch on its very next call, repeating the ~20s cost per
+        // step instead of once (confirmed in a real FileZilla run: STEP
+        // "switch to window" AND the following STEP both independently paid
+        // the full Root-scan cost). getWindowSession() now caches this
+        // "confirmed not found" verdict as rootFallback:true specifically so
+        // repeat lookups against the same title short-circuit; deleting it
+        // here defeated that. _switchWindow() (segment-boundary) still
+        // evicts the cache on purpose when the recording actually revisits
+        // this title later, so a stale negative result doesn't stick forever.
         if (!s.hwnd && !s.rootElId) {
-            delete _sessionIds[title];
             console.warn(\`[findScoped] window "\${title}" not found — failing fast\`);
             return { elId: null, s };
         }
@@ -2578,6 +3203,40 @@ async function _findScoped(title, selector, timeoutMs = 8000) {
     }
 }
 
+// ── WAD-primary / COM-narrow-exception 아키텍처 경계 (2026-07-24, 리뷰
+// 피드백 확정) ───────────────────────────────────────────────────────────
+// 2026-07-24 리뷰 허들에서 "WinAppDriver 전면 제거 + 단일 COM 스택" 제안이
+// 나왔다가 기각됐다 — 표면적 근거(다중창/성능/크래시)는 실재하는 문제였지만
+// 결론(WAD 제거)이 틀렸다는 판정. 이 경계는 앞으로도 지켜야 하는 규칙이다:
+//   - WAD가 주도: 메인 창 + WAD가 attach 가능한 모든 창(scoped session/
+//     appTopLevelWindow) — 여기 클릭/타이핑은 반드시 WAD의 element/click,
+//     element/value를 거친다. 이게 실제로 화면에 보이는 입력이다(사람이
+//     지켜보며 재생을 확인할 수 있어야 한다는 요구사항, §6). 순수 COM
+//     InvokePattern/ValuePattern.SetValue는 커서 이동도 타이핑 과정도 없는
+//     프로그래매틱 호출이라 이 요구를 못 채운다 — 대체 엔진으로 승격 금지.
+//   - COM이 주도(osScopedInvoke.py/osExpandCollapse.py/osScroll.py만): (a)
+//     WAD가 session 생성을 실제로 거부하는 owned 다이얼로그(아래 s0.owned
+//     분기 — 추측이 아니라 실측된 거부에만 탄다), (b) 부모 세션에 안 묶이는
+//     네이티브 팝업(ComboBox 드롭다운/TrackPopupMenu), (c) ScrollPattern
+//     (WAD에 스크롤 엔드포인트 자체가 없음).
+//   - 같은 hwnd에 WAD와 COM을 동시에 태우지 않는다 — COMError -2147220991의
+//     원인이 정확히 이거였다. _scopedFailHwnds/owned 게이팅이 "WAD가 이미
+//     그 hwnd에 부적합하다고 확인된 뒤에만 COM" 순서를 강제하므로, 이
+//     불변식을 깨는 코드(WAD가 세션을 들고 있는 hwnd를 COM이 기회적으로
+//     찔러보는 경로 등)를 추가하지 않는다.
+// osUiaReplay.py(단일 COM 엔진으로 click/type까지 통합하려던 시도)는 위
+// 첫 번째 규칙 위반이라 되돌렸다 — 실제 클릭/타이핑 경로에 연결된 적은 없음.
+//
+// 2026-07-24 (후속) 개정 — COM 구간의 클릭은 이제 시각적으로 재생된다:
+// 스테이크홀더가 §3 좌표 규칙을 재정의했다(금지 대상은 "저장된 static 좌표"이며,
+// 런타임에 UIA로 resolve한 요소의 dynamic ClickablePoint + SendInput은 정상적인
+// input emulation). 그에 따라 COM_INPUT_PY의 send_input_click()이 위 COM 구간
+// (a)(b)의 invoke_item() 체인 맨 앞에 붙었다. 경계 자체는 그대로다 — WAD가
+// 붙는 창은 여전히 WAD가 처리하고, 이 변경은 WAD가 애초에 못 붙는 구간의 재생
+// 품질만 WAD 수준으로 맞춘다. 안전 검증(offscreen/WindowFromPoint PID/
+// ElementFromPoint 왕복)을 통과 못 하면 기존 Invoke/Select 체인으로 조용히
+// 폴백하므로 동작 자체는 어떤 경우에도 퇴행하지 않는다.
+//
 // XPath-only click in the window's own session context (HWND 세그먼트).
 // element/click = UIA Invoke/기본 액션 — 창이 이동/리사이즈돼도 무관하고
 // 좌표는 어디에도 없다. doubleClick은 같은 요소에 클릭 2회 (WinAppDriver에
@@ -2723,6 +3382,10 @@ function _listWindowHwnds(frag) {
 // window, cost 16226ms before failing). One cheap PS call up front lets
 // getWindowSession skip the doomed attempt entirely. Returns 0 on any
 // error so callers fall through to the normal attempt-then-blacklist path.
+function _sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 function _windowOwner(hwndNum) {
     try {
         const out = execSync(
@@ -2955,10 +3618,22 @@ async function _step(label, fn) {
     const dismissed = osDismissPopup();
     if (dismissed) {
         _warnings.push('popup-dismissed:' + label);
+    } else if (_escWouldHarm(label)) {
+        _warnings.push('esc-skipped:' + label);
     } else {
-        osActivate('', _hwndCache[_mainTitleFrag]);
-        osEscape();
-        _warnings.push('esc-recovery:' + label);
+        // 2026-07-24 parity fix: SIMPLE_HEADER got the foreground guard on
+        // 2026-07-14 (RC-C) but this copy kept the unconditional
+        // osActivate('')+ESC — the very pattern that closed PuTTY every time.
+        // Only ESC when a DIFFERENT top-level window (a real popup) holds the
+        // foreground; our own main window has nothing to dismiss.
+        const mainHwnd = _hwndCache[_mainTitleFrag];
+        const fg = osForegroundHwnd();
+        if (mainHwnd && fg === mainHwnd) {
+            _warnings.push('esc-skipped-main-foreground:' + label);
+        } else {
+            osEscape();
+            _warnings.push('esc-recovery:' + label);
+        }
     }
     _failures.length = before;
     await fn();
@@ -3645,7 +4320,7 @@ const KNOWN_APP_STATE_RESET = {
 // -EncodedCommand (base64 UTF-16LE) sidesteps quote-escaping entirely when
 // embedding a PowerShell one-liner inside a JS template string inside a JS
 // string inside a shell command — the same technique already used for
-// OS_FOREGROUND_ENCODED (see SIMPLE_HEADER) rather than fighting nested
+// OS_FOREGROUND_ENCODED (see STANDALONE_PREAMBLE) rather than fighting nested
 // quote levels (confirmed 2026-07-15: a single-quoted registry path inside
 // a single-quoted execSync(...) string broke the generated wdio.conf.js
 // with "missing ) after argument list").
@@ -3690,7 +4365,7 @@ function safeName(str) {
 // (COM IUIAutomation via comtypes) 2026-07-14 — managed UIA proved unable to
 // see Button controls / ComboBox internals on native Win32 dialogs (PuTTY
 // diag). Old folders may still have the stale .ps1 on disk.
-const OBSOLETE_FILES = ['osClick.ps1', 'osDrag.ps1', 'osScopedInvoke.ps1', 'osScroll.ps1', 'osExpandCollapse.ps1', 'wdio.conf.js'];
+const OBSOLETE_FILES = ['osClick.ps1', 'osDrag.ps1', 'osScopedInvoke.ps1', 'osScroll.ps1', 'osExpandCollapse.ps1', 'wdio.conf.js', 'osUiaReplay.py'];
 
 function saveFiles(files, dir) {
   const savedPaths = [];

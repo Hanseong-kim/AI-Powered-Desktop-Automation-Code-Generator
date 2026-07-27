@@ -16,6 +16,7 @@ windows-use/
 recorded-events/
 
 # mock_events.py 회귀 게이트가 매 실행마다 재생성하는 산출물
+generated-wdio/MockCalculator/
 generated-wdio/MockMulti/
 generated-wdio/MockNative/
 generated-wdio/MockCollision/
@@ -51,3 +52,6 @@ server/_*
 
 # 루트에서 mock_events.py 등을 돌릴 때 생기는 스크래치 로그
 /_mock_run.log
+
+# ensureAppium()이 각 앱 폴더에서 standalone 실행할 때 남기는 Appium 서버 로그
+generated-wdio/**/appium.log
