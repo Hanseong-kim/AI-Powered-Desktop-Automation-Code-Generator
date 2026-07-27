@@ -1,0 +1,182 @@
+PS C:\hansung\project\code-generator\generated-wdio\FileZilla> node .\FileZillaTestByClass.js
+[appium] starting Appium...
+[appium] ready
+[session] Root session fc2b4a2f-3277-4a71-9d8e-983b611aed9d ready
+[launch-diag] poll=1 titleFrag="FileZilla" baseline=[] matched=[] hwndCache=none liveRect={"left":0,"top":0,"width":0,"height":0}
+[launch] tracking new window hwnd=133662
+[launch-diag] poll=2 titleFrag="FileZilla" baseline=[] matched=[133662] hwndCache=133662 liveRect={"left":408,"top":59,"width":960,"height":758}
+[launch] window normalized to { left: 408, top: 59, width: 960, height: 758 }
+[STEP] 2:expandCollapse 파일(F)
+[osExpandCollapse] state after Expand() = 1
+[STEP] 3:expandCollapse 편집(E)
+[osExpandCollapse] state after Expand() = 1
+[STEP] 4:expandCollapse 파일(F) -> 사이트 관리자(S)...  Ctrl+S
+[osExpandCollapse] state after Expand() = 1
+[COM-SendInput] osExpandCollapse clicked '?' at (738,152)
+[osExpandCollapse] invoked '사이트 관리자(S)... Ctrl+S' under main window subtree
+[STEP] switch to window: 사이트 관리자
+[dialog] "사이트 관리자" not found by EnumWindows — rel-offsets may be unreliable
+[session] hwnd=0x90aaa owned by 0x20a1e — skipping scoped session (WAD rejects owned windows)
+[STEP] 5:click 새 사이트(N)
+[COM-SendInput] osScopedInvoke clicked '새 사이트(N)' at (757,718)
+[osScopedInvoke] invoked under main window subtree
+[STEP] 6:type asdf
+
+[osScopedType] failed: osScopedInvoke: target not found under main window or any other top-level window (sel=eyJhdXRvbWF0aW9uSWQiOiIxIiwiY2xhc3NOYW1lIjoiIiwibmFtZSI6IiJ9)
+
+[osScopedType] failed: osScopedInvoke: target not found under main window or any other top-level window (sel=eyJhdXRvbWF0aW9uSWQiOiIxIiwiY2xhc3NOYW1lIjoiIiwibmFtZSI6IiJ9)
+
+[STEP] 7:click 삭제(D)
+[COM-SendInput] osScopedInvoke clicked '삭제(D)' at (757,790)
+[osScopedInvoke] invoked under main window subtree
+[STEP] switch to window: 사이트 관리자 항목 삭제
+[dialog] "사이트 관리자 항목 삭제" hwnd=330408 normalized to { left: 950, top: 472, width: 320, height: 151 }
+[session] hwnd=0x50aa8 owned by 0x90aaa — skipping scoped session (WAD rejects owned windows)
+[STEP] 8:click 예(Y)
+[COM-SendInput] osScopedInvoke clicked '?' at (1101,595)
+[osScopedInvoke] invoked under main window subtree
+[STEP] switch to window: 사이트 관리자
+[STEP] 9:click 취소
+[COM-SendInput] osScopedInvoke clicked '?' at (1637,836)
+[osScopedInvoke] invoked under main window subtree
+[replay-warnings] [ 'esc-recovery:6:type asdf\n' ]
+[FAIL] [ 'osScopedType' ]
+PS C:\hansung\project\code-generator\generated-wdio\FileZilla>
+
+
+
+[agent] Recording started
+[agent] [watcher] added hwnd=1968646 title='FileZilla'
+[agent] [target] hwnds={1968646} titles=['FileZilla']
+[agent] [probe:appwin] hwnd=1968646 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe' parent=0 owner=0 root=1968646 visible=1 rect=(1889, 200, 3089, 1147)
+[agent] [probe:appwin]   child=330156 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=264584 cls='msctls_statusbar32' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=199050 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=199164 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=394022 cls='Static' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=592366 cls='ToolbarWindow32' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=3736056 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=264588 cls='Static' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=788966 cls='Static' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=330114 cls='Edit' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=2165178 cls='Static' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=2230726 cls='Edit' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=460042 cls='Static' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=919942 cls='Edit' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=264600 cls='Static' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=1246466 cls='Edit' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=1050988 cls='Button' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=461200 cls='Button' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=591112 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=199060 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=1575192 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=1444090 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=1116454 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=721986 cls='SysListView32' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=854234 cls='SysHeader32' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=1378524 cls='SysListView32' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=330096 cls='SysHeader32' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=461090 cls='SysListView32' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=262324 cls='SysHeader32' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=199186 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68136 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68138 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68140 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68144 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68148 cls='SysTreeView32' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68226 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68228 cls='ComboBox' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68232 cls='Edit' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68234 cls='Static' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68146 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68158 cls='SysListView32' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68160 cls='SysHeader32' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=133700 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=199256 cls='msctls_statusbar32' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68190 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=133728 cls='Static' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68194 cls='Static' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=133732 cls='Button' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68206 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68208 cls='Static' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68210 cls='Edit' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68212 cls='Button' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68214 cls='Button' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68142 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68166 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68170 cls='SysTreeView32' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68236 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68238 cls='ComboBox' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68242 cls='Edit' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68244 cls='Static' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68168 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=526926 cls='SysListView32' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68176 cls='SysHeader32' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68182 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68188 cls='msctls_statusbar32' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68198 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68200 cls='Static' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68202 cls='Static' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68204 cls='Button' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68216 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68218 cls='Static' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68220 cls='Edit' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68222 cls='Button' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68224 cls='Button' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=133654 cls='wxWindowNR' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [probe:appwin]   child=68120 cls='RICHEDIT50W' pid=31496 img='C:\Program Files\FileZilla FTP Client\filezilla.exe'
+[agent] [meta] session_meta emitted window={'left': 1889, 'top': 200, 'width': 1200, 'height': 947}
+[agent] [diag-click] pynput_pt=(1287,1068) cursor_pt=(1287,1068) delta=(0, 0) gap=0.1570s elem_name='FileZilla - 1개의  실행 중인 창 고정됨' elem_rect=(1254, 1020, 1309, 1080)
+[agent] [skip] click known-other-window top=65768 title='' x=1287 y=1068
+[agent] [probe:clickwin] hwnd=65768 cls='Shell_TrayWnd' pid=37720 img='C:\Windows\explorer.exe' parent=0 owner=0 root=65768 visible=1 rect=(0, 1020, 1920, 1080)
+[agent] [probe:clickwin]   child=66076 cls='Windows.UI.Core.CoreWindow' pid=37720 img='C:\Windows\explorer.exe'
+[agent] [probe:clickwin]   child=65772 cls='Start' pid=37720 img='C:\Windows\explorer.exe'
+[agent] [probe:clickwin]   child=65774 cls='TrayDummySearchControl' pid=37720 img='C:\Windows\explorer.exe'
+[agent] [probe:clickwin]   child=65776 cls='TrayNotifyWnd' pid=37720 img='C:\Windows\explorer.exe'
+[agent] [probe:clickwin]   child=65780 cls='ReBarWindow32' pid=37720 img='C:\Windows\explorer.exe'
+[agent] [probe:clickwin]   child=65782 cls='MSTaskSwWClass' pid=37720 img='C:\Windows\explorer.exe'
+[agent] [probe:clickwin]   child=65784 cls='MSTaskListWClass' pid=37720 img='C:\Windows\explorer.exe'
+[agent] [probe:clickwin]   child=66090 cls='Windows.UI.Composition.DesktopWindowContentBridge' pid=37720 img='C:\Windows\explorer.exe'
+[agent] [probe:clickwin]   child=66092 cls='Windows.UI.Input.InputSite.WindowClass' pid=37720 img='C:\Windows\explorer.exe'
+[agent] [inspect] ExpandCollapsePattern available on 'MenuItem' name='시스템'
+[agent] [diag-click] pynput_pt=(1906,220) cursor_pt=(1906,220) delta=(0, 0) gap=0.0457s elem_name='시스템' elem_rect=(1898, 209, 1926, 237)
+[agent] [diag-drag] start=(1906,220) end=(584,295) dist=1324.1
+[agent] [skip] drag known-other-window top=592210 title='Desktop Automation Code Generator - Chrome' x=1906 y=220
+[agent] [diag-click] pynput_pt=(987,296) cursor_pt=(987,296) delta=(0, 0) gap=0.0762s elem_name='' elem_rect=(596, 278, 1758, 313)
+[agent] [diag-drag] start=(987,296) end=(930,95) dist=208.9
+[agent] #1 drag        id='' name='' rect=(596, 278, 1758, 313) pt=(987,296)
+[agent] [watcher] added hwnd=1837532 title=''
+[agent] [inspect] ExpandCollapsePattern available on 'MenuItem' name='파일(F)'
+[agent] [diag-click] pynput_pt=(547,129) cursor_pt=(547,129) delta=(0, 0) gap=0.0489s elem_name='파일(F)' elem_rect=(519, 112, 584, 136)
+[agent] #2 click       id='' name='파일(F)' rect=(519, 112, 584, 136) pt=(547,129)
+[agent] [inspect] ExpandCollapsePattern available on 'MenuItem' name='편집(E)'
+[agent] [diag-click] pynput_pt=(605,121) cursor_pt=(605,121) delta=(0, 0) gap=0.0229s elem_name='편집(E)' elem_rect=(584, 112, 650, 136)
+[agent] [watcher] added hwnd=264788 title=''
+[agent] #3 click       id='' name='편집(E)' rect=(584, 112, 650, 136) pt=(605,121)
+[agent] [inspect] ExpandCollapsePattern available on 'MenuItem' name='파일(F)'
+[agent] [diag-click] pynput_pt=(552,129) cursor_pt=(552,129) delta=(0, 0) gap=0.0135s elem_name='파일(F)' elem_rect=(519, 112, 584, 136)
+[agent] #4 click       id='' name='파일(F)' rect=(519, 112, 584, 136) pt=(552,129)
+[agent] [watcher] added hwnd=68276 title=''
+[agent] [inspect] ExpandCollapsePattern available on 'MenuItem' name='사이트 관리자(S)...\tCtrl+S'
+[agent] [diag-click] pynput_pt=(585,156) cursor_pt=(585,156) delta=(0, 0) gap=0.0167s elem_name='사이트 관리자(S)...    Ctrl+S' elem_rect=(522, 139, 954, 165)
+[agent] #5 click       id='33662' name='사이트 관리자(S)...     Ctrl+S' rect=(522, 139, 954, 165) pt=(585,156)
+[agent] [watcher] added hwnd=133812 title='사이트 관리자'
+[agent] [inspect] self-heal hwnd=68284 (name='새 사이트(N)') — accepted (pre-empts 0.5s watcher poll; PID or same install dir)
+[agent] [diag-click] pynput_pt=(766,709) cursor_pt=(766,709) delta=(0, 0) gap=0.0452s elem_name='새 사이트(N)' elem_rect=(696, 704, 819, 732)
+[agent] #6 click       id='-31983' name='새 사이트(N)' rect=(696, 704, 819, 732) pt=(766,709)
+[agent] #7 type        id='1' name='' rect=(607, 324, 650, 352) pt=(628,338) value='asdf
+'
+[agent] [inspect] self-heal hwnd=68292 (name='삭제(D)') — accepted (pre-empts 0.5s watcher poll; PID or same install dir)
+[agent] [diag-click] pynput_pt=(752,793) cursor_pt=(752,793) delta=(0, 0) gap=0.0448s elem_name='삭제(D)' elem_rect=(696, 776, 819, 804)
+[agent] #8 click       id='-31980' name='삭제(D)' rect=(696, 776, 819, 804) pt=(752,793)
+[agent] [watcher] added hwnd=134110 title='사이트 관리자 항목 삭제'
+[agent] [inspect] self-heal hwnd=68580 (name='예(Y)') — accepted (pre-empts 0.5s watcher poll; PID or same install dir)
+[agent] [diag-click] pynput_pt=(1101,591) cursor_pt=(1101,591) delta=(0, 0) gap=0.0346s elem_name='예(Y)' elem_rect=(1055, 581, 1148, 609)
+[agent] #9 click       id='5103' name='예(Y)' rect=(1055, 581, 1148, 609) pt=(1101,591)
+[agent] [inspect] self-heal hwnd=68302 (name='취소') — accepted (pre-empts 0.5s watcher poll; PID or same install dir)
+[agent] [diag-click] pynput_pt=(1636,837) cursor_pt=(1636,837) delta=(0, 0) gap=0.0423s elem_name='취소' elem_rect=(1591, 822, 1684, 850)
+[agent] #10 click       id='5101' name='취소' rect=(1591, 822, 1684, 850) pt=(1636,837)
+[agent] [diag-click] pynput_pt=(265,396) cursor_pt=(265,396) delta=(0, 0) gap=0.1277s elem_name='Stop' elem_rect=(219, 367, 294, 405)
+[agent] [skip] click known-other-window top=592210 title='Desktop Automation Code Generator - Chrome' x=265 y=396
+[agent] Worker finished
+[agent] Recording stopped

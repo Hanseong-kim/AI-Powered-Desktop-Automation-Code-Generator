@@ -1,0 +1,135 @@
+PS C:\hansung\project\code-generator\generated-wdio> cd .\Calculator\
+PS C:\hansung\project\code-generator\generated-wdio\Calculator> node .\CalculatorTestByClass.js
+[appium] starting Appium...
+[appium] ready
+[session] app session 7efbcde0-a28a-4d27-a7b9-8098030ce544 ready
+[hwnd] session window hwnd=2296088 (0x230918)
+[normalize] window moved to { left: 1202, top: 0, width: 334, height: 540 }
+[STEP] 1:click 7
+[STEP] 2:click 8
+[STEP] 3:click 9
+[STEP] 4:click 곱
+[STEP] 5:click 6
+[STEP] 6:click 5
+[STEP] 7:click 2
+[STEP] 8:click 더하기
+[STEP] 9:click 3
+[STEP] 10:click 5
+[STEP] 11:click 7
+[STEP] 12:click 빼기
+[STEP] 13:click 9
+[STEP] 14:click 8
+[STEP] 15:click 5
+[STEP] 16:click 5
+[STEP] 17:click 일치
+[STEP] 18:click 나누기
+[STEP] 19:click 8
+[findElement] lookup failed: Appium request timed out after 20000ms: POST /session/7efbcde0-a28a-4d27-a7b9-8098030ce544/element
+[findElement] lookup failed: Appium request timed out after 20000ms: POST /session/7efbcde0-a28a-4d27-a7b9-8098030ce544/element
+[STEP] 20:click 공
+[findElement] lookup failed: Appium request timed out after 20000ms: POST /session/7efbcde0-a28a-4d27-a7b9-8098030ce544/element
+[findElement] lookup failed: Appium request timed out after 20000ms: POST /session/7efbcde0-a28a-4d27-a7b9-8098030ce544/element
+[STEP] 21:click 일치
+[findElement] lookup failed: Appium request timed out after 20000ms: POST /session/7efbcde0-a28a-4d27-a7b9-8098030ce544/element
+[findElement] lookup failed: Appium request timed out after 20000ms: POST /session/7efbcde0-a28a-4d27-a7b9-8098030ce544/element
+[STEP] 22:click 곱
+[findElement] lookup failed: Appium request timed out after 20000ms: POST /session/7efbcde0-a28a-4d27-a7b9-8098030ce544/element
+[findElement] lookup failed: Appium request timed out after 20000ms: POST /session/7efbcde0-a28a-4d27-a7b9-8098030ce544/element
+[STEP] 23:click 9
+[findElement] lookup failed: Appium request timed out after 20000ms: POST /session/7efbcde0-a28a-4d27-a7b9-8098030ce544/element
+[findElement] lookup failed: Appium request timed out after 20000ms: POST /session/7efbcde0-a28a-4d27-a7b9-8098030ce544/element
+[STEP] 24:click 일치
+[findElement] lookup failed: Appium request timed out after 20000ms: POST /session/7efbcde0-a28a-4d27-a7b9-8098030ce544/element
+[findElement] lookup failed: Appium request timed out after 20000ms: POST /session/7efbcde0-a28a-4d27-a7b9-8098030ce544/element
+[replay-warnings] [
+  'esc-skipped-main-foreground:19:click 8',
+  'esc-skipped-main-foreground:20:click 공',
+  'esc-skipped-main-foreground:21:click 일치',
+  'esc-skipped-main-foreground:22:click 곱',
+  'esc-skipped-main-foreground:23:click 9',
+  'esc-skipped-main-foreground:24:click 일치'
+]
+[FAIL] [
+  'click-not-found://Button[@ClassName="Button" and @Name="8"]',
+  'click-not-found://Button[@ClassName="Button" and @Name="공"]',
+  'click-not-found://Button[@ClassName="Button" and @Name="일치"]',
+  'click-not-found://Button[@ClassName="Button" and @Name="곱"]',
+  'click-not-found://Button[@ClassName="Button" and @Name="9"]',
+  'click-not-found://Button[@ClassName="Button" and @Name="일치"]'
+]
+PS C:\hansung\project\code-generator\generated-wdio\Calculator>
+
+
+
+[agent] Recording started
+[agent] [target] ignoring unrelated new window hwnd=592822 title='계산기' img='C:\Windows\System32\ApplicationFrameHost.exe'
+[agent] [target] ignoring unrelated new window hwnd=592822 title='계산기' img='C:\Windows\System32\ApplicationFrameHost.exe'
+[agent] [target] hwnds={1116532} titles=['계산기']
+[agent] [probe:appwin] hwnd=1116532 cls='Windows.UI.Core.CoreWindow' pid=43268 img='C:\Program Files\WindowsApps\Microsoft.WindowsCalculator_11.2605.9.0_x64__8wekyb3d8bbwe\CalculatorApp.exe' parent=0 owner=0 root=1116532 visible=1 rect=(0, 1, 400, 666)
+[agent] [meta] session_meta emitted window={'left': 0, 'top': 1, 'width': 400, 'height': 665}
+[agent] [diag-click] pynput_pt=(1395,1072) cursor_pt=(1395,1072) delta=(0, 0) gap=0.0530s elem_name='계산기 - 1개의 실행 중인 창' elem_rect=(1364, 1020, 1419, 1080)
+[agent] [skip] click known-other-window top=65768 title='' x=1395 y=1072
+[agent] [probe:clickwin] hwnd=65768 cls='Shell_TrayWnd' pid=37720 img='C:\Windows\explorer.exe' parent=0 owner=0 root=65768 visible=1 rect=(0, 1020, 1920, 1080)
+[agent] [probe:clickwin]   child=66076 cls='Windows.UI.Core.CoreWindow' pid=37720 img='C:\Windows\explorer.exe'
+[agent] [probe:clickwin]   child=65772 cls='Start' pid=37720 img='C:\Windows\explorer.exe'
+[agent] [probe:clickwin]   child=65774 cls='TrayDummySearchControl' pid=37720 img='C:\Windows\explorer.exe'
+[agent] [probe:clickwin]   child=65776 cls='TrayNotifyWnd' pid=37720 img='C:\Windows\explorer.exe'
+[agent] [probe:clickwin]   child=65780 cls='ReBarWindow32' pid=37720 img='C:\Windows\explorer.exe'
+[agent] [probe:clickwin]   child=65782 cls='MSTaskSwWClass' pid=37720 img='C:\Windows\explorer.exe'
+[agent] [probe:clickwin]   child=65784 cls='MSTaskListWClass' pid=37720 img='C:\Windows\explorer.exe'
+[agent] [probe:clickwin]   child=66090 cls='Windows.UI.Composition.DesktopWindowContentBridge' pid=37720 img='C:\Windows\explorer.exe'
+[agent] [probe:clickwin]   child=66092 cls='Windows.UI.Input.InputSite.WindowClass' pid=37720 img='C:\Windows\explorer.exe'
+[agent] [diag-click] pynput_pt=(1565,431) cursor_pt=(1565,431) delta=(0, 0) gap=0.0500s elem_name='7' elem_rect=(1516, 398, 1612, 461)
+[agent] [target] lazy frame 592822 hosts CoreWindow 1116532 — added
+[agent] #1 click       id='num7Button' name='7' rect=(1516, 398, 1612, 461) pt=(1565,431)
+[agent] [watcher] added hwnd=394116 title='설정'
+[agent] [diag-click] pynput_pt=(1684,433) cursor_pt=(1684,433) delta=(0, 0) gap=0.0293s elem_name='8' elem_rect=(1613, 398, 1709, 461)
+[agent] #2 click       id='num8Button' name='8' rect=(1613, 398, 1709, 461) pt=(1684,433)
+[agent] [diag-click] pynput_pt=(1753,426) cursor_pt=(1753,426) delta=(0, 0) gap=0.0290s elem_name='9' elem_rect=(1712, 398, 1808, 461)
+[agent] #3 click       id='num9Button' name='9' rect=(1712, 398, 1808, 461) pt=(1753,426)
+[agent] [diag-click] pynput_pt=(1846,429) cursor_pt=(1846,429) delta=(0, 0) gap=0.0246s elem_name='곱' elem_rect=(1810, 399, 1906, 462)
+[agent] #4 click       id='multiplyButton' name='곱' rect=(1810, 399, 1906, 462) pt=(1846,429)
+[agent] [diag-click] pynput_pt=(1767,489) cursor_pt=(1767,489) delta=(0, 0) gap=0.0241s elem_name='6' elem_rect=(1712, 465, 1808, 528)
+[agent] #5 click       id='num6Button' name='6' rect=(1712, 465, 1808, 528) pt=(1767,489)
+[agent] [diag-click] pynput_pt=(1692,483) cursor_pt=(1692,483) delta=(0, 0) gap=0.0317s elem_name='5' elem_rect=(1613, 465, 1709, 528)
+[agent] #6 click       id='num5Button' name='5' rect=(1613, 465, 1709, 528) pt=(1692,483)
+[agent] [diag-click] pynput_pt=(1674,554) cursor_pt=(1674,554) delta=(0, 0) gap=0.0381s elem_name='2' elem_rect=(1613, 530, 1709, 594)
+[agent] #7 click       id='num2Button' name='2' rect=(1613, 530, 1709, 594) pt=(1674,554)
+[agent] [diag-click] pynput_pt=(1870,561) cursor_pt=(1870,561) delta=(0, 0) gap=0.0267s elem_name='더하기' elem_rect=(1810, 530, 1906, 593)
+[agent] #8 click       id='plusButton' name='더하기' rect=(1810, 530, 1906, 593) pt=(1870,561)
+[agent] [diag-click] pynput_pt=(1759,560) cursor_pt=(1759,560) delta=(0, 0) gap=0.0211s elem_name='3' elem_rect=(1712, 530, 1808, 594)
+[agent] #9 click       id='num3Button' name='3' rect=(1712, 530, 1808, 594) pt=(1759,560)
+[agent] [diag-click] pynput_pt=(1660,500) cursor_pt=(1660,500) delta=(0, 0) gap=0.0259s elem_name='5' elem_rect=(1613, 465, 1709, 528)
+[agent] #10 click       id='num5Button' name='5' rect=(1613, 465, 1709, 528) pt=(1660,500)
+[agent] [diag-click] pynput_pt=(1578,427) cursor_pt=(1578,427) delta=(0, 0) gap=0.0371s elem_name='7' elem_rect=(1516, 398, 1612, 461)
+[agent] #11 click       id='num7Button' name='7' rect=(1516, 398, 1612, 461) pt=(1578,427)
+[agent] [diag-click] pynput_pt=(1856,491) cursor_pt=(1856,491) delta=(0, 0) gap=0.0320s elem_name='빼기' elem_rect=(1810, 464, 1906, 527)
+[agent] #12 click       id='minusButton' name='빼기' rect=(1810, 464, 1906, 527) pt=(1856,491)
+[agent] [diag-click] pynput_pt=(1788,444) cursor_pt=(1788,444) delta=(0, 0) gap=0.0284s elem_name='9' elem_rect=(1712, 398, 1808, 461)
+[agent] #13 click       id='num9Button' name='9' rect=(1712, 398, 1808, 461) pt=(1788,444)
+[agent] [diag-click] pynput_pt=(1657,438) cursor_pt=(1657,438) delta=(0, 0) gap=0.0295s elem_name='8' elem_rect=(1613, 398, 1709, 461)
+[agent] #14 click       id='num8Button' name='8' rect=(1613, 398, 1709, 461) pt=(1657,438)
+[agent] [diag-click] pynput_pt=(1663,495) cursor_pt=(1663,495) delta=(0, 0) gap=0.0298s elem_name='5' elem_rect=(1613, 465, 1709, 528)
+[agent] #15 click       id='num5Button' name='5' rect=(1613, 465, 1709, 528) pt=(1663,495)
+[agent] [diag-click] pynput_pt=(1663,495) cursor_pt=(1663,495) delta=(0, 0) gap=0.0291s elem_name='5' elem_rect=(1613, 465, 1709, 528)
+[agent] #16 click       id='num5Button' name='5' rect=(1613, 465, 1709, 528) pt=(1663,495)
+[agent] [diag-click] pynput_pt=(1865,618) cursor_pt=(1865,618) delta=(0, 0) gap=0.0370s elem_name='일치' elem_rect=(1810, 596, 1906, 660)
+[agent] #17 click       id='equalButton' name='일치' rect=(1810, 596, 1906, 660) pt=(1865,618)
+[agent] [diag-click] pynput_pt=(1868,357) cursor_pt=(1868,357) delta=(0, 0) gap=0.0270s elem_name='나누기' elem_rect=(1810, 332, 1906, 395)
+[agent] #18 click       id='divideButton' name='나누기' rect=(1810, 332, 1906, 395) pt=(1868,357)
+[agent] [diag-click] pynput_pt=(1653,429) cursor_pt=(1653,429) delta=(0, 0) gap=0.0295s elem_name='8' elem_rect=(1613, 398, 1709, 461)
+[agent] #19 click       id='num8Button' name='8' rect=(1613, 398, 1709, 461) pt=(1653,429)
+[agent] [diag-click] pynput_pt=(1659,634) cursor_pt=(1659,634) delta=(0, 0) gap=0.0423s elem_name='공' elem_rect=(1613, 597, 1709, 660)
+[agent] #20 click       id='num0Button' name='공' rect=(1613, 597, 1709, 660) pt=(1659,634)
+[agent] [diag-click] pynput_pt=(1845,615) cursor_pt=(1845,615) delta=(0, 0) gap=0.0256s elem_name='일치' elem_rect=(1810, 596, 1906, 660)
+[agent] #21 click       id='equalButton' name='일치' rect=(1810, 596, 1906, 660) pt=(1845,615)
+[agent] [diag-click] pynput_pt=(1874,437) cursor_pt=(1874,437) delta=(0, 0) gap=0.0429s elem_name='곱' elem_rect=(1810, 399, 1906, 462)
+[agent] #22 click       id='multiplyButton' name='곱' rect=(1810, 399, 1906, 462) pt=(1874,437)
+[agent] [diag-click] pynput_pt=(1742,427) cursor_pt=(1742,427) delta=(0, 0) gap=0.0321s elem_name='9' elem_rect=(1712, 398, 1808, 461)
+[agent] #23 click       id='num9Button' name='9' rect=(1712, 398, 1808, 461) pt=(1742,427)
+[agent] [diag-click] pynput_pt=(1862,607) cursor_pt=(1862,607) delta=(0, 0) gap=0.0248s elem_name='일치' elem_rect=(1810, 596, 1906, 660)
+[agent] #24 click       id='equalButton' name='일치' rect=(1810, 596, 1906, 660) pt=(1862,607)
+[agent] [diag-click] pynput_pt=(261,388) cursor_pt=(261,388) delta=(0, 0) gap=0.1451s elem_name='Stop' elem_rect=(219, 367, 294, 405)
+[agent] [skip] click known-other-window top=592210 title='Desktop Automation Code Generator - Chrome' x=261 y=388
+[agent] Worker finished
+[agent] Recording stopped
