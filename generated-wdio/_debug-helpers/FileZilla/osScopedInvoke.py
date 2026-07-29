@@ -356,19 +356,52 @@ def invoke_item(uia, mod, el):
 # 여럿이면 offscreen이 아닌 것을 고른다. 여러 후보를 차례로 클릭해보는 방식은
 # 쓰지 않는다 — 실패한 후보가 드롭다운을 열어둔 채로 남아 다음 후보 클릭이
 # 그 팝업 해제에 먹히기 때문.
-def pick_trigger(uia, root, cond):
-    try:
-        arr = root.FindAll(TreeScope_Subtree, cond)
-    except Exception:
-        arr = None
-    if not arr:
-        return None
+def elements_from(arr):
     cands = []
+    if not arr:
+        return cands
     for i in range(arr.Length):
         try:
             cands.append(arr.GetElement(i))
         except Exception:
             pass
+    return cands
+
+
+# 2026-07-29 (HeidiSQL: 두 콤보박스의 드롭다운 화살표가 automationId="DropDown"을
+# 공유): pick_trigger의 기존 "offscreen 제외 후 첫 번째" 방식은 PuTTY 전용
+# 가정(비활성 패널 컨트롤이 화면 밖으로 밀려남)에 의존한다 — HeidiSQL은 두
+# 콤보가 동시에 진짜로 화면에 떠 있어 이 필터가 아무 것도 못 거른다. 캡처된
+# window-relative Y(relY)를 현재 창의 실제 위치에 매 실행마다 다시 더해
+# 절대 Y로 변환하고, 후보들 중 그 위치에 가장 가까운 rect.top을 가진 걸
+# 고른다 — 저장된 화면 좌표를 클릭에 쓰는 게 아니라(§3 금지 대상과 다름),
+# 이미 구조적으로 찾아낸 후보들 사이에서 어느 걸 고를지 정하는 신호로만
+# 쓴다(§3 2026-07-24 재정의: 매 실행 재계산·즉시 소비·저장 안 함 — 이미
+# 승인된 dynamic ClickablePoint 예외와 같은 성격).
+def pick_by_position(cands, win_top, rel_y):
+    if not cands:
+        return None
+    if len(cands) == 1 or win_top is None or rel_y is None:
+        return cands[0]
+    target_y = win_top + rel_y
+    best, best_dist = None, None
+    for c in cands:
+        try:
+            r = c.CurrentBoundingRectangle
+            d = abs(r.top - target_y)
+        except Exception:
+            continue
+        if best_dist is None or d < best_dist:
+            best, best_dist = c, d
+    return best if best is not None else cands[0]
+
+
+def pick_trigger(uia, root, cond, win_top=None, rel_y=None):
+    try:
+        arr = root.FindAll(TreeScope_Subtree, cond)
+    except Exception:
+        arr = None
+    cands = elements_from(arr)
     if not cands:
         return None
     if len(cands) == 1:
@@ -380,10 +413,17 @@ def pick_trigger(uia, root, cond):
                 visible.append(c)
         except Exception:
             visible.append(c)
+    pool = visible or cands
+    if win_top is not None and rel_y is not None:
+        picked = pick_by_position(pool, win_top, rel_y)
+        if picked is not None:
+            print(f"[osScopedInvoke] trigger selector matched {len(cands)} elements "
+                  f"({len(visible)} on screen) — disambiguated by recorded position")
+            return picked
     print(f"[osScopedInvoke] WARN trigger selector matched {len(cands)} elements "
           f"({len(visible)} on screen) — the automationId is reused across "
           f"controls; picking the first on-screen one")
-    return (visible or cands)[0]
+    return pool[0]
 
 
 # 2026-07-17: owned 다이얼로그(WAD가 scoped session을 거부하는 창)에 타이핑하기
@@ -455,6 +495,12 @@ def main():
     ap.add_argument("--sel-b64", required=True)
     ap.add_argument("--trigger-sel-b64", default=None)
     ap.add_argument("--text-b64", default=None)
+    # 2026-07-29 (HeidiSQL DropDown 재사용): 구조적으로 여러 후보가 걸릴 때
+    # 어느 걸 고를지에만 쓰는 위치 힌트 — 클릭 좌표 자체가 아니다(§3 참고,
+    # pick_by_position 주석). rel-y/trigger-rel-y는 캡처 시점의 창-상대 Y이고,
+    # 매 실행 현재 창 위치에 다시 더해서만 쓴다.
+    ap.add_argument("--rel-y", type=int, default=None)
+    ap.add_argument("--trigger-rel-y", type=int, default=None)
     args = ap.parse_args()
 
     enable_per_monitor_dpi()
@@ -487,6 +533,14 @@ def main():
         print("osScopedInvoke: ElementFromHandle failed", file=sys.stderr)
         sys.exit(2)
 
+    win_top = None
+    try:
+        r = wintypes.RECT()
+        if user32.GetWindowRect(main_h, ctypes.byref(r)):
+            win_top = r.top
+    except Exception:
+        pass
+
     sel = json.loads(base64.b64decode(args.sel_b64).decode("utf-8"))
     item_cond = resolve_cond(uia, sel)
     if item_cond is None:
@@ -500,7 +554,7 @@ def main():
         trigger_sel = json.loads(base64.b64decode(args.trigger_sel_b64).decode("utf-8"))
         trigger_cond = resolve_cond(uia, trigger_sel)
         if trigger_cond is not None:
-            trigger = pick_trigger(uia, root, trigger_cond)
+            trigger = pick_trigger(uia, root, trigger_cond, win_top, args.trigger_rel_y)
             if trigger:
                 invoke_item(uia, mod, trigger)
             else:
@@ -540,8 +594,23 @@ def main():
         # (a) 메인 창 서브트리. Subtree = 창 자기 자신(root)도 포함해 검색한다 —
         #     Descendants만 쓰면 캡처된 타겟이 창 자체(예: className="#32770")인
         #     경우 구조적으로 못 찾는다(2026-07-16 FileZilla 다이얼로그 클릭 확인).
+        # rel_y 힌트가 있으면 FindAll로 모든 후보를 모아 위치로 가려낸다
+        # (2026-07-29, HeidiSQL: 같은 창 안에 automationId="DropDown"을
+        # 공유하는 콤보가 둘 이상 — FindFirst는 항상 같은 하나만 반환).
+        # 힌트가 없으면 기존과 동일하게 FindFirst 한 건만 본다.
+        item = None
         try:
-            item = root.FindFirst(TreeScope_Subtree, item_cond)
+            if args.rel_y is not None:
+                cands = elements_from(root.FindAll(TreeScope_Subtree, item_cond))
+                if len(cands) > 1:
+                    picked = pick_by_position(cands, win_top, args.rel_y)
+                    print(f"[osScopedInvoke] selector matched {len(cands)} elements in main "
+                          f"window — disambiguated by recorded position")
+                    item = picked
+                elif cands:
+                    item = cands[0]
+            else:
+                item = root.FindFirst(TreeScope_Subtree, item_cond)
         except Exception:
             item = None
         if item and act(item):

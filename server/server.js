@@ -404,7 +404,7 @@ if __name__ == "__main__":
 // NOTE: no SetProcessDPIAware call here — agent.py capture and osClick.ps1 are
 // both DPI-unaware, and adding awareness here would skew coordinates by the
 // DPI scale factor (verified: unaware rect matches agent-captured winLeft).
-const OS_WINRECT_PS1 = `param([string]$titleLike, [string]$hwnd, [switch]$listOnly, [switch]$ownerOnly)
+const OS_WINRECT_PS1 = `param([string]$titleLike, [string]$hwnd, [switch]$listOnly, [switch]$ownerOnly, [string]$siblingOf)
 Add-Type @"
 using System;
 using System.Text;
@@ -420,6 +420,7 @@ public class WinEnum {
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hWnd, uint cmd);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   public static List<IntPtr> Find(string titleLike) {
     var found = new List<IntPtr>();
@@ -434,8 +435,36 @@ public class WinEnum {
     }, IntPtr.Zero);
     return found;
   }
+  // Sibling top-level windows of the same process as hwndOf, excluding
+  // hwndOf itself, restricted to ones with a real (non-zero) rect. Used to
+  // recover from WinAppDriver/OS binding the "main" window to a hidden 0x0
+  // helper window instead of the app's actual visible form (observed with
+  // HeidiSQL's Delphi/VCL 'TApplication' window).
+  public static List<IntPtr> FindSizedSiblings(IntPtr hwndOf) {
+    var found = new List<IntPtr>();
+    uint pid;
+    GetWindowThreadProcessId(hwndOf, out pid);
+    if (pid == 0) return found;
+    EnumWindows((hWnd, lParam) => {
+      if (hWnd == hwndOf || !IsWindowVisible(hWnd)) return true;
+      uint wpid;
+      GetWindowThreadProcessId(hWnd, out wpid);
+      if (wpid != pid) return true;
+      RECT r;
+      if (GetWindowRect(hWnd, out r) && (r.Right - r.Left) > 0 && (r.Bottom - r.Top) > 0) {
+        found.Add(hWnd);
+      }
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
 }
 "@ -ErrorAction SilentlyContinue
+if ($siblingOf) {
+  $sibs = [WinEnum]::FindSizedSiblings([IntPtr]([int64]$siblingOf))
+  if ($sibs.Count -gt 0) { Write-Output ([int64]$sibs[0]) }
+  exit
+}
 # -hwnd targets one specific window directly, bypassing title matching entirely.
 # Title matching alone is ambiguous whenever more than one window shares a
 # substring (e.g. every VS Code window's title ends in "Visual Studio Code") —
@@ -1521,19 +1550,52 @@ def invoke_item(uia, mod, el):
 # 여럿이면 offscreen이 아닌 것을 고른다. 여러 후보를 차례로 클릭해보는 방식은
 # 쓰지 않는다 — 실패한 후보가 드롭다운을 열어둔 채로 남아 다음 후보 클릭이
 # 그 팝업 해제에 먹히기 때문.
-def pick_trigger(uia, root, cond):
-    try:
-        arr = root.FindAll(TreeScope_Subtree, cond)
-    except Exception:
-        arr = None
-    if not arr:
-        return None
+def elements_from(arr):
     cands = []
+    if not arr:
+        return cands
     for i in range(arr.Length):
         try:
             cands.append(arr.GetElement(i))
         except Exception:
             pass
+    return cands
+
+
+# 2026-07-29 (HeidiSQL: 두 콤보박스의 드롭다운 화살표가 automationId="DropDown"을
+# 공유): pick_trigger의 기존 "offscreen 제외 후 첫 번째" 방식은 PuTTY 전용
+# 가정(비활성 패널 컨트롤이 화면 밖으로 밀려남)에 의존한다 — HeidiSQL은 두
+# 콤보가 동시에 진짜로 화면에 떠 있어 이 필터가 아무 것도 못 거른다. 캡처된
+# window-relative Y(relY)를 현재 창의 실제 위치에 매 실행마다 다시 더해
+# 절대 Y로 변환하고, 후보들 중 그 위치에 가장 가까운 rect.top을 가진 걸
+# 고른다 — 저장된 화면 좌표를 클릭에 쓰는 게 아니라(§3 금지 대상과 다름),
+# 이미 구조적으로 찾아낸 후보들 사이에서 어느 걸 고를지 정하는 신호로만
+# 쓴다(§3 2026-07-24 재정의: 매 실행 재계산·즉시 소비·저장 안 함 — 이미
+# 승인된 dynamic ClickablePoint 예외와 같은 성격).
+def pick_by_position(cands, win_top, rel_y):
+    if not cands:
+        return None
+    if len(cands) == 1 or win_top is None or rel_y is None:
+        return cands[0]
+    target_y = win_top + rel_y
+    best, best_dist = None, None
+    for c in cands:
+        try:
+            r = c.CurrentBoundingRectangle
+            d = abs(r.top - target_y)
+        except Exception:
+            continue
+        if best_dist is None or d < best_dist:
+            best, best_dist = c, d
+    return best if best is not None else cands[0]
+
+
+def pick_trigger(uia, root, cond, win_top=None, rel_y=None):
+    try:
+        arr = root.FindAll(TreeScope_Subtree, cond)
+    except Exception:
+        arr = None
+    cands = elements_from(arr)
     if not cands:
         return None
     if len(cands) == 1:
@@ -1545,10 +1607,17 @@ def pick_trigger(uia, root, cond):
                 visible.append(c)
         except Exception:
             visible.append(c)
+    pool = visible or cands
+    if win_top is not None and rel_y is not None:
+        picked = pick_by_position(pool, win_top, rel_y)
+        if picked is not None:
+            print(f"[osScopedInvoke] trigger selector matched {len(cands)} elements "
+                  f"({len(visible)} on screen) — disambiguated by recorded position")
+            return picked
     print(f"[osScopedInvoke] WARN trigger selector matched {len(cands)} elements "
           f"({len(visible)} on screen) — the automationId is reused across "
           f"controls; picking the first on-screen one")
-    return (visible or cands)[0]
+    return pool[0]
 
 
 # 2026-07-17: owned 다이얼로그(WAD가 scoped session을 거부하는 창)에 타이핑하기
@@ -1620,6 +1689,12 @@ def main():
     ap.add_argument("--sel-b64", required=True)
     ap.add_argument("--trigger-sel-b64", default=None)
     ap.add_argument("--text-b64", default=None)
+    # 2026-07-29 (HeidiSQL DropDown 재사용): 구조적으로 여러 후보가 걸릴 때
+    # 어느 걸 고를지에만 쓰는 위치 힌트 — 클릭 좌표 자체가 아니다(§3 참고,
+    # pick_by_position 주석). rel-y/trigger-rel-y는 캡처 시점의 창-상대 Y이고,
+    # 매 실행 현재 창 위치에 다시 더해서만 쓴다.
+    ap.add_argument("--rel-y", type=int, default=None)
+    ap.add_argument("--trigger-rel-y", type=int, default=None)
     args = ap.parse_args()
 
     enable_per_monitor_dpi()
@@ -1652,6 +1727,14 @@ def main():
         print("osScopedInvoke: ElementFromHandle failed", file=sys.stderr)
         sys.exit(2)
 
+    win_top = None
+    try:
+        r = wintypes.RECT()
+        if user32.GetWindowRect(main_h, ctypes.byref(r)):
+            win_top = r.top
+    except Exception:
+        pass
+
     sel = json.loads(base64.b64decode(args.sel_b64).decode("utf-8"))
     item_cond = resolve_cond(uia, sel)
     if item_cond is None:
@@ -1665,7 +1748,7 @@ def main():
         trigger_sel = json.loads(base64.b64decode(args.trigger_sel_b64).decode("utf-8"))
         trigger_cond = resolve_cond(uia, trigger_sel)
         if trigger_cond is not None:
-            trigger = pick_trigger(uia, root, trigger_cond)
+            trigger = pick_trigger(uia, root, trigger_cond, win_top, args.trigger_rel_y)
             if trigger:
                 invoke_item(uia, mod, trigger)
             else:
@@ -1706,8 +1789,23 @@ def main():
         # (a) 메인 창 서브트리. Subtree = 창 자기 자신(root)도 포함해 검색한다 —
         #     Descendants만 쓰면 캡처된 타겟이 창 자체(예: className="#32770")인
         #     경우 구조적으로 못 찾는다(2026-07-16 FileZilla 다이얼로그 클릭 확인).
+        # rel_y 힌트가 있으면 FindAll로 모든 후보를 모아 위치로 가려낸다
+        # (2026-07-29, HeidiSQL: 같은 창 안에 automationId="DropDown"을
+        # 공유하는 콤보가 둘 이상 — FindFirst는 항상 같은 하나만 반환).
+        # 힌트가 없으면 기존과 동일하게 FindFirst 한 건만 본다.
+        item = None
         try:
-            item = root.FindFirst(TreeScope_Subtree, item_cond)
+            if args.rel_y is not None:
+                cands = elements_from(root.FindAll(TreeScope_Subtree, item_cond))
+                if len(cands) > 1:
+                    picked = pick_by_position(cands, win_top, args.rel_y)
+                    print(f"[osScopedInvoke] selector matched {len(cands)} elements in main "
+                          f"window — disambiguated by recorded position")
+                    item = picked
+                elif cands:
+                    item = cands[0]
+            else:
+                item = root.FindFirst(TreeScope_Subtree, item_cond)
         except Exception:
             item = None
         if item and act(item):
@@ -1913,7 +2011,20 @@ function mergeExpandCollapseClicks(events) {
         i = j;
       }
       const next = events[i + 1];
-      const itemName = next?.element?.name || next?.element?.automationId;
+      // Name only — never fall back to automationId as a fake itemName
+      // (2026-07-29, HeidiSQL encoding ComboBox: owner-drawn list items
+      // expose a numeric automationId (e.g. "1576746", itself just the
+      // control's own hwnd) but NO Name at all). osExpandCollapse.py's item
+      // search is UIA_NameProperty-only (`item_cond = CreatePropertyCondition
+      // (UIA_NameProperty, item_name)`) — searching for the literal digit
+      // string "1576746" as a Name can never match anything, so this always
+      // failed with a misleading "item not found" instead of the honest
+      // "this item has no name we can search for". Leaving itemName empty
+      // here makes the merge below fall through and keeps the trigger a
+      // standalone toggle — the nameless item then flows through the normal
+      // per-event codegen path, which explicitly fails it (no-selector) if
+      // it truly has nothing usable, instead of a bogus text search.
+      const itemName = next?.element?.name || '';
       // Sibling-menu misattribution guard (2026-07-20, reproduced
       // independently in FileZilla — 07-19, 파일→편집→보기 연속 트리거 — and
       // here in Notepad's native XAML menu bar): a real dropdown/flyout item
@@ -2019,11 +2130,25 @@ function mergeCrossWindowTriggerClicks(events, recordedRect) {
         && (e.element?.name || e.element?.automationId)
         && !isCrossWindowEvent(e, recordedRect)) {
       const next = events[i + 1];
+      // 2026-07-29 (HeidiSQL "더보기" SplitButton -> popup menu -> "환경설정"
+      // MenuItem follow-up, 2차): next가 expandCollapse=true라도(즉
+      // mergeExpandCollapseClicks가 "이건 자기 항목과는 병합 안 되는 독립
+      // 토글"이라고 이미 판단한 상태라도) 배제하지 않는다 — 실측(2026-07-29):
+      // 그 독립 토글 자신이 트리거(더보기)와는 다른 창(winLeft가 완전히 다름 —
+      // 팝업 메뉴)에 있는 진짜 크로스윈도우 항목인 경우가 있다. 이때는 트리거
+      // 클릭 자체가 그 팝업을 여는 행위이므로, 트리거+항목을 한 프로세스로
+      // 묶어야 한다(그렇지 않으면 트리거를 누른 프로세스가 끝난 뒤 별도
+      // 프로세스가 그제서야 "새로 뜬 창"을 찾으려 들어, 팝업이 이미 baseline에
+      // 잡혀 "새 창"으로 안 보임 — 실측 재현). 렌더 쪽(§4127 부근)이
+      // crossWindowTrigger가 실린 이벤트는 expandCollapse 경로보다
+      // osScopedInvoke(트리거 포함) 경로를 우선하도록 이미 맞춰뒀으므로, 여기서
+      // 배제할 필요가 없다 — 이전 버전(이 조건 존재)은 그 렌더 수정 이전에
+      // "expandCollapse 경로가 트리거 데이터를 못 읽는다"만 보고 막았던 것.
       if (next && next.action === 'click'
           && (next.element?.name || next.element?.automationId)
           && isUntrackedCrossWindowEvent(next, e, recordedRect)) {
         console.log(`[cross-window-merge] merged click+click @index ${i} -> trigger '${e.element.name || e.element.automationId}' then find '${next.element.name || next.element.automationId}' in another window`);
-        out.push({ ...next, crossWindowTrigger: e.element });
+        out.push({ ...next, crossWindowTrigger: e.element, crossWindowTriggerRelY: e.relY });
         i++; // consume the trigger click — embedded in the merged event
         continue;
       }
@@ -2041,7 +2166,7 @@ function mergeCrossWindowTriggerClicks(events, recordedRect) {
             && !after.expandItemName
             && isUntrackedCrossWindowEvent(after, e, recordedRect)) {
           console.log(`[cross-window-merge] merged click+scroll+click @index ${i} -> trigger '${e.element.name || e.element.automationId}' then find '${after.element.name || after.element.automationId}' in another window (dropped intervening scroll)`);
-          out.push({ ...after, crossWindowTrigger: e.element });
+          out.push({ ...after, crossWindowTrigger: e.element, crossWindowTriggerRelY: e.relY });
           i += 2; // consume the trigger click and the intervening scroll
           continue;
         }
@@ -2105,6 +2230,46 @@ function anchorSelector(el) {
 // XPath for exactly the native-app targets the project is scoped to (§6).
 const SLOT_INDEX_CONTROL_TYPES = new Set(['ListItem', 'TreeItem', 'DataItem']);
 
+// Delphi/VCL controls without a real declared AutomationId have their
+// AutomationId filled in by the default Win32 UIA provider as the control's
+// own NativeWindowHandle (confirmed 2026-07-29, HeidiSQL: 13 of 19 ids in
+// its session-manager window are exactly equal to element.hwnd). HWNDs are
+// reassigned every launch, so this id can never match at replay time — and,
+// worse, it outranks the stable ClassName/Name fallback below it in the
+// selector chain. Narrow on purpose: only numeric ids that exactly equal
+// their own hwnd are rejected, so real Win32 dialog resource ids (PuTTY
+// 1049/1009, 7-Zip 1001, FileZilla 5999/5101 — none of which equal their own
+// hwnd) are unaffected.
+function isWindowHandleId(el) {
+  if (!el?.automationId || !/^\d+$/.test(el.automationId)) return false;
+  const hwnd = Number(el.hwnd || 0);
+  return hwnd !== 0 && Number(el.automationId) === hwnd;
+}
+
+// Builds the {automationId, className, name} object passed to the COM
+// helpers (osScopedInvoke/osExpandCollapse target + triggerTarget) with the
+// same hwnd-as-automationId guard as the WAD-path selectors
+// (wdioSelectorById/ByClass) — this construction is a SEPARATE code path
+// that read el.automationId directly and was NOT covered by that guard
+// (2026-07-29, HeidiSQL "더보기" SplitButton: its automationId equals its
+// own hwnd, reassigned every launch — used verbatim as a triggerTarget it
+// produced "trigger not found" at replay, and because a "stable" id was
+// assumed present, the one thing that WOULD have worked — Name="더 보기" —
+// was also being dropped by the state-dependent-name protection below).
+// dropNameIfStableId mirrors the existing per-site behavior: cross-window
+// target/triggerTarget drop Name when a trustworthy automationId exists
+// (state-dependent Name protection, 2026-07-14) — but only when that id is
+// actually trustworthy; an hwnd-id is not, so Name is kept as the fallback.
+function comSafeTarget(el, { dropNameIfStableId = false } = {}) {
+  el = el || {};
+  const stableId = (el.automationId && !isWindowHandleId(el)) ? el.automationId : '';
+  return {
+    automationId: stableId,
+    className: el.className || '',
+    name: (dropNameIfStableId && stableId) ? '' : (el.name || ''),
+  };
+}
+
 // A ComboBox dropdown-arrow button carries automationId="DropDown" and, on a
 // Korean Windows, name="닫기" — which is ALSO the name of the window's titlebar
 // Close (X) button (whose automationId is "Close"). Falling back to a bare
@@ -2125,7 +2290,7 @@ function wdioSelectorById(el, ambiguousIds) {
   // any other control type are trusted as stable.
   const isNumeric = el.automationId && /^\d+$/.test(el.automationId);
   const isSlotIndex = isNumeric && SLOT_INDEX_CONTROL_TYPES.has(el.controlType);
-  const hasStableId = el.automationId && !isSlotIndex
+  const hasStableId = el.automationId && !isSlotIndex && !isWindowHandleId(el)
     && !(GENERIC_AUTOMATION_IDS.has(el.automationId) && el.name);
   if (hasStableId) {
     // Same Win32 dialog can reuse one numeric AutomationId across several
@@ -2184,7 +2349,7 @@ function wdioSelectorByClass(el) {
   // 폴백하기 전에 유니크할 가능성이 훨씬 높은 automationId를 먼저 시도하도록
   // 순서를 맞춘다. className+name 조합(위 분기, 이미 유니크)은 그대로 최우선.
   const isSlotIndex = /^\d+$/.test(el.automationId || '') && SLOT_INDEX_CONTROL_TYPES.has(el.controlType);
-  if (el.automationId && !isSlotIndex) return `'~${escapeAttr(el.automationId)}'`;
+  if (el.automationId && !isSlotIndex && !isWindowHandleId(el)) return `'~${escapeAttr(el.automationId)}'`;
   if (el.className && isStableClassName(el.className)) return `'//${tag}[@ClassName="${escapeAttr(el.className)}"]'`;
   if (el.name)         return `'//${tag}[@Name="${escapeAttr(el.name)}"]'`;
   return anchorSelector(el);
@@ -2635,7 +2800,7 @@ function osExpandCollapse(hwnd, target, itemName) {
 // 검색을 별도 스텝(별도 프로세스)으로 쪼개면 그 사이 지연 동안 드롭다운이
 // 자동으로 닫혀버림을 실측으로 확인(2026-07-13 재현) — 한 프로세스 실행
 // 안에서 끊김 없이 처리해 그 레이스를 없앤다.
-function osScopedInvoke(hwnd, target, triggerTarget) {
+function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY) {
     if (!hwnd) {
         _failures.push('osScopedInvoke:no-hwnd');
         console.warn('[osScopedInvoke] no window hwnd — cannot search without a window handle');
@@ -2646,8 +2811,15 @@ function osScopedInvoke(hwnd, target, triggerTarget) {
         const triggerArg = triggerTarget
             ? \`--trigger-sel-b64 "\${Buffer.from(JSON.stringify(triggerTarget), 'utf8').toString('base64')}"\`
             : '';
+        // relY/triggerRelY (2026-07-29, HeidiSQL DropDown reuse): a
+        // disambiguation hint among structurally-found candidates only —
+        // recomputed from the recorded window-relative Y against the
+        // CURRENT window position inside osScopedInvoke.py, never a stored
+        // screen coordinate used to click (see pick_by_position there).
+        const relYArg = Number.isInteger(relY) ? \`--rel-y \${relY}\` : '';
+        const triggerRelYArg = Number.isInteger(triggerRelY) ? \`--trigger-rel-y \${triggerRelY}\` : '';
         const out = execSync(
-            \`python "\${_helperFile('osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${triggerArg}\`,
+            \`python "\${_helperFile('osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${triggerArg} \${relYArg} \${triggerRelYArg}\`,
             { stdio: 'pipe', timeout: 20000 }
         ).toString().trim();
         if (out) console.log(out);
@@ -2681,6 +2853,40 @@ async function initAppHwnd() {
         const h = j.value;   // e.g. "0x00061D2C"
         _appHwnd = parseInt(h, 16);
         console.log(\`[hwnd] session window hwnd=\${_appHwnd} (0x\${_appHwnd.toString(16)})\`);
+        // Some apps (confirmed: HeidiSQL, a Delphi/VCL app) own a hidden 0x0
+        // 'TApplication' helper window in addition to their real visible
+        // form — appium:app launches by process and can bind the session to
+        // that hidden window instead, so every later element search runs
+        // against an empty 0x0 window and finds nothing. Detect this and
+        // re-create the session scoped directly to a real, sized sibling
+        // window of the same process (appium:appTopLevelWindow), same
+        // mechanism already used for owned-dialog scoped sessions.
+        const rect0 = _resolveWinRect('');
+        if (rect0 && rect0.width === 0 && rect0.height === 0) {
+            const sibOut = execSync(
+                \`powershell -NoProfile -File "\${_helperFile('osWindowRect.ps1')}" -siblingOf \${_appHwnd}\`,
+                { stdio: 'pipe', timeout: 15000 }
+            ).toString().trim();
+            const sibling = parseInt(sibOut, 10);
+            if (sibling) {
+                console.warn(\`[hwnd] session window is zero-size — re-creating session scoped to real window hwnd=\${sibling} (0x\${sibling.toString(16)})\`);
+                // Deliberately NOT deleting the old (zero-size) session here:
+                // it was created with the 'app' capability (process launch),
+                // and WinAppDriver's deleteSession for an app-owning session
+                // kills the process it launched — which would also destroy
+                // the real window we just switched to (same process, same
+                // app instance). Confirmed live: HeidiSQL closed at exactly
+                // this point once the DELETE call was added. Left open, it's
+                // an idle extra session that goes away with the Appium
+                // process this script's own ensureAppium() spawned and tears
+                // down at exit — no separate cleanup needed.
+                _appSid = await _createSession('0x' + sibling.toString(16));
+                _appHwnd = sibling;
+                console.log(\`[hwnd] session window hwnd=\${_appHwnd} (0x\${_appHwnd.toString(16)})\`);
+            } else {
+                console.warn('[hwnd] session window is zero-size and no sized sibling window was found');
+            }
+        }
     } catch (e) {
         console.warn('[hwnd] getWindowHandle failed — falling back to title match:', String(e.message || e).substring(0, 100));
     }
@@ -2914,7 +3120,7 @@ function osExpandCollapse(hwnd, target, itemName) {
 // 모든 최상위 창 순으로 직접 찾아 Invoke하므로 title 충돌 자체가 없다 —
 // 다이얼로그 내부의 개별 클릭들(트리거 병합과 무관하게 각자 cross-window로
 // 캡처됨)도 이 경로로 독립적으로 처리된다.
-function osScopedInvoke(hwnd, target, triggerTarget) {
+function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY) {
     if (!hwnd) {
         _failures.push('osScopedInvoke:no-hwnd');
         console.warn('[osScopedInvoke] no window hwnd — cannot search without a window handle');
@@ -2925,8 +3131,15 @@ function osScopedInvoke(hwnd, target, triggerTarget) {
         const triggerArg = triggerTarget
             ? \`--trigger-sel-b64 "\${Buffer.from(JSON.stringify(triggerTarget), 'utf8').toString('base64')}"\`
             : '';
+        // relY/triggerRelY (2026-07-29, HeidiSQL DropDown reuse): a
+        // disambiguation hint among structurally-found candidates only —
+        // recomputed from the recorded window-relative Y against the
+        // CURRENT window position inside osScopedInvoke.py, never a stored
+        // screen coordinate used to click (see pick_by_position there).
+        const relYArg = Number.isInteger(relY) ? \`--rel-y \${relY}\` : '';
+        const triggerRelYArg = Number.isInteger(triggerRelY) ? \`--trigger-rel-y \${triggerRelY}\` : '';
         const out = execSync(
-            \`python "\${_helperFile('osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${triggerArg}\`,
+            \`python "\${_helperFile('osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${triggerArg} \${relYArg} \${triggerRelYArg}\`,
             { stdio: 'pipe', timeout: 20000 }
         ).toString().trim();
         if (out) console.log(out);
@@ -4019,7 +4232,14 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       );
     } else if (e.action === 'type') {
       pushStep(`            // [STEP ${stepNum}] skip type on non-editable element`);
-    } else if (e.element?.expandCollapse) {
+    } else if (e.element?.expandCollapse && !e.crossWindowTrigger) {
+      // !e.crossWindowTrigger (2026-07-29, HeidiSQL "더보기" -> "환경설정"
+      // follow-up, 2차): mergeCrossWindowTriggerClicks()가 이 이벤트를 다른
+      // 창에 있는 트리거의 크로스윈도우 항목으로 병합했다면, 그 트리거 클릭이
+      // 이 요소가 속한 팝업을 여는 행위 자체이므로 osScopedInvoke(트리거 포함,
+      // 아래 else-if)로 가야 한다 — 여기(osExpandCollapse)로 오면 trigger 정보를
+      // 읽지 않아 트리거 클릭이 통째로 증발한다(그 결과 팝업이 안 열려 이
+      // 요소도 못 찾음, 실측 재현).
       // ExpandCollapsePattern 재생 (ComboBox 드롭다운/메뉴바 MenuItem/트리 +-
       // 토글) — 2026-07-13 진단(poc/diag_expandcollapse.py)으로 실증: 일반
       // 클릭(InvokePattern)만으로는 재현 안 됨. osExpandCollapse.py(COM UIA)가
@@ -4035,11 +4255,7 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       // 코드생성되는 앱은 "파일 메뉴 열기"까지만 재생되고 그 안의 메뉴 항목
       // 선택 자체가 통째로 스킵됐다(Site Manager 다이얼로그가 재생 중 한 번도
       // 실제로 열리지 않았던 근본 원인).
-      const target = {
-        automationId: e.element.automationId || '',
-        className: e.element.className || '',
-        name: e.element.name || '',
-      };
+      const target = comSafeTarget(e.element);
       const itemName = e.expandItemName || '';
       const hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
       pushMethod(
@@ -4100,11 +4316,7 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       // 근본 원인이 병합 여부에 따라 다른 코드 경로에 다시 나타난 것).
       // automationId가 있는 컨트롤은 그것만으로 충분히 특정되므로 병합
       // 여부와 무관하게 항상 이 보호를 적용한다.
-      const target = {
-        automationId: e.element.automationId || '',
-        className: e.element.className || '',
-        name: e.element.automationId ? '' : (e.element.name || ''),
-      };
+      const target = comSafeTarget(e.element, { dropNameIfStableId: true });
       const trig = e.crossWindowTrigger;
       // 트리거의 Name은 신뢰하지 않는다 — Win32 ComboBox 드롭다운 버튼처럼
       // 열림/닫힘 상태에 따라 접근성 Name이 바뀌는 컨트롤은, 캡처가 클릭
@@ -4113,22 +4325,27 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       // 이름이 존재하지 않아 AND 조건이 0건 매칭되고, Resolve-Cond가
       // 실패해도 트리거 호출부는 조용히 스킵(에러 없음)되어 드롭다운이
       // 아예 안 열린 채 이후 검색만 실패하는 원인불명 에러가 됨(2026-07-14,
-      // PuTTY Translation "Remote character set:" 콤보로 실증). automationId가
-      // 있으면 상태-무관 식별자이므로 그것만 사용해 name을 뺀다. automationId가
-      // 없는 트리거는 name이 유일한 단서이므로 그대로 둔다(무조건 빼면 빈
-      // 셀렉터가 되어 같은 부류의 침묵 스킵을 만듦).
-      const triggerTarget = trig ? {
-        automationId: trig.automationId || '',
-        className: trig.className || '',
-        name: trig.automationId ? '' : (trig.name || ''),
-      } : null;
+      // PuTTY Translation "Remote character set:" 콤보로 실증). **안정적인**
+      // automationId가 있으면 상태-무관 식별자이므로 그것만 사용해 name을
+      // 뺀다(comSafeTarget의 dropNameIfStableId) — automationId가 없거나
+      // hwnd 기반이라 걸러진 트리거는 name이 유일한 단서이므로 그대로 둔다
+      // (무조건 빼면 빈 셀렉터가 되어 같은 부류의 침묵 스킵을 만듦). 2026-07-29
+      // (HeidiSQL "더보기" SplitButton): automationId가 자기 hwnd라 실행마다
+      // 바뀌는 트리거를 "안정적"으로 오판해 name까지 같이 버리면 트리거를
+      // 영원히 못 찾는다 — comSafeTarget이 이 경우를 걸러낸다.
+      const triggerTarget = trig ? comSafeTarget(trig, { dropNameIfStableId: true }) : null;
       // 메인 창 hwnd 변수: SIMPLE_HEADER는 _appHwnd(initAppHwnd()가 채움),
       // SESSION_HEADER는 _hwndCache[_mainTitleFrag](launchApp의 baseline-diff가
       // beforeAll에서 채움) — 둘 다 osScopedInvoke 호출 전에 이미 준비돼 있다.
       const hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
+      // relY/triggerRelY (2026-07-29, HeidiSQL DropDown reuse): position
+      // hints only used when osScopedInvoke.py's structural search finds
+      // MORE THAN ONE candidate for the same selector — see pick_by_position.
+      const relYArg = Number.isInteger(e.relY) ? e.relY : 'null';
+      const triggerRelYArg = Number.isInteger(e.crossWindowTriggerRelY) ? e.crossWindowTriggerRelY : 'null';
       pushMethod(
 `    async click${stepNum}() {
-        osScopedInvoke(${hwndArg}, ${JSON.stringify(target)}${triggerTarget ? `, ${JSON.stringify(triggerTarget)}` : ''});
+        osScopedInvoke(${hwndArg}, ${JSON.stringify(target)}, ${triggerTarget ? JSON.stringify(triggerTarget) : 'null'}, ${relYArg}, ${triggerRelYArg});
     }`
       );
       pushStep(
@@ -4148,11 +4365,7 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       // doubleClick도 별도 처리 없이 Invoke() 1회로 충분(실측: "컴퓨터" 단일 클릭
       // 캡처가 Invoke() 1회로 이미 폴더 진입까지 완료). 좌표는 어디에도 안 씀 —
       // osScopedInvoke.py가 hwnd 서브트리에서 셀렉터로 직접 찾아 Invoke.
-      const target = {
-        automationId: e.element.automationId || '',
-        className: e.element.className || '',
-        name: e.element.name || '',
-      };
+      const target = comSafeTarget(e.element);
       const hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
       pushMethod(
 `    async click${stepNum}() {
@@ -4161,6 +4374,27 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       );
       pushStep(
 `            await _step('${stepNum}:${e.action} ${escapeStr(e.element?.name || '')}', () => page.click${stepNum}());`
+      );
+    } else if (e.action === 'click' && isComboDropDownArrow(e.element)) {
+      // 2026-07-29 (HeidiSQL): 같은 창 안에 automationId="DropDown"을 공유하는
+      // 콤보박스가 둘 이상이면, WAD의 'accessibility id' 조회(_clickBySid/
+      // _clickScoped가 쓰는 그 경로)는 구분할 방법이 없어 항상 같은 하나만
+      // 클릭한다. COM 경로(osScopedInvoke)로 우회해 pick_by_position의 relY
+      // 힌트로 구분한다 — WAD-primary 원칙(§13 회귀 체크)의 예외지만, 이미
+      // 크로스윈도우 트리거에 쓰는 것과 같은 COM 스택·같은 안전장치다.
+      // dropNameIfStableId: true — 이 automationId("DropDown")가 진짜
+      // 상태-의존 Name("열기"/"닫기")을 갖는 바로 그 컨트롤이므로(2026-07-14
+      // 가드), 여기서도 그대로 적용한다.
+      const target = comSafeTarget(e.element, { dropNameIfStableId: true });
+      const hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
+      const relYArg = Number.isInteger(e.relY) ? e.relY : 'null';
+      pushMethod(
+`    async click${stepNum}() {
+        osScopedInvoke(${hwndArg}, ${JSON.stringify(target)}, null, ${relYArg});
+    }`
+      );
+      pushStep(
+`            await _step('${stepNum}:click ${escapeStr(e.element?.name || '')}', () => page.click${stepNum}());`
       );
     } else {
       // Click / DoubleClick — XPath-only (2026-07-10: 좌표 재생 전면 금지).

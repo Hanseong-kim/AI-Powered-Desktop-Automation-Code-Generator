@@ -27,6 +27,11 @@ generated-wdio/MockAnimSettle/
 generated-wdio/MockNestedDropdown/
 generated-wdio/MockSimpleRootHwnd/
 generated-wdio/MockTitleCollisionDialogRect/
+generated-wdio/MockVclHwndId/
+generated-wdio/MockTriggerExpand/
+generated-wdio/MockNamelessItem/
+generated-wdio/MockHwndTrigger/
+generated-wdio/MockDupDropdown/
 
 # 위와 동일한 산출물의 _debug-helpers 사본(2026-07-27 saveFiles 분리 이후 생성)
 generated-wdio/_debug-helpers/MockCalculator/
@@ -40,6 +45,11 @@ generated-wdio/_debug-helpers/MockAnimSettle/
 generated-wdio/_debug-helpers/MockNestedDropdown/
 generated-wdio/_debug-helpers/MockSimpleRootHwnd/
 generated-wdio/_debug-helpers/MockTitleCollisionDialogRect/
+generated-wdio/_debug-helpers/MockVclHwndId/
+generated-wdio/_debug-helpers/MockTriggerExpand/
+generated-wdio/_debug-helpers/MockNamelessItem/
+generated-wdio/_debug-helpers/MockHwndTrigger/
+generated-wdio/_debug-helpers/MockDupDropdown/
 
 Claude code task server token opt.md
 Claude code task v2.md

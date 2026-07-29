@@ -142,6 +142,38 @@ class UIAInspector:
             pass
         return None
 
+    def _nearest_named_ancestor(self, elem, max_up=4):
+        """Walk up from elem toward the nearest ancestor exposing a usable
+        Name or AutomationId — generic fallback for composite controls whose
+        hit-tested leaf carries neither (2026-07-29, HeidiSQL '더보기'
+        SplitButton: ElementFromPoint sometimes lands on the button's blank
+        inner arrow glyph instead of the named outer control — observed
+        non-deterministically across otherwise-identical recordings of the
+        same click). Unlike _nearest_row_ancestor, not restricted to
+        ListItem/TreeItem — this only fires when the leaf already has
+        neither id nor name, so any named ancestor is strictly better than
+        an unselectable element. Kept shallow (4) to avoid climbing past the
+        actual clicked control into an unrelated container."""
+        try:
+            walker = self._uia.ControlViewWalker
+            cur = elem
+            for _ in range(max_up):
+                try:
+                    parent = walker.GetParentElement(cur)
+                except Exception:
+                    break
+                if parent is None:
+                    break
+                try:
+                    if parent.CurrentAutomationId or parent.CurrentName:
+                        return parent
+                except Exception:
+                    break
+                cur = parent
+        except Exception:
+            pass
+        return None
+
     def element_at(self, x, y):
         pt = wintypes.POINT(int(x), int(y))
         elem = self._uia.ElementFromPoint(pt)
@@ -199,6 +231,10 @@ class UIAInspector:
                 row = self._nearest_row_ancestor(elem)
                 if row is not None:
                     return row
+                if not aid and not name:
+                    named = self._nearest_named_ancestor(elem)
+                    if named is not None:
+                        return named
         except Exception:
             pass
         return elem
@@ -334,7 +370,18 @@ class UIAInspector:
                 except Exception:
                     pass
                 is_slot_index = aid.isdigit() and parent_ct in ("ListItem", "TreeItem", "DataItem")
-                if aid and "." not in aid and not is_slot_index:
+                # Delphi/VCL 컨트롤은 실제 AutomationId 없이 자기 hwnd가 그
+                # 자리에 채워진다(2026-07-29, HeidiSQL 실측: id 19개 중 13개가
+                # NativeWindowHandle과 정확히 일치) — 실행마다 바뀌므로 anchor로
+                # 못 씀. server.js의 isWindowHandleId()와 동일 판정 기준.
+                is_hwnd_id = False
+                if aid.isdigit():
+                    try:
+                        is_hwnd_id = int(aid) == (parent.CurrentNativeWindowHandle or 0) \
+                            and parent.CurrentNativeWindowHandle
+                    except Exception:
+                        is_hwnd_id = False
+                if aid and "." not in aid and not is_slot_index and not is_hwnd_id:
                     return aid, "".join(reversed(steps))
                 cur = parent
         except Exception:
@@ -731,6 +778,18 @@ def visible_toplevel_windows():
     return found
 
 
+def _window_has_size(hwnd):
+    """True if hwnd's rect has non-zero width and height. Some VCL/Delphi
+    apps (e.g. HeidiSQL) own a hidden 0x0 'TApplication' helper window that
+    matches the launch PID instantly, well before the app's real visible
+    form exists — this filters that out so discovery doesn't lock onto it."""
+    try:
+        left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+        return (right - left) > 0 and (bottom - top) > 0
+    except Exception:
+        return False
+
+
 # ----------------------------------------------------------------------------
 # Recorder
 # ----------------------------------------------------------------------------
@@ -1008,6 +1067,8 @@ class Recorder:
         # title happens to be in the same script as appName (English Windows).
         app_key = re.sub(r'[^a-z0-9]', '', app_name.lower())
         deadline = time.time() + DISCOVER_TIMEOUT
+        best_found = None  # last zero-size-only match, used as a fallback
+                            # if no real-sized window ever appears in time
         while time.time() < deadline and not self._stop_flag.is_set():
             current = visible_toplevel_windows()
             found = set()
@@ -1066,6 +1127,19 @@ class Recorder:
                 if frame and frame not in found:
                     found.add(frame)
                     log(f"[target] frame {frame} owns CoreWindow {hwnd} — added")
+            # A zero-size candidate (e.g. HeidiSQL's hidden TApplication
+            # window, rect (x,y,0,0)) isn't a usable target for session_meta
+            # geometry/title — the real visible form appears a beat later as
+            # a separate hwnd. Prefer sized candidates; if only zero-size
+            # ones matched so far, remember them and keep polling for
+            # something better within the same DISCOVER_TIMEOUT budget.
+            sized = {h for h in found if _window_has_size(h)}
+            if found and not sized:
+                best_found = found
+                time.sleep(0.2)
+                continue
+            if sized:
+                found = sized
             if found:
                 self.target_hwnds |= found
                 titles = []
@@ -1080,6 +1154,21 @@ class Recorder:
                 self._discovery_done_ts = time.time()
                 return
             time.sleep(0.2)
+
+        if best_found:
+            self.target_hwnds |= best_found
+            titles = []
+            for h in self.target_hwnds:
+                try:
+                    titles.append(win32gui.GetWindowText(h))
+                except Exception:
+                    titles.append("")
+            log(f"[target] hwnds={self.target_hwnds} titles={titles} "
+                f"(zero-size fallback — no sized window appeared in time)")
+            for h in best_found:
+                probe_window("appwin", h)
+            self._discovery_done_ts = time.time()
+            return
 
         fg = foreground_top_window()
         if fg:
@@ -1811,6 +1900,13 @@ class Recorder:
                 "anchorId": elem.get("anchorId", ""),
                 "anchorPath": elem.get("anchorPath", ""),
                 "rect": elem.get("rect"),   # DIAGNOSTIC — see UIAInspector.describe()
+                # 컨트롤의 NativeWindowHandle (2026-07-29) — server.js가
+                # automationId가 이 값과 같은지 판별해 hwnd 기반(Delphi/VCL
+                # 앱에서 실행마다 바뀌는) automationId를 셀렉터에서 걸러내는
+                # 근거로 쓴다(isWindowHandleId). 화이트리스트라 여기 빠뜨리면
+                # server.js로 조용히 전달 안 됨 — 2026-07-13에 expandCollapse
+                # 필드로 이미 한 번 겪은 함정.
+                "hwnd": elem.get("hwnd", 0),
                 # ComboBox 드롭다운/메뉴바 MenuItem/트리 +- 토글 판별
                 # (2026-07-13, UIAInspector.has_expand_collapse) — codegen이
                 # 일반 클릭 대신 osExpandCollapse.ps1 경로를 taken다.

@@ -449,6 +449,167 @@ NATIVE_SESSION_META = {
     "initialWindow": {"left": 400, "top": 200, "width": 800, "height": 600},
 }
 
+# Delphi/VCL hwnd-as-AutomationId scenario (2026-07-29, HeidiSQL GUI failure
+# follow-up, confirmed by live COM UIA diagnostic poc/diag_heidisql_ids.py:
+# 13 of 19 automationIds in HeidiSQL's session-manager window were exactly
+# equal to the control's own NativeWindowHandle). This id is reassigned every
+# launch, so a bare '~<id>' selector can never match at replay time — and,
+# left untreated, it also OUTRANKS the stable ClassName fallback beneath it
+# in the selector chain. isWindowHandleId() must reject only this narrow
+# case: numeric automationId == element.hwnd. A same-scenario Button whose
+# numeric id does NOT equal its hwnd (the PuTTY/7-Zip/FileZilla pattern,
+# already covered by NATIVE_EVENTS under a different app name) must keep
+# resolving to the bare '~id' form — proving the new guard doesn't widen
+# into rejecting ordinary stable Win32 resource ids.
+VCL_APP = "MockVclHwndId"
+VCL_EVENTS = [
+    make_event("click", name="", automation_id="1051972",
+               class_name="TVirtualStringTree", control_type="Pane",
+               window_title="VCL Dialog", app_name=VCL_APP, x=300, y=300, index=1),
+    make_event("click", name="Proxy", automation_id="1049",
+               class_name="Button", control_type="Button",
+               window_title="VCL Dialog", app_name=VCL_APP, x=500, y=300, index=2),
+]
+VCL_EVENTS[0]["element"]["hwnd"] = 1051972    # equals its own automationId -> reject
+VCL_EVENTS[1]["element"]["hwnd"] = 987654     # differs from automationId 1049 -> keep
+VCL_SESSION_META = {
+    "action": "session_meta",
+    "app": VCL_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
+# Trigger-click-vanishes-behind-a-standalone-expandCollapse scenario
+# (2026-07-29, HeidiSQL "더보기" SplitButton -> native popup menu ->
+# "환경설정" MenuItem follow-up). mergeExpandCollapseClicks() runs first and
+# correctly leaves a cross-window ExpandCollapsePattern MenuItem (one whose
+# "item" candidate turned out to belong to yet ANOTHER window — a real
+# dialog launch, not a dropdown selection) as its own standalone toggle.
+# mergeCrossWindowTriggerClicks() then ran SECOND and, not knowing that
+# event was already finalized, wrongly re-merged it as the "cross-window
+# item" for the PLAIN click immediately preceding it — silently dropping
+# that plain click (its data lands in crossWindowTrigger, which the
+# expandCollapse renderer never reads), so the trigger that must physically
+# open the popup before the item can be found never gets clicked at replay.
+TRIGGER_EXPAND_APP = "MockTriggerExpand"
+TRIGGER_EXPAND_EVENTS = [
+    # generateWdio derives recordedRect from the FIRST event carrying integer
+    # win*/Top/Width/Height (not session_meta, if any event has geometry —
+    # see the 2026-07-21 launch-animation comment above recordedRect's
+    # computation) — this trigger click MUST carry the real main-window
+    # geometry, matching TRIGGER_EXPAND_SESSION_META.initialWindow, or the
+    # popup event right after it gets picked as the "main window" instead
+    # and every cross-window check below inverts.
+    make_event("click", name="More", automation_id="btnMore", class_name="Button",
+               control_type="Button", app_name=TRIGGER_EXPAND_APP, index=1,
+               winLeft=100, winTop=100, winWidth=600, winHeight=400),
+    make_event("click", name="", automation_id="473", class_name="",
+               control_type="MenuItem", app_name=TRIGGER_EXPAND_APP,
+               expand_collapse=True, index=2,
+               winLeft=999, winTop=999, winWidth=50, winHeight=50),
+    make_event("click", name="Log", automation_id="", class_name="",
+               control_type="Button", app_name=TRIGGER_EXPAND_APP, index=3,
+               winLeft=500, winTop=500, winWidth=200, winHeight=150),
+]
+# mergeExpandCollapseClicks's own sibling-vs-item guard (looksLikeSiblingNotItem)
+# is what rejects pairing event 2 with event 3 as a dropdown item in the real
+# HeidiSQL capture — the item ("로그 기록") sits well ABOVE the trigger
+# ("더보기" popup entry) on screen (different top-level window entirely), so
+# itemRect.top < triggerRect.bottom. rootHwndHex is deliberately left unset on
+# both (would flip needsSessionSwitching() to session mode, which isn't what
+# HeidiSQL's actual capture used here — this app must stay in simple mode to
+# match reality).
+TRIGGER_EXPAND_EVENTS[1]["element"]["rect"] = [3578, 737, 3805, 759]
+TRIGGER_EXPAND_EVENTS[2]["element"]["rect"] = [2065, 124, 2151, 144]
+TRIGGER_EXPAND_SESSION_META = {
+    "action": "session_meta",
+    "app": TRIGGER_EXPAND_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
+# Nameless-item-as-itemName scenario (2026-07-29, HeidiSQL character-encoding
+# ComboBox: its dropdown list items are owner-drawn and expose a numeric
+# automationId — itself just the control's own hwnd, e.g. "1576746" — but NO
+# Name at all). osExpandCollapse.py's item search is UIA_NameProperty-only,
+# so falling back to automationId as itemName always failed with a
+# misleading "item not found" instead of the honest "no name to search for".
+NAMELESS_ITEM_APP = "MockNamelessItem"
+NAMELESS_ITEM_EVENTS = [
+    make_event("click", name="Combo2", automation_id="fakeTrigger",
+               class_name="ComboBox", control_type="ComboBox",
+               app_name=NAMELESS_ITEM_APP, expand_collapse=True, index=1),
+    make_event("click", name="", automation_id="1576746", class_name="",
+               control_type="ListItem", app_name=NAMELESS_ITEM_APP, index=2),
+]
+NAMELESS_ITEM_SESSION_META = {
+    "action": "session_meta",
+    "app": NAMELESS_ITEM_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
+# hwnd-id trigger scenario (2026-07-29, HeidiSQL "더보기" SplitButton, 3차):
+# the target/triggerTarget object builders for the COM helpers
+# (osScopedInvoke/osExpandCollapse) read el.automationId directly — a
+# SEPARATE code path from wdioSelectorById/ByClass, so isWindowHandleId's
+# guard never covered it. A trigger whose automationId equals its own hwnd
+# (reassigned every launch) got embedded verbatim AND, because an
+# automationId was present, its Name (the one thing that WOULD still work)
+# was also dropped by the state-dependent-name protection — "trigger not
+# found" every time, confirmed live.
+HWND_TRIGGER_APP = "MockHwndTrigger"
+HWND_TRIGGER_EVENTS = [
+    make_event("click", name="More", automation_id="9988776", class_name="SplitButton",
+               control_type="SplitButton", app_name=HWND_TRIGGER_APP,
+               winLeft=100, winTop=100, winWidth=600, winHeight=400, index=1),
+    make_event("click", name="Prefs", automation_id="", class_name="",
+               control_type="MenuItem", app_name=HWND_TRIGGER_APP,
+               expand_collapse=True, index=2,
+               winLeft=999, winTop=999, winWidth=50, winHeight=50),
+]
+HWND_TRIGGER_EVENTS[0]["element"]["hwnd"] = 9988776  # equals its own automationId -> unstable
+HWND_TRIGGER_SESSION_META = {
+    "action": "session_meta",
+    "app": HWND_TRIGGER_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
+# Reused-DropDown-in-the-same-window scenario (2026-07-29, HeidiSQL "새 세션"
+# dialog: the network-type combo and the encoding combo sit one above the
+# other, both exposing a dropdown arrow with automationId="DropDown" — WAD's
+# 'accessibility id' lookup (the plain click path) has no way to tell them
+# apart and always resolves to whichever one FindFirst happens to return
+# first). Neither click here is cross-window relative to the main window
+# (both open/close in place), so this exercises the isComboDropDownArrow
+# same-window branch specifically, not the cross-window trigger merge path.
+DUP_DROPDOWN_APP = "MockDupDropdown"
+DUP_DROPDOWN_EVENTS = [
+    make_event("click", name="닫기", automation_id="DropDown", class_name="",
+               control_type="Button", app_name=DUP_DROPDOWN_APP, index=1,
+               relX=663, relY=84),
+    make_event("click", name="열기", automation_id="DropDown", class_name="",
+               control_type="Button", app_name=DUP_DROPDOWN_APP, index=2,
+               relX=663, relY=112),
+]
+DUP_DROPDOWN_SESSION_META = {
+    "action": "session_meta",
+    "app": DUP_DROPDOWN_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
 # Launch-animation rect mismatch (2026-07-21, real Calculator GUI repro):
 # session_meta.initialWindow is captured the instant _discover_target_windows()
 # first sees the window's hwnd, which for a UWP app can be mid-reveal-animation
@@ -1655,7 +1816,7 @@ def step_wdio_generate_native():
         check(
             f"  {fname} merges a same-window trigger + cross-window item into one osScopedInvoke() call",
             'osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"Some Encoding"}, '
-            '{"automationId":"DropDown","className":"","name":""})' in content,
+            '{"automationId":"DropDown","className":"","name":""}, null, null);' in content,
             "trigger click (DropDown button) and the cross-window item click "
             "must merge into one osScopedInvoke(item, trigger) call instead "
             "of two separate steps — splitting them races the popup "
@@ -1690,7 +1851,7 @@ def step_wdio_generate_native():
         check(
             f"  {fname} merges trigger+scroll+item into one osScopedInvoke() and drops the scroll",
             'osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"UTF-8 Item"}, '
-            '{"automationId":"DropDown","className":"","name":""})' in content
+            '{"automationId":"DropDown","className":"","name":""}, null, null);' in content
             and "osScrollEl(_appHwnd," not in content,  # call site, not the header's function def
             "trigger click + intervening scroll + cross-window item must merge "
             "into one osScopedInvoke(item, trigger); the scroll must be dropped "
@@ -1737,6 +1898,225 @@ def step_wdio_generate_native():
             and '//Edit[@ClassName="Edit" and @Name="Port:"]' in content,
             "wdioSelectorByClass's existing ClassName+Name combo must keep "
             "working unchanged after the ById-side fix",
+        )
+
+
+def step_wdio_generate_vcl_hwnd_id():
+    print("\n[11] Delphi/VCL hwnd-as-AutomationId rejection (HeidiSQL follow-up)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", VCL_SESSION_META)
+    for ev in VCL_EVENTS:
+        request("POST", "/api/events", ev)
+
+    status, body = request("POST", "/api/generate", {
+        "appName": VCL_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (VCL hwnd-id) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped VCL hwnd-id checks)", False, body.get("message", ""))
+        return
+    files = body.get("files", [])
+    for f in files:
+        fname = f.get("filename", "")
+        content = f.get("content", "")
+        check(
+            f"  {fname} never emits the control's own hwnd as an accessibility-id selector",
+            "'~1051972'" not in content,
+            "automationId 1051972 equals the control's own NativeWindowHandle "
+            "(HeidiSQL TVirtualStringTree) — HWNDs are reassigned every "
+            "launch, so this selector can never match at replay time "
+            "(2026-07-29)",
+        )
+        check(
+            f"  {fname} falls back to the stable ClassName for the hwnd-id control",
+            'ClassName="TVirtualStringTree"' in content,
+            "with the unstable hwnd-id rejected, the selector chain must "
+            "still fall through to className (no name/anchor captured here)",
+        )
+        # ByClass prioritizes a ClassName+Name combo over automationId when
+        # both are present (independent, pre-existing behavior) — this
+        # regression guard only makes sense for ById, which tries
+        # automationId first. Mirrors the equivalent NATIVE_APP check above.
+        if "ById" in fname:
+            check(
+                f"  {fname} still trusts a real Win32 resource id whose value differs from its own hwnd (regression)",
+                "'~1049'" in content,
+                "the guard must be narrow — a stable numeric AutomationId that "
+                "does NOT equal its own hwnd (PuTTY/7-Zip/FileZilla pattern) "
+                "must keep resolving to the bare '~id' form",
+            )
+
+
+def step_wdio_generate_trigger_expand_merge_order():
+    print("\n[12] Trigger + cross-window expandCollapse item merge into one osScopedInvoke call (HeidiSQL 더보기 follow-up, 2차)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", TRIGGER_EXPAND_SESSION_META)
+    for ev in TRIGGER_EXPAND_EVENTS:
+        request("POST", "/api/events", ev)
+
+    status, body = request("POST", "/api/generate", {
+        "appName": TRIGGER_EXPAND_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (trigger-expand order) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped trigger-expand checks)", False, body.get("message", ""))
+        return
+    files = body.get("files", [])
+    for f in files:
+        fname = f.get("filename", "")
+        content = f.get("content", "")
+        # 2026-07-29 (2차): the first fix (keep the trigger as its own
+        # standalone step) was incomplete — the trigger and the item live in
+        # ACTUALLY DIFFERENT windows (a popup the trigger itself opens), so
+        # they must run in ONE process via osScopedInvoke(item, trigger),
+        # exactly like PuTTY's DropDown->ComboLBox pattern. Splitting them
+        # into two separate steps/processes means the second process's
+        # "new top-level window" baseline is captured AFTER the first
+        # process already opened the popup — so it's never seen as "new" and
+        # the item search fails every time (measured live against HeidiSQL).
+        check(
+            f"  {fname} merges the trigger and the cross-window expandCollapse item into one osScopedInvoke call",
+            'osScopedInvoke(_appHwnd, {"automationId":"473","className":"","name":""}, {"automationId":"btnMore","className":"Button","name":""}, null, null);' in content,
+            "trigger (More) and item (the cross-window standalone toggle) "
+            "must run in the SAME process so the popup the trigger opens is "
+            "visible to the item search's new-window baseline",
+        )
+        check(
+            f"  {fname} never renders the merged item as a standalone osExpandCollapse call",
+            'osExpandCollapse(_appHwnd, {"automationId":"473"' not in content,
+            "the expandCollapse render path doesn't read crossWindowTrigger — "
+            "taking it here instead of osScopedInvoke would silently drop "
+            "the trigger click again (the original 2026-07-29 bug)",
+        )
+        check(
+            f"  {fname} still replays the later, genuinely separate cross-window click on its own",
+            'osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"Log"}, null, null, null);' in content,
+            "the fix must not disturb a real, unrelated cross-window click "
+            "that just happens to follow a merged trigger+item pair",
+        )
+
+
+def step_wdio_generate_nameless_item_no_fake_itemname():
+    print("\n[13] Nameless dropdown item never becomes a fake itemName (HeidiSQL encoding combo follow-up)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", NAMELESS_ITEM_SESSION_META)
+    for ev in NAMELESS_ITEM_EVENTS:
+        request("POST", "/api/events", ev)
+
+    status, body = request("POST", "/api/generate", {
+        "appName": NAMELESS_ITEM_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (nameless item) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped nameless-item checks)", False, body.get("message", ""))
+        return
+    files = body.get("files", [])
+    for f in files:
+        fname = f.get("filename", "")
+        content = f.get("content", "")
+        check(
+            f"  {fname} never searches for a raw automationId as if it were a Name",
+            '"1576746")' not in content and "'1576746')" not in content,
+            "osExpandCollapse.py's item search is UIA_NameProperty-only — "
+            "passing the item's numeric automationId as itemName can never "
+            "match anything and produces a misleading 'item not found' "
+            "instead of an honest failure (HeidiSQL encoding ComboBox, "
+            "2026-07-29)",
+        )
+        check(
+            f"  {fname} keeps the trigger as a standalone toggle instead of a bogus merge",
+            'osExpandCollapse(_appHwnd, {"automationId":"fakeTrigger","className":"ComboBox","name":"Combo2"}, null)' in content,
+            "with no real item name to merge, the trigger must fall back to "
+            "the plain expand/collapse toggle it always had as a valid "
+            "standalone behavior",
+        )
+        check(
+            f"  {fname} lets the nameless item fall through to the dedicated ListItem COM route",
+            'osScopedInvoke(_appHwnd, {"automationId":"1576746","className":"","name":""})' in content,
+            "no longer consumed by the (rejected) expandCollapse merge, this "
+            "ListItem now reaches the existing 2026-07-15 direct-Invoke route "
+            "(WAD's element/click is unreliable on native list rows) — a "
+            "real attempt using the only identifying data available "
+            "(automationId, via COM property search, NOT the Name-only "
+            "search that made the old itemName fallback pointless) instead "
+            "of either a bogus text search or giving up outright",
+        )
+
+
+def step_wdio_generate_hwnd_trigger_keeps_name():
+    print("\n[14] COM helper target/triggerTarget also reject hwnd-as-automationId (HeidiSQL 더보기 follow-up, 3차)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", HWND_TRIGGER_SESSION_META)
+    for ev in HWND_TRIGGER_EVENTS:
+        request("POST", "/api/events", ev)
+
+    status, body = request("POST", "/api/generate", {
+        "appName": HWND_TRIGGER_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (hwnd trigger) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped hwnd-trigger checks)", False, body.get("message", ""))
+        return
+    files = body.get("files", [])
+    for f in files:
+        fname = f.get("filename", "")
+        content = f.get("content", "")
+        check(
+            f"  {fname} never embeds the trigger's own hwnd as its automationId",
+            '"automationId":"9988776"' not in content,
+            "the trigger's automationId equals its own NativeWindowHandle — "
+            "reassigned every launch, so embedding it verbatim in "
+            "triggerTarget guarantees 'trigger not found' at replay "
+            "(HeidiSQL 더보기 SplitButton, 2026-07-29)",
+        )
+        check(
+            f"  {fname} keeps the trigger's Name once its hwnd-id is rejected",
+            'osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"Prefs"}, {"automationId":"","className":"SplitButton","name":"More"}, null, null);' in content,
+            "dropping the Name too (the old 'automationId present -> drop "
+            "Name' rule, applied even to a rejected hwnd-id) leaves the "
+            "trigger with NO usable field at all — Name must survive when "
+            "the automationId it would have deferred to turns out unstable",
+        )
+
+
+def step_wdio_generate_dup_dropdown_position_disambiguation():
+    print("\n[15] Same-window reused automationId=\"DropDown\" routed through COM with a position hint (HeidiSQL follow-up, 4차)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", DUP_DROPDOWN_SESSION_META)
+    for ev in DUP_DROPDOWN_EVENTS:
+        request("POST", "/api/events", ev)
+
+    status, body = request("POST", "/api/generate", {
+        "appName": DUP_DROPDOWN_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (dup dropdown) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped dup-dropdown checks)", False, body.get("message", ""))
+        return
+    files = body.get("files", [])
+    for f in files:
+        fname = f.get("filename", "")
+        content = f.get("content", "")
+        check(
+            f"  {fname} routes a same-window DropDown click through COM instead of WAD's ambiguous accessibility-id lookup",
+            "'~DropDown'" not in content,
+            "WAD's 'accessibility id' search has no way to disambiguate two "
+            "controls sharing automationId=\"DropDown\" in the same window — "
+            "it must go through osScopedInvoke's position-aware COM search "
+            "instead (HeidiSQL 새 세션 dialog, 2026-07-29)",
+        )
+        check(
+            f"  {fname} embeds each DropDown click's own recorded relY as a disambiguation hint",
+            'osScopedInvoke(_appHwnd, {"automationId":"DropDown","className":"","name":""}, null, 84);' in content
+            and 'osScopedInvoke(_appHwnd, {"automationId":"DropDown","className":"","name":""}, null, 112);' in content,
+            "each DropDown click must carry ITS OWN captured relY — reusing "
+            "the same target/hint for both would defeat the whole point of "
+            "distinguishing them",
         )
 
 
@@ -1862,7 +2242,7 @@ def step_com_sendinput_helpers():
         check(
             "  osScopedInvoke.py disambiguates a reused trigger AutomationId",
             "def pick_trigger(" in src and "FindAll" in src
-            and "pick_trigger(uia, root, trigger_cond)" in src,
+            and "pick_trigger(uia, root, trigger_cond, win_top, args.trigger_rel_y)" in src,
             "PuTTY gives every ComboBox dropdown arrow the same "
             "automationId='DropDown' and its Name is state-dependent (dropped "
             "by the 2026-07-14 guard), so FindFirst always re-opened the FIRST "
@@ -2012,8 +2392,9 @@ def step_output_folders_isolated():
 
     targets = sorted({
         APP_NAME, SESSION_APP, COLLISION_APP, DELAYED_HWND_APP,
-        EXPAND_REDUNDANT_APP, NATIVE_APP, ANIM_APP, NESTED_DROPDOWN_APP,
-        SIMPLE_ROOTHWND_APP, TITLE_COLLISION_DIALOGRECT_APP,
+        EXPAND_REDUNDANT_APP, NATIVE_APP, VCL_APP, TRIGGER_EXPAND_APP,
+        NAMELESS_ITEM_APP, HWND_TRIGGER_APP, DUP_DROPDOWN_APP, ANIM_APP,
+        NESTED_DROPDOWN_APP, SIMPLE_ROOTHWND_APP, TITLE_COLLISION_DIALOGRECT_APP,
         "SevenZipStateReset",
     })
     for name in targets:
@@ -2055,6 +2436,11 @@ def main():
     step_wdio_generate_delayed_hwnd()
     step_wdio_generate_expand_redundant_trigger()
     step_wdio_generate_native()
+    step_wdio_generate_vcl_hwnd_id()
+    step_wdio_generate_trigger_expand_merge_order()
+    step_wdio_generate_nameless_item_no_fake_itemname()
+    step_wdio_generate_hwnd_trigger_keeps_name()
+    step_wdio_generate_dup_dropdown_position_disambiguation()
     step_com_sendinput_helpers()
     step_esc_recovery_guards()
     step_wad_boundary_intact()
