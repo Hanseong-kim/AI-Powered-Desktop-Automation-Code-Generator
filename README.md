@@ -144,26 +144,43 @@ re-recording.
 
 ```
 generated-wdio/<AppName>/
-├── <AppName>TestById.js       # selectors prefer AutomationId (~id / XPath)
-├── <AppName>TestByClass.js    # selectors prefer ClassName+Name XPath
-├── osScroll.py                # UIA ScrollPattern scroll (PostMessage wheel fallback)
-├── osScopedInvoke.py          # click an item that opened in a SEPARATE top-level
-│                              #   window (native ComboBox dropdown / menu popup) —
-│                              #   the WinAppDriver session can't see it, so this
-│                              #   goes straight through COM UIA instead
-├── osExpandCollapse.py        # ExpandCollapsePattern replay (ComboBox dropdowns,
-│                              #   menu bar items, tree +/- toggles) — plain
-│                              #   click()/InvokePattern doesn't open these
-├── osType.ps1                 # OS-level SendKeys fallback for stubborn edit controls
-├── osActivate.ps1             # bring the app window to the foreground
-├── osWindowRect.ps1           # read window geometry (hwnd-first)
-├── osMoveWindow.ps1           # restore the recorded window position/size
-├── osDismissPopup.ps1         # Fail-and-Recover: dismiss unexpected dialogs
-└── osEscape.ps1               # Fail-and-Recover: ESC out of stuck input states
+├── <AppName>TestById.js       # selectors prefer AutomationId (~id / XPath) — fully
+│                              #   self-contained (see below)
+├── <AppName>TestByClass.js    # selectors prefer ClassName+Name XPath — also self-contained
+├── package.json                # no deps of its own (resolves ../node_modules); exists
+│                                #   only for `npm run test:byid` convenience
+└── appium.log                  # written on first run
 ```
 
 The two test files are alternative locator strategies for the same recording —
 if `ById` fails on an app whose ids are unstable, try `ByClass`.
+
+**Each generated `.js` is fully self-contained.** It embeds the source of 9
+helper scripts (`osScroll.py`, `osScopedInvoke.py`, `osExpandCollapse.py`,
+`osType.ps1`, `osActivate.ps1`, `osWindowRect.ps1`, `osMoveWindow.ps1`,
+`osDismissPopup.ps1`, `osEscape.ps1`) as string constants and self-extracts
+each one to a per-process temp directory the first time it's needed — copying
+just the single `.js` file to another machine/folder still runs (the only
+external dependency left is the shared `../node_modules` Appium install, same
+as needing Node.js itself installed).
+
+For human inspection, `saveFiles()` also writes plain-text copies of those 9
+helpers to `generated-wdio/_debug-helpers/<AppName>/` — **the generated `.js`
+never reads from there** (it always uses its own embedded copies), so this
+folder is purely for reading/debugging what the embedded scripts do and is
+safe to delete.
+
+| Helper | Purpose |
+|---|---|
+| `osScroll.py` | UIA ScrollPattern scroll (PostMessage wheel fallback) |
+| `osScopedInvoke.py` | click an item that opened in a SEPARATE top-level window (native ComboBox dropdown / menu popup) — the WinAppDriver session can't see it, so this goes straight through COM UIA instead |
+| `osExpandCollapse.py` | ExpandCollapsePattern replay (ComboBox dropdowns, menu bar items, tree +/- toggles) — plain click()/InvokePattern doesn't open these |
+| `osType.ps1` | OS-level SendKeys fallback for stubborn edit controls |
+| `osActivate.ps1` | bring the app window to the foreground |
+| `osWindowRect.ps1` | read window geometry (hwnd-first) |
+| `osMoveWindow.ps1` | restore the recorded window position/size |
+| `osDismissPopup.ps1` | Fail-and-Recover: dismiss unexpected dialogs |
+| `osEscape.ps1` | Fail-and-Recover: ESC out of stuck input states |
 
 > None of these helpers do coordinate injection: they handle keyboard input,
 > window management, popup recovery, and pattern-based (Expand/Scroll/Invoke)
@@ -173,8 +190,8 @@ if `ById` fails on an app whose ids are unstable, try `ByClass`.
 > `osExpandCollapse` used .NET managed UIA (`System.Windows.Automation`), which
 > cannot see legacy Win32 controls (list rows, toolbar buttons, `SysTreeView32`
 > tree items) and were replaced for exactly that reason. Do not edit generated
-> files — they are overwritten on every Generate; fix `server/server.js`
-> templates instead.
+> files or the `_debug-helpers/` copies — both are overwritten on every
+> Generate; fix `server/server.js` templates instead.
 
 ---
 
