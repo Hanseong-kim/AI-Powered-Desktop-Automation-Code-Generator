@@ -355,6 +355,22 @@ to delete; re-running the gate recreates them.
   controls** (list rows, toolbar buttons, `SysTreeView32` tree items) — every
   replay helper that needs to reach those controls uses COM `IUIAutomation`
   (comtypes) instead, matching the stack `agent/agent.py` already uses.
+- **Delphi/VCL apps** (confirmed with HeidiSQL) expose controls without a
+  real declared `AutomationId` — the default Win32 UIA provider fills that
+  property in with the control's own window handle instead, which is
+  reassigned every launch. This id is automatically rejected in favor of a
+  stable `ClassName`/`Name` selector, so most buttons/tabs/input fields work
+  fine.
+- **Custom-drawn (owner-drawn) controls** — HeidiSQL's session-list
+  `TVirtualStringTree` is the confirmed case — expose *zero* items to UI
+  Automation even though the control itself is visible and populated
+  (verified directly against the live UIA tree: `FindAll`/tree-walk all
+  agree on the same node count with no rows present). No selector, anchor,
+  or COM-based search can reach an individual row — **recording a click on
+  such a list is not currently possible**. Record a flow that avoids the
+  list instead (e.g. HeidiSQL's "New" button creates and auto-selects a
+  session, so the tabs beneath it become directly clickable without ever
+  touching the list).
 
 ## Project Layout
 
