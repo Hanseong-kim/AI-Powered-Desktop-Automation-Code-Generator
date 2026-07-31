@@ -18,10 +18,7 @@ UIA_SelectionItemPatternId = 10010
 UIA_LegacyIAccessiblePatternId = 10018
 UIA_SELECTIONFLAG_TAKESELECTION = 1
 UIA_ScrollPatternId = 10004
-UIA_ControlTypeProperty = 30003
-UIA_ListItem = 50007
 TreeScope_Descendants = 4
-TreeScope_Subtree = 7
 ExpandCollapseState_Expanded = 1
 
 user32 = ctypes.windll.user32
@@ -378,12 +375,6 @@ def main():
     ap.add_argument("--hwnd", type=int, required=True)
     ap.add_argument("--sel-b64", required=True)
     ap.add_argument("--item-name-b64", default=None)
-    # 2026-07-31: ComboBoxEx(HeidiSQL 네트워크 유형)처럼 항목 Name이 전부 빈
-    # owner-drawn 드롭다운은 이름으로 지목할 수 없다. 목록 안에서의 순서로만
-    # 구별 가능하므로 인덱스를 받는다(좌표가 아니라 구조적 순서 —
-    # ListItem/TreeItem/DataItem 슬롯 인덱스와 같은 원리).
-    ap.add_argument("--item-index", type=int, default=None)
-    ap.add_argument("--item-count", type=int, default=None)
     args = ap.parse_args()
 
     if not args.hwnd:
@@ -474,55 +465,6 @@ def main():
         sys.exit(2)
     time.sleep(0.4)
     print(f"[osExpandCollapse] state after Expand() = {ecp.CurrentExpandCollapseState}")
-
-    # ── 인덱스로 항목 선택 (2026-07-31, owner-drawn ComboBoxEx) ─────────────
-    # 항목 Name이 전부 빈 드롭다운은 이름 조건으로 못 찾는다. 펼친 뒤 보이는
-    # ListItem을 트리 순서대로 모아 N번째를 실행한다. 창 서브트리와 새로 뜬
-    # 팝업 창을 모두 훑는다(Win32 콤보는 목록을 별도 ComboLBox 창에 그리기도
-    # 한다). 좌표는 쓰지 않는다.
-    if args.item_index is not None:
-        time.sleep(0.2)
-        li_cond = uia.CreatePropertyCondition(UIA_ControlTypeProperty, UIA_ListItem)
-        pools = []
-        try:
-            pools.append(("main window", root.FindAll(TreeScope_Subtree, li_cond)))
-        except Exception:
-            pass
-        for h in top_windows():
-            if h in baseline:
-                continue
-            try:
-                pr = uia.ElementFromHandle(h)
-                if pr:
-                    pools.append((f"popup hwnd={h}", pr.FindAll(TreeScope_Subtree, li_cond)))
-            except Exception:
-                continue
-        for where, arr in pools:
-            if not arr or not arr.Length:
-                continue
-            if args.item_count and arr.Length != args.item_count:
-                print(f"[osExpandCollapse] {where}: {arr.Length} items but the "
-                      f"recording saw {args.item_count} — the list changed since "
-                      "capture; refusing to pick by position", file=sys.stderr)
-                continue
-            if args.item_index >= arr.Length:
-                print(f"[osExpandCollapse] {where}: index {args.item_index} out of "
-                      f"range ({arr.Length} items)", file=sys.stderr)
-                continue
-            item = arr.GetElement(args.item_index)
-            label = ""
-            try:
-                label = item.CurrentName or ""
-            except Exception:
-                pass
-            if invoke_item(uia, mod, item):
-                print(f"[osExpandCollapse] selected item #{args.item_index} of "
-                      f"{arr.Length} in {where}"
-                      + (f" (name={label!r})" if label else " (unnamed item)"))
-                sys.exit(0)
-        print(f"osExpandCollapse: could not select item #{args.item_index} in any "
-              "open list", file=sys.stderr)
-        sys.exit(2)
 
     if not item_name:
         # 항목 선택 없이 펼치기/접기 자체가 목적인 이벤트(예: 트리 +- 토글).

@@ -15,6 +15,7 @@ const PRESETS = [
   { label: 'IDM',              appName: 'IDM',              exePath: 'C:\\Program Files (x86)\\Internet Download Manager\\IDMan.exe' },
   { label: '7-Zip',            appName: 'SevenZip',         exePath: 'C:\\Program Files\\7-Zip\\7zFM.exe' },
   { label: 'HeidiSQL',         appName: 'HeidiSQL',         exePath: 'C:\\Program Files\\HeidiSQL\\heidisql.exe' },
+  { label: 'TeamViewer',       appName: 'TeamViewer',       exePath: 'C:\\Program Files\\TeamViewer\\TeamViewer.exe' },
   // NOTE: LOCALAPPDATA is not available in CRA bundles; path uses "user" as default username.
   // If your Windows profile is not "user", select "Custom..." and enter the correct path.
   { label: 'VSCode',           appName: 'VSCode',           exePath: 'C:\\Users\\user\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe' },

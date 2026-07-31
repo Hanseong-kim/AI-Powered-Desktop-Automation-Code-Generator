@@ -371,6 +371,38 @@ to delete; re-running the gate recreates them.
   list instead (e.g. HeidiSQL's "New" button creates and auto-selects a
   session, so the tabs beneath it become directly clickable without ever
   touching the list).
+- **Dropdowns: the hard part is naming them, not opening them.** Measured
+  2026-07-31 with `poc/diag_dropdowns.py` — this corrects an earlier claim
+  that HeidiSQL's combos expose no items:
+  - *PuTTY* — combo has a unique `AutomationId`; expanding it exposes its 5
+    items (in the app window and in a separate `ComboLBox` top-level window).
+    **Fully automatable.**
+  - *HeidiSQL* — expanding **does** expose the items (5 and 18 respectively).
+    What fails is identifying *which* combo to open. On the new-session panel
+    the two combos offer no stable, unique handle: one carries an
+    `AutomationId` that is really its window handle (`920954`, different every
+    launch), the other has **no AutomationId and no Name at all**; both
+    dropdown arrows share `AutomationId="DropDown"`, whose `Name` flips
+    between `열기`/`닫기` with the open state. The network-type combo is a
+    `TComboBoxEx` surfaced as a `Pane` whose `Name` **is the currently
+    selected value** (`MariaDB or MySQL (TCP/IP)`, `MySQL on RDS`, …), so a
+    Name-based selector only matches while that value is already chosen.
+  - Mitigation in place: when several candidates share `AutomationId="DropDown"`
+    in one window, resolution falls back to the recorded **relative Y position
+    within the window** to pick among the structurally identical matches. This
+    selects *which* matched element to act on — it never clicks a coordinate,
+    so §3 still holds.
+  - *Owner-drawn dropdown items* — HeidiSQL's network-type combo is a Win32
+    `ComboBoxEx`: two controls share one rect, and only the inner `ComboBox`
+    (empty Name **and** empty AutomationId) can be expanded. Its 18 items are
+    all individually invokable but **all nameless**, so they can only be
+    addressed by position. Handled since 2026-07-31: capture records
+    `comboItemIndex`/`comboItemCount`, replay expands the combo and invokes the
+    Nth item, and refuses to pick anything if the live list length differs from
+    the recorded one. Verified end to end (value changed
+    `MariaDB or MySQL (TCP/IP)` → `MySQL on RDS`). Before this, the click was
+    discarded at capture time and degraded into a click on the panel behind the
+    open list.
 
 ## Project Layout
 

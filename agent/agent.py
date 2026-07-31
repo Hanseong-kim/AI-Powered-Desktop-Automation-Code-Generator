@@ -100,10 +100,13 @@ class UIAInspector:
         import comtypes
         import comtypes.client
         comtypes.CoInitialize()
-        # Generates/loads the UIAutomationClient wrapper module
+        # Generates/loads the UIAutomationClient wrapper module. Kept on the
+        # instance because pattern QueryInterface calls need its interface
+        # types (e.g. IUIAutomationExpandCollapsePattern).
+        self._mod = comtypes.client.GetModule("UIAutomationCore.dll")
         self._uia = comtypes.client.CreateObject(
             "{ff48dba4-60ef-4201-aa87-54103eef594e}",
-            interface=comtypes.client.GetModule("UIAutomationCore.dll").IUIAutomation,
+            interface=self._mod.IUIAutomation,
         )
 
     # File-list rows (e.g. the "폴더 열기" dialog's Explorer ListView) hit-test
@@ -431,6 +434,184 @@ class UIAInspector:
             except Exception:
                 continue
         return None
+
+    # ── open-dropdown item resolution (2026-07-31) ──────────────────────────
+    # Clicking an item in an OPEN combo dropdown hit-tests to the COMBO, never
+    # to the item: ElementFromPoint returns the combo whose bounding rect is
+    # still the COLLAPSED box, so the "click point outside the adopted rect"
+    # guard below used to throw the selector away and the event degraded to a
+    # click on whatever panel sat underneath (measured 2026-07-31 on HeidiSQL's
+    # network-type combo: every item click was recorded as `click '설정'
+    # TTabSheet`).
+    #
+    # Win32 ComboBoxEx is two stacked controls sharing one rect:
+    #   TComboBoxEx (Pane)  Name = the currently selected value, id = its hwnd
+    #                       -> patterns: Legacy only, CANNOT be expanded
+    #   ComboBox            Name = '', id = ''
+    #                       -> patterns: ExpandCollapse, Value, Legacy
+    # Only the inner one is drivable, and a selector built from the outer one's
+    # Name can never match before the value is already selected.
+    #
+    # The open list DOES publish its items (18 measured), each supporting
+    # Invoke/SelectionItem -- but for ComboBoxEx every item Name is EMPTY
+    # (owner-drawn, icon-per-item), so an item can only be addressed by its
+    # POSITION IN THE LIST. That is a structural index, not a screen
+    # coordinate, and it matches the slot-index handling the generator already
+    # uses for nameless ListItem/TreeItem/DataItem rows.
+    CT_COMBO_BOX = 50003
+    CT_LIST_ITEM = 50007
+
+    def _is_combo_like(self, info):
+        return (info.get("controlType") == "ComboBox"
+                or "ComboBox" in (info.get("className") or ""))
+
+    def _search_root_for(self, elem):
+        """A window element to run FindAll from, for elements that have no
+        window of their own.
+
+        resolve_root_hwnd() walks up looking for a NativeWindowHandle and
+        returns 0 when it finds none — measured 2026-07-31: an item inside an
+        open combo dropdown is exactly that case, and ElementFromHandle(0)
+        then raises. Fall back to the foreground window, which during capture
+        is the app window that owns both the combo and its popup list."""
+        for hwnd in (self.resolve_root_hwnd(elem),
+                     ctypes.windll.user32.GetForegroundWindow()):
+            if not hwnd:
+                continue
+            try:
+                root = self._uia.ElementFromHandle(hwnd)
+                if root:
+                    return root
+            except Exception:
+                continue
+        return None
+
+    def _inner_expandable_combo(self, elem):
+        """The control that actually owns the dropdown. For a ComboBoxEx the
+        outer wrapper cannot be expanded; its same-rect ComboBox sibling can."""
+        try:
+            if elem.GetCurrentPattern(self.EXPAND_COLLAPSE_PATTERN_ID):
+                return elem
+        except Exception:
+            pass
+        root = self._search_root_for(elem)
+        if root is None:
+            return None
+        try:
+            r = elem.CurrentBoundingRectangle
+            cands = root.FindAll(7, self._uia.CreatePropertyCondition(
+                30003, self.CT_COMBO_BOX))          # TreeScope_Subtree
+        except Exception:
+            return None
+        for i in range(cands.Length):
+            c = cands.GetElement(i)
+            try:
+                cr = c.CurrentBoundingRectangle
+                if (abs(cr.left - r.left) <= 2 and abs(cr.top - r.top) <= 2
+                        and abs(cr.right - r.right) <= 2
+                        and c.GetCurrentPattern(self.EXPAND_COLLAPSE_PATTERN_ID)):
+                    return c
+            except Exception:
+                continue
+        return None
+
+    def combo_item_self(self, elem, info):
+        """The hit test landed ON a dropdown item (not on the combo).
+
+        Measured 2026-07-31: whether ElementFromPoint returns the ListItem or
+        the combo depends on timing — when the list has been open long enough
+        for its items to reach the accessibility tree, the item itself comes
+        back. That case never trips the "outside the adopted rect" guard, so
+        open_dropdown_item_at() below never sees it; but for an owner-drawn
+        ComboBoxEx the item has NO Name and NO AutomationId, so it still ends
+        up with no usable selector and degrades into an anchor path or a FAIL
+        step. Recognise it here and record the same
+        combo + position pair.
+
+        Returns (inner_combo, index, total) or None.
+        """
+        if info.get("controlType") != "ListItem":
+            return None
+        if info.get("name") or info.get("automationId"):
+            return None                      # a named item needs none of this
+        root = self._search_root_for(elem)
+        if root is None:
+            return None
+        try:
+            items = root.FindAll(7, self._uia.CreatePropertyCondition(
+                30003, self.CT_LIST_ITEM))
+            combos = root.FindAll(7, self._uia.CreatePropertyCondition(
+                30003, self.CT_COMBO_BOX))
+        except Exception:
+            return None
+        if not items or not items.Length:
+            return None
+        # Which combo owns this list? Exactly one should be expanded right now.
+        expanded = []
+        for i in range(combos.Length):
+            c = combos.GetElement(i)
+            try:
+                ecp = c.GetCurrentPattern(self.EXPAND_COLLAPSE_PATTERN_ID)
+                if ecp and ecp.QueryInterface(
+                        self._mod.IUIAutomationExpandCollapsePattern
+                ).CurrentExpandCollapseState == 1:      # Expanded
+                    expanded.append(c)
+            except Exception:
+                continue
+        if len(expanded) != 1:
+            return None
+        try:
+            target_rect = elem.CurrentBoundingRectangle
+        except Exception:
+            return None
+        for i in range(items.Length):
+            try:
+                r = items.GetElement(i).CurrentBoundingRectangle
+            except Exception:
+                continue
+            if (r.left == target_rect.left and r.top == target_rect.top
+                    and r.right == target_rect.right
+                    and r.bottom == target_rect.bottom):
+                return expanded[0], i, items.Length
+        return None
+
+    def open_dropdown_item_at(self, elem, x, y):
+        """A click at (x, y) that fell outside `elem`'s rect while `elem` is a
+        combo: if an open dropdown item covers the point, return
+        (inner_combo, index, total, item_name). Otherwise None."""
+        root = self._search_root_for(elem)
+        if root is None:
+            return None
+        try:
+            items = root.FindAll(7, self._uia.CreatePropertyCondition(
+                30003, self.CT_LIST_ITEM))          # TreeScope_Subtree
+        except Exception:
+            return None
+        if not items or not items.Length:
+            return None
+        rows = []
+        for i in range(items.Length):
+            it = items.GetElement(i)
+            try:
+                r = it.CurrentBoundingRectangle
+                rows.append((it, r))
+            except Exception:
+                continue
+        hit_idx = None
+        for i, (it, r) in enumerate(rows):
+            if r.left <= x <= r.right and r.top <= y <= r.bottom:
+                hit_idx = i
+                break
+        if hit_idx is None:
+            return None
+        inner = self._inner_expandable_combo(elem)
+        if inner is None:
+            return None
+        try:
+            item_name = rows[hit_idx][0].CurrentName or ""
+        except Exception:
+            item_name = ""
+        return inner, hit_idx, len(rows), item_name
 
     def resolve_root_hwnd(self, elem, max_up=15):
         """Walk ControlView ancestors from `elem` until one with its own
@@ -1470,10 +1651,30 @@ class Recorder:
                     and isinstance(info.get("rect"), tuple)):
                 left, top, right, bottom = info["rect"]
                 if not (left <= x <= right and top <= y <= bottom):
-                    log(f"[inspect] pt=({x},{y}) outside adopted rect={info['rect']} "
-                        f"(id={info.get('automationId')!r} name={info.get('name')!r}) "
-                        "— dropping selector")
-                    light_dismiss = True
+                    # Before discarding: an OPEN combo dropdown always looks
+                    # like this — the hit test returns the combo (rect = the
+                    # collapsed box) while the click is on a list item below
+                    # it. See UIAInspector.open_dropdown_item_at.
+                    combo_hit = None
+                    if ins._is_combo_like(info):
+                        combo_hit = ins.open_dropdown_item_at(elem, x, y)
+                    if combo_hit is not None:
+                        inner, idx, total, item_name = combo_hit
+                        info = ins.describe(inner)
+                        elem = inner
+                        info["comboItemIndex"] = idx
+                        info["comboItemCount"] = total
+                        info["comboItemName"] = item_name
+                        info["expandCollapse"] = True
+                        log(f"[inspect] pt=({x},{y}) is item {idx + 1}/{total} of an "
+                            f"open dropdown (name={item_name!r}) — recorded as "
+                            f"'expand this combo, then pick item #{idx}' instead of "
+                            "dropping the selector")
+                    else:
+                        log(f"[inspect] pt=({x},{y}) outside adopted rect={info['rect']} "
+                            f"(id={info.get('automationId')!r} name={info.get('name')!r}) "
+                            "— dropping selector")
+                        light_dismiss = True
             if light_dismiss:
                 # The click raced a menu/flyout opening: by the time this hit
                 # test ran, the XAML light-dismiss overlay (a full-window,
@@ -1522,6 +1723,25 @@ class Recorder:
                         treeitem_glyph_fallback = True
                         log(f"[inspect] Tree-center fallback narrowed to row "
                             f"TreeItem name={info.get('name')!r}")
+            # 이름/ID 없는 ListItem이 사실은 "열린 콤보 드롭다운의 항목"인 경우
+            # (2026-07-31, HeidiSQL ComboBoxEx): anchor XPath로 넘기기 전에
+            # 먼저 잡는다. anchor는 트리 구조 기반이라 매 실행 위치가 같아야
+            # 하는데, 드롭다운 목록은 열려 있을 때만 존재하므로 anchor의 전제가
+            # 성립하지 않는다. 대신 "이 콤보를 펼친 뒤 N번째 항목"으로 기록한다.
+            if (not light_dismiss and elem is not None
+                    and not info.get("automationId") and not info.get("name")):
+                self_hit = ins.combo_item_self(elem, info)
+                if self_hit is not None:
+                    inner, idx, total = self_hit
+                    info = ins.describe(inner)
+                    elem = inner
+                    info["comboItemIndex"] = idx
+                    info["comboItemCount"] = total
+                    info["comboItemName"] = ""
+                    info["expandCollapse"] = True
+                    log(f"[inspect] nameless dropdown item at ({x},{y}) is #{idx} of "
+                        f"{total} — recorded as 'expand this combo, then pick "
+                        f"item #{idx}'")
             # 유니크 id/name이 없는 요소 → anchor 기반 relative XPath 캡처
             # (2026-07-10: 좌표 재생 금지 — anchor XPath가 유일한 재생 수단).
             # light-dismiss 오버레이는 전체 창을 덮는 요소라 anchor가 무의미.
@@ -1911,6 +2131,15 @@ class Recorder:
                 # (2026-07-13, UIAInspector.has_expand_collapse) — codegen이
                 # 일반 클릭 대신 osExpandCollapse.ps1 경로를 taken다.
                 "expandCollapse": bool(elem.get("expandCollapse", False)),
+                # 열린 드롭다운의 이름 없는 항목 위치 (2026-07-31,
+                # UIAInspector.combo_item_self/open_dropdown_item_at) —
+                # 여기 화이트리스트에 빠지면 위 주석 그대로 재현된다: 실측
+                # 확인됨(HeidiSQL 재생 로그, comboItemIndex가 캡처 시점에는
+                # 잡혔는데 서버에 도착한 이벤트에는 없어 '4:expandCollapse'로
+                # itemIndex 없이 생성됨).
+                "comboItemIndex": elem.get("comboItemIndex"),
+                "comboItemCount": elem.get("comboItemCount"),
+                "comboItemName": elem.get("comboItemName", ""),
             },
             "timestamp": time.time(),
             "app": self.session.get("appName", ""),

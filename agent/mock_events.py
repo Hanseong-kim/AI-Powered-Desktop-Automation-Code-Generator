@@ -555,6 +555,46 @@ NAMELESS_ITEM_SESSION_META = {
     "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
 }
 
+# Owner-drawn dropdown scenario (2026-07-31, HeidiSQL 네트워크 유형 combo =
+# Win32 ComboBoxEx). Two stacked controls share one rect: the outer TComboBoxEx
+# (UIA Pane, Name = the CURRENTLY SELECTED value, automationId = its own hwnd)
+# and the inner ComboBox (Name and automationId both empty) which is the only
+# one supporting ExpandCollapse. The open list publishes its 18 items, but every
+# item Name is EMPTY, so an item can only be addressed by its position.
+#
+# Two failures this scenario pins down, both measured live:
+#   - capture: the click lands below the combo's collapsed rect, so agent.py's
+#     "point outside the adopted rect" guard used to discard the selector and
+#     the event degraded into a click on the panel underneath.
+#   - replay: a selector built from the outer control's Name
+#     (`Pane[@ClassName="TComboBoxEx" and @Name="Microsoft SQL Server (TCP/IP)"]`)
+#     can never match, because that Name only equals the value AFTER it has
+#     been selected.
+# agent.py now records comboItemIndex/comboItemCount and codegen must forward
+# both to osExpandCollapse() so the helper expands and picks by position.
+COMBO_INDEX_APP = "MockComboIndex"
+COMBO_INDEX_EVENTS = [
+    make_event("click", name="", automation_id="", class_name="ComboBox",
+               control_type="ComboBox", app_name=COMBO_INDEX_APP,
+               expand_collapse=True, index=1),
+    # An ordinary click right after it. This must survive as its own step: the
+    # combo event is already a complete action, so it must not be treated as a
+    # bare trigger and paired with whatever the user did next.
+    make_event("click", name="Save", automation_id="btnSave", class_name="Button",
+               control_type="Button", app_name=COMBO_INDEX_APP, index=2),
+]
+COMBO_INDEX_EVENTS[0]["element"]["comboItemIndex"] = 4
+COMBO_INDEX_EVENTS[0]["element"]["comboItemCount"] = 18
+COMBO_INDEX_EVENTS[0]["element"]["comboItemName"] = ""
+COMBO_INDEX_SESSION_META = {
+    "action": "session_meta",
+    "app": COMBO_INDEX_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
 # hwnd-id trigger scenario (2026-07-29, HeidiSQL "더보기" SplitButton, 3차):
 # the target/triggerTarget object builders for the COM helpers
 # (osScopedInvoke/osExpandCollapse) read el.automationId directly — a
@@ -604,6 +644,35 @@ DUP_DROPDOWN_EVENTS = [
 DUP_DROPDOWN_SESSION_META = {
     "action": "session_meta",
     "app": DUP_DROPDOWN_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
+# TComboBoxEx re-click scenario (2026-07-31, HeidiSQL 네트워크 유형 콤보):
+# a click that lands on the combo's own body (not the arrow, not an open
+# list item) hit-tests to the TComboBoxEx Pane itself, whose Name is
+# whatever value is CURRENTLY selected and whose automationId is its own
+# window handle (unstable). A selector built from that Name can only ever
+# match after the value has already been chosen — never at replay start.
+# Real failure reproduced live: 'click-not-found://Pane[@ClassName=
+# "TComboBoxEx" and @Name="MariaDB or MySQL (SSH tunnel)"]'.
+COMBOBOXEX_RECLICK_APP = "MockComboBoxExReclick"
+COMBOBOXEX_RECLICK_EVENTS = [
+    make_event("click", name="MariaDB or MySQL (SSH tunnel)", automation_id="",
+               class_name="TComboBoxEx", control_type="Pane",
+               app_name=COMBOBOXEX_RECLICK_APP, index=1, relX=663, relY=84),
+]
+COMBOBOXEX_RECLICK_EVENTS[0]["element"]["hwnd"] = 2690052  # equals nothing here,
+# but mirrors the live capture where automationId WOULD equal the element's
+# own hwnd if one were assigned — isWindowHandleId only fires when
+# automationId is set, so this scenario leaves automationId empty (the more
+# common capture shape) and relies on forceDropName to prove Name is dropped
+# regardless of automationId state.
+COMBOBOXEX_RECLICK_SESSION_META = {
+    "action": "session_meta",
+    "app": COMBOBOXEX_RECLICK_APP,
     "platform": PLATFORM,
     "timestamp": time.time(),
     "isElectron": False,
@@ -1556,7 +1625,7 @@ def step_wdio_generate_session():
         )
         check(
             f"  {fname} actually DEFINES osExpandCollapse() (not just calls it)",
-            "function osExpandCollapse(hwnd, target, itemName)" in content,
+            "function osExpandCollapse(hwnd, target, itemName, itemIndex, itemCount)" in content,
             "SESSION_HEADER never defined this helper — calling it threw "
             "'osExpandCollapse is not defined' at replay time even after the "
             "call-site gate was fixed (2026-07-16, caught on real FileZilla "
@@ -1685,7 +1754,7 @@ def step_wdio_generate_expand_redundant_trigger():
             continue
         check(
             f"  {fname} merges the 3 redundant trigger re-clicks with the REAL item (not itself)",
-            'osExpandCollapse(_appHwnd, {"automationId":"5999","className":"ComboBox","name":"Combo"}, "Red")' in content,
+            'osExpandCollapse(_appHwnd, {"automationId":"5999","className":"ComboBox","name":"Combo"}, "Red", null, null)' in content,
             "expected the 3 consecutive re-clicks of the same ComboBox trigger "
             "to collapse into ONE osExpandCollapse call whose itemName is the "
             "real item ('Red') that came after them — real FileZilla capture "
@@ -1695,7 +1764,7 @@ def step_wdio_generate_expand_redundant_trigger():
         )
         check(
             f"  {fname} never merges the trigger with itself (self-referencing itemName)",
-            'osExpandCollapse(_appHwnd, {"automationId":"5999","className":"ComboBox","name":"Combo"}, "Combo")' not in content,
+            'osExpandCollapse(_appHwnd, {"automationId":"5999","className":"ComboBox","name":"Combo"}, "Combo", null, null)' not in content,
             "found a self-referencing merge — itemName equals the trigger's "
             "own name, which is exactly the STEP6 bug seen in the real "
             "FileZilla run ('배경색(B): -> 배경색(B):')",
@@ -1711,7 +1780,7 @@ def step_wdio_generate_expand_redundant_trigger():
         )
         check(
             f"  {fname} still correctly merges an ordinary MenuItem trigger+item pair (regression)",
-            'osExpandCollapse(_appHwnd, {"automationId":"","className":"MenuItem","name":"File"}, "Open")' in content,
+            'osExpandCollapse(_appHwnd, {"automationId":"","className":"MenuItem","name":"File"}, "Open", null, null)' in content,
             "the fix must not disturb the existing non-redundant merge path",
         )
 
@@ -1793,7 +1862,7 @@ def step_wdio_generate_native():
         )
         check(
             f"  {fname} replays a standalone TreeItem toggle with itemName=null",
-            'osExpandCollapse(_appHwnd, {"automationId":"","className":"TreeItem","name":"Window"}, null)' in content,
+            'osExpandCollapse(_appHwnd, {"automationId":"","className":"TreeItem","name":"Window"}, null, null, null)' in content,
             "TreeItem +/- toggle must call osExpandCollapse() with no item "
             "name (pure expand/collapse, not an item-selection gesture)",
         )
@@ -2028,7 +2097,7 @@ def step_wdio_generate_nameless_item_no_fake_itemname():
         )
         check(
             f"  {fname} keeps the trigger as a standalone toggle instead of a bogus merge",
-            'osExpandCollapse(_appHwnd, {"automationId":"fakeTrigger","className":"ComboBox","name":"Combo2"}, null)' in content,
+            'osExpandCollapse(_appHwnd, {"automationId":"fakeTrigger","className":"ComboBox","name":"Combo2"}, null, null, null)' in content,
             "with no real item name to merge, the trigger must fall back to "
             "the plain expand/collapse toggle it always had as a valid "
             "standalone behavior",
@@ -2043,6 +2112,67 @@ def step_wdio_generate_nameless_item_no_fake_itemname():
             "(automationId, via COM property search, NOT the Name-only "
             "search that made the old itemName fallback pointless) instead "
             "of either a bogus text search or giving up outright",
+        )
+
+
+def step_wdio_generate_owner_drawn_dropdown_by_index():
+    print("\n[16] Owner-drawn dropdown item selected by position (HeidiSQL ComboBoxEx)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", COMBO_INDEX_SESSION_META)
+    for ev in COMBO_INDEX_EVENTS:
+        request("POST", "/api/events", ev)
+
+    status, body = request("POST", "/api/generate", {
+        "appName": COMBO_INDEX_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (combo index) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped combo-index checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname = f.get("filename", "")
+        content = f.get("content", "")
+        check(
+            f"  {fname} forwards the recorded list position to osExpandCollapse()",
+            ", 4, 18)" in content and "osExpandCollapse(" in content,
+            "an owner-drawn dropdown exposes no item Names at all, so the only "
+            "way to pick a value is the item's position in the open list — "
+            "codegen must pass comboItemIndex/comboItemCount through or the "
+            "step silently degrades to 'just open the dropdown' (HeidiSQL "
+            "network-type combo, 2026-07-31)",
+        )
+        check(
+            f"  {fname} never builds a selector from the combo's state-dependent Name",
+            "TComboBoxEx" not in content,
+            "the outer ComboBoxEx wrapper's Name IS the currently selected "
+            "value, so a selector using it can only match AFTER the value has "
+            "been chosen — the exact chicken-and-egg failure measured on "
+            "replay ('click-not-found://Pane[@ClassName=\"TComboBoxEx\" and "
+            "@Name=\"Microsoft SQL Server (TCP/IP)\"]')",
+        )
+        check(
+            f"  {fname} does not swallow the following click as this dropdown's item",
+            # ById resolves it as '~btnSave', ByClass as a ClassName+Name XPath —
+            # assert on the step label, which both variants share.
+            "2:click Save" in content,
+            "the event already encodes a complete 'expand then pick #N' "
+            "action; letting mergeExpandCollapseClicks pair it with the next "
+            "click would consume an unrelated user action ('Save') as if it "
+            "were this dropdown's item, deleting it from the test",
+        )
+        check(
+            f"  {fname} emits exactly one expand step (the combo) plus the Save click",
+            content.count("osExpandCollapse(_appHwnd") == 1,
+            "a second osExpandCollapse call site would mean the trailing click "
+            "was also routed through the dropdown path",
+        )
+        check(
+            f"  {fname} passes the item count so a changed list is refused",
+            ", 18)" in content,
+            "the helper compares the recorded item count against the live one "
+            "and refuses to pick by position when they differ — without it a "
+            "reordered/filtered list silently selects the wrong value",
         )
 
 
@@ -2117,6 +2247,43 @@ def step_wdio_generate_dup_dropdown_position_disambiguation():
             "each DropDown click must carry ITS OWN captured relY — reusing "
             "the same target/hint for both would defeat the whole point of "
             "distinguishing them",
+        )
+
+
+def step_wdio_generate_combobox_ex_reclick_drops_name():
+    print("\n[17] TComboBoxEx re-click never uses its state-dependent Name (HeidiSQL 네트워크 유형, 2026-07-31)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", COMBOBOXEX_RECLICK_SESSION_META)
+    for ev in COMBOBOXEX_RECLICK_EVENTS:
+        request("POST", "/api/events", ev)
+
+    status, body = request("POST", "/api/generate", {
+        "appName": COMBOBOXEX_RECLICK_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (ComboBoxEx re-click) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped ComboBoxEx re-click checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname = f.get("filename", "")
+        content = f.get("content", "")
+        check(
+            f"  {fname} never builds a selector from the combo's currently-selected-value Name",
+            '"MariaDB or MySQL (SSH tunnel)"' not in content,
+            "TComboBoxEx's own Name IS whatever value is currently selected — "
+            "a selector using it can only match AFTER that value has already "
+            "been chosen, never at replay start. Real failure measured live: "
+            "click-not-found://Pane[@ClassName=\"TComboBoxEx\" and "
+            "@Name=\"MariaDB or MySQL (SSH tunnel)\"]",
+        )
+        check(
+            f"  {fname} routes the click through COM with className-only + position hint",
+            'osScopedInvoke(_appHwnd, {"automationId":"","className":"TComboBoxEx","name":""}, null, 84);' in content,
+            "with Name force-dropped and automationId absent, className is "
+            "the only remaining field — must still reach a valid, complete "
+            "osScopedInvoke() call carrying the recorded relY, not an empty "
+            "or malformed target",
         )
 
 
@@ -2439,6 +2606,8 @@ def main():
     step_wdio_generate_vcl_hwnd_id()
     step_wdio_generate_trigger_expand_merge_order()
     step_wdio_generate_nameless_item_no_fake_itemname()
+    step_wdio_generate_owner_drawn_dropdown_by_index()
+    step_wdio_generate_combobox_ex_reclick_drops_name()
     step_wdio_generate_hwnd_trigger_keeps_name()
     step_wdio_generate_dup_dropdown_position_disambiguation()
     step_com_sendinput_helpers()
