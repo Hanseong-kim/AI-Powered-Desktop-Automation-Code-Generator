@@ -115,6 +115,48 @@ def point_in_rect(rect, x, y):
     return left <= x < right and top <= y < bottom
 
 
+# Window classes an embedded Chromium view publishes. Detection is by window
+# class only — never by app name or exe path — so WebView2, Electron and CEF
+# are all covered by the same rule (CLAUDE.md §6: no per-app integration).
+# Measured 2026-08-03, TeamViewer 15.79 child chain:
+#   MainWindowOne > TV_WebView2Control > Chrome_WidgetWin_0/1
+#                                      > Chrome_RenderWidgetHostHWND
+CHROMIUM_HOST_CLASSES = (
+    "Chrome_WidgetWin",
+    "Chrome_RenderWidgetHostHWND",
+    "TV_WebView2Control",
+)
+
+
+def is_web_host(hwnd):
+    """True when `hwnd` has a descendant window belonging to embedded Chromium.
+
+    Such an app publishes its accessibility tree progressively, so both
+    capture and replay must wait for it to settle (see settled_subtree_count).
+    """
+    if not hwnd:
+        return False
+    found = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    def cb(child, _):
+        try:
+            buf = ctypes.create_unicode_buffer(256)
+            ctypes.windll.user32.GetClassNameW(child, buf, 256)
+            if any(buf.value.startswith(c) for c in CHROMIUM_HOST_CLASSES):
+                found.append(child)
+                return False
+        except Exception:
+            pass
+        return True
+
+    try:
+        ctypes.windll.user32.EnumChildWindows(hwnd, cb, 0)
+    except Exception:
+        return False
+    return bool(found)
+
+
 # ----------------------------------------------------------------------------
 # UI Automation helpers (run ONLY on the worker thread - COM apartment there)
 # ----------------------------------------------------------------------------
