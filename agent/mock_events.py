@@ -1885,7 +1885,7 @@ def step_wdio_generate_native():
         check(
             f"  {fname} merges a same-window trigger + cross-window item into one osScopedInvoke() call",
             'osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"Some Encoding"}, '
-            '{"automationId":"DropDown","className":"","name":""}, null, null);' in content,
+            '{"automationId":"DropDown","className":"","name":""}, null, null, "Native Dialog");' in content,
             "trigger click (DropDown button) and the cross-window item click "
             "must merge into one osScopedInvoke(item, trigger) call instead "
             "of two separate steps — splitting them races the popup "
@@ -1920,7 +1920,7 @@ def step_wdio_generate_native():
         check(
             f"  {fname} merges trigger+scroll+item into one osScopedInvoke() and drops the scroll",
             'osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"UTF-8 Item"}, '
-            '{"automationId":"DropDown","className":"","name":""}, null, null);' in content
+            '{"automationId":"DropDown","className":"","name":""}, null, null, "Native Dialog");' in content
             and "osScrollEl(_appHwnd," not in content,  # call site, not the header's function def
             "trigger click + intervening scroll + cross-window item must merge "
             "into one osScopedInvoke(item, trigger); the scroll must be dropped "
@@ -2047,7 +2047,7 @@ def step_wdio_generate_trigger_expand_merge_order():
         # the item search fails every time (measured live against HeidiSQL).
         check(
             f"  {fname} merges the trigger and the cross-window expandCollapse item into one osScopedInvoke call",
-            'osScopedInvoke(_appHwnd, {"automationId":"473","className":"","name":""}, {"automationId":"btnMore","className":"Button","name":""}, null, null);' in content,
+            'osScopedInvoke(_appHwnd, {"automationId":"473","className":"","name":""}, {"automationId":"btnMore","className":"Button","name":""}, null, null, "Calculator");' in content,
             "trigger (More) and item (the cross-window standalone toggle) "
             "must run in the SAME process so the popup the trigger opens is "
             "visible to the item search's new-window baseline",
@@ -2061,7 +2061,7 @@ def step_wdio_generate_trigger_expand_merge_order():
         )
         check(
             f"  {fname} still replays the later, genuinely separate cross-window click on its own",
-            'osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"Log"}, null, null, null);' in content,
+            'osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"Log"}, null, null, null, "Calculator");' in content,
             "the fix must not disturb a real, unrelated cross-window click "
             "that just happens to follow a merged trigger+item pair",
         )
@@ -2205,7 +2205,7 @@ def step_wdio_generate_hwnd_trigger_keeps_name():
         )
         check(
             f"  {fname} keeps the trigger's Name once its hwnd-id is rejected",
-            'osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"Prefs"}, {"automationId":"","className":"SplitButton","name":"More"}, null, null);' in content,
+            'osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"Prefs"}, {"automationId":"","className":"SplitButton","name":"More"}, null, null, "Calculator");' in content,
             "dropping the Name too (the old 'automationId present -> drop "
             "Name' rule, applied even to a rejected hwnd-id) leaves the "
             "trigger with NO usable field at all — Name must survive when "

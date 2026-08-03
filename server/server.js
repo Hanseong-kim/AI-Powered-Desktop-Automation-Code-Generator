@@ -1534,6 +1534,50 @@ def top_windows():
     return found
 
 
+def window_title(hwnd):
+    n = user32.GetWindowTextLengthW(hwnd)
+    buf = ctypes.create_unicode_buffer(n + 1)
+    user32.GetWindowTextW(hwnd, buf, n + 1)
+    return buf.value
+
+
+def owner_window_for(main_h, main_pid, owner_title):
+    """The same-PID top-level window this event was actually recorded in.
+
+    Cross-window steps used to search the MAIN window first and only then
+    other top-level windows. That is wrong whenever the recorded selector is
+    weak enough to also match something in the main window. Measured
+    2026-08-03 (PuTTY): step '13:click 닫기' belongs to the 'PuTTY User
+    Manual' window and carries NO AutomationId and NO ClassName, so its
+    selector is the bare name 닫기 — which the main PuTTY Configuration
+    window ALSO contains (two ComboBox DropDown arrows are named 닫기, and a
+    Korean titlebar Close button is Button[@Name="닫기"] as well). The main
+    window search matched 2 elements, picked one by recorded position, and
+    closed PuTTY Configuration — after which every later step failed with
+    click-not-found.
+
+    Returning the recorded window here lets the caller search it FIRST. Match
+    on containment because titles carry volatile suffixes; skip when the hint
+    matches the main window (the ordinary same-window case) so nothing about
+    the existing path changes there.
+    """
+    if not owner_title:
+        return None
+    main_title = window_title(main_h)
+    if owner_title in main_title or main_title in owner_title:
+        return None
+    for h in top_windows():
+        if h == main_h:
+            continue
+        cand_pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(h, ctypes.byref(cand_pid))
+        if cand_pid.value != main_pid:
+            continue
+        if owner_title in window_title(h):
+            return h
+    return None
+
+
 def resolve_cond(uia, sel):
     conds = []
     if sel.get("automationId"):
@@ -1793,6 +1837,8 @@ def main():
     # 매 실행 현재 창 위치에 다시 더해서만 쓴다.
     ap.add_argument("--rel-y", type=int, default=None)
     ap.add_argument("--trigger-rel-y", type=int, default=None)
+    # 이 이벤트가 실제로 녹화된 창의 제목 — owner_window_for() 참고.
+    ap.add_argument("--owner-title-b64", default=None)
     args = ap.parse_args()
 
     enable_per_monitor_dpi()
@@ -1880,9 +1926,27 @@ def main():
     attempts = 20 if args.text_b64 else 10
     main_pid = wintypes.DWORD()
     user32.GetWindowThreadProcessId(main_h, ctypes.byref(main_pid))
+    owner_title = (base64.b64decode(args.owner_title_b64).decode("utf-8")
+                   if args.owner_title_b64 else "")
     for attempt in range(attempts):
         if attempt > 0:
             time.sleep(0.3)
+
+        # (a0) 이 이벤트가 녹화된 창이 메인 창이 아니라면 거기서 먼저 찾는다.
+        #      약한 셀렉터(이름 단독)가 메인 창의 엉뚱한 동명 컨트롤에 먼저
+        #      걸리는 것을 막는다 — owner_window_for() 주석의 PuTTY 닫기 사례.
+        owner_h = owner_window_for(main_h, main_pid.value, owner_title)
+        if owner_h:
+            try:
+                owner_root = uia.ElementFromHandle(owner_h)
+                if owner_root:
+                    item = owner_root.FindFirst(TreeScope_Subtree, item_cond)
+                    if item and act(item):
+                        print(f"[osScopedInvoke] {verb} under the window it was "
+                              f"recorded in ({owner_title!r} hwnd={owner_h})")
+                        sys.exit(0)
+            except Exception:
+                pass
 
         # (a) 메인 창 서브트리. Subtree = 창 자기 자신(root)도 포함해 검색한다 —
         #     Descendants만 쓰면 캡처된 타겟이 창 자체(예: className="#32770")인
@@ -1982,8 +2046,85 @@ function longestCommonSubstringAll(strings) {
 }
 
 /** 이벤트 목록에서 유효한 액션만 추출 (session_meta 제거) */
+// 한 창이 녹화 도중 제목을 바꾸면, 제목 문자열을 창 식별자로 쓰는 모든 로직이
+// 조용히 깨진다. 실측 2026-08-03(HeidiSQL 세션 관리자): "신규"를 누르는 순간
+// 같은 hwnd의 제목이
+//   "HeidiSQL 12.20.0.7320 - 세션 관리자"
+//   → "HeidiSQL 12.20.0.7320 - 세션 관리자: Unnamed-14"
+// 로 바뀐다. "Unnamed-N"은 앱이 매번 새로 매기는 일련번호라 재생 때는 절대
+// 같은 값이 나오지 않는다(재생 로그에서 Unnamed-13 요구 → 실제 Unnamed-14).
+// 결과는 두 가지 형태로 나타났다:
+//   (a) 그 제목이 _mainTitleFrag로 뽑히면 launchApp이 창을 영영 못 찾아
+//       matched=[] 로 전부 실패 — 스텝이 하나도 실행되지 않음
+//   (b) 앞부분 이벤트만 안정된 제목으로 잡히면 launch는 성공하지만, 이름이
+//       바뀐 뒤에 녹화된 스텝들만 _clickScoped에서 창을 못 찾아 실패
+//       (SSH 터널/설정 탭 클릭 2건이 click-not-found로 떨어짐)
+// 한쪽이 다른 쪽의 진접두사이고 나머지가 구분자(: - – —)로 시작할 때만 짧은
+// 쪽으로 합친다. 재생의 창 매칭은 이미 contains 기반이라, 짧은 제목으로
+// 합쳐두면 접미사가 몇 번이 되든 매칭된다.
+const VOLATILE_TITLE_SUFFIX = /^\s*[:\-–—]/;
+const MIN_STABLE_TITLE_LEN  = 4;   // 너무 짧은 접두사로 엉뚱하게 합치지 않도록
+
+function canonicalizeWindowTitles(events, seedTitles = []) {
+  const titles = [...new Set(
+    events.map(e => e.element?.windowTitle || '').filter(Boolean))];
+  // seed = agent.py가 창 발견 시점에 관측한 제목(session_meta.discoveredTitles).
+  // 병합 "대상"으로만 쓴다 — 이벤트가 하나도 없는 제목이므로 창 세그먼트를
+  // 새로 만들지 않는다. 녹화 첫 클릭이 곧 창 이름을 바꾸는 경우, 이벤트
+  // 쪽에는 안정된 제목이 아예 없어서 seed 없이는 되돌릴 수가 없다.
+  const targets = [...new Set([...seedTitles.filter(Boolean), ...titles])];
+  if (targets.length < 2) return events;
+  // 한 단계에 가장 "적게" 합치도록 최장 접두사를 고른 뒤, 고정점까지 반복
+  // 적용한다(A ← A: B ← A: B: C 같은 사슬도 결국 A로 모인다).
+  const step = (t) => {
+    let best = null;
+    for (const p of targets) {
+      if (p === t) continue;
+      if (p.length < MIN_STABLE_TITLE_LEN) continue;
+      if (p.length >= t.length) continue;
+      if (!t.startsWith(p)) continue;
+      if (!VOLATILE_TITLE_SUFFIX.test(t.slice(p.length))) continue;
+      if (!best || p.length > best.length) best = p;
+    }
+    return best;
+  };
+  const canon = new Map();
+  for (const t of titles) {
+    let cur = t;
+    for (let i = 0; i < targets.length; i++) {   // 사슬 길이 상한 = 후보 수
+      const next = step(cur);
+      if (!next) break;
+      cur = next;
+    }
+    if (cur !== t) canon.set(t, cur);
+  }
+  if (!canon.size) return events;
+  for (const [from, to] of canon) {
+    console.log(`[title] "${from}" -> "${to}" (녹화 중 제목이 바뀐 같은 창)`);
+  }
+  // 저장된 녹화 자체는 건드리지 않는다 — 바뀌는 이벤트만 얕게 복제.
+  return events.map(e => {
+    const t = e.element?.windowTitle;
+    const c = t ? canon.get(t) : null;
+    return c ? { ...e, element: { ...e.element, windowTitle: c } } : e;
+  });
+}
+
 function filterEvents(eventList) {
-  return eventList.filter(e => e.action && e.action !== 'session_meta');
+  const meta = eventList.find(e => e.action === 'session_meta');
+  // seed 출처 두 가지 모두 사용:
+  //  - session_meta.discoveredTitles : 녹화 시작 시점에 탐색된 창들
+  //  - element.stableWindowTitle     : 그 창을 처음 봤을 때의 제목
+  // 후자가 필요한 이유 — 앱이 뜨기 전에 녹화가 시작되면 탐색이 포그라운드
+  // 창(도구 자신의 UI)으로 폴백해서 discoveredTitles에 엉뚱한 제목이 담긴다.
+  // 진짜 앱 창은 그 뒤 워처가 찾으므로, 창별 최초 제목이 유일한 근거가 된다
+  // (실측 2026-08-03: 그 상황에서 재생이 Chrome 창을 앱으로 오인했다).
+  const seeds = [
+    ...(meta?.discoveredTitles || []),
+    ...eventList.map(e => e.element?.stableWindowTitle || ''),
+  ];
+  return canonicalizeWindowTitles(
+    eventList.filter(e => e.action && e.action !== 'session_meta'), seeds);
 }
 
 // agent.py의 _emit_click_from_press()는 물리적 더블클릭 1회를 click + click +
@@ -2075,10 +2216,96 @@ function dedupeDoubleClicks(events) {
 // 목적이라 단독으로 처리된다(generateWdio의 forEach 루프).
 const EXPAND_MERGE_CONTROL_TYPES = new Set(['ComboBox', 'MenuItem']);
 
+// 겹쳐 있는 두 컨트롤(TComboBoxEx 껍데기 + 안쪽 ComboBox)이 같은 rect를
+// 공유한다 — UIAInspector._inner_expandable_combo가 쓰는 기준과 동일.
+const COMBO_RECT_TOLERANCE = 2;
+// 콤보를 여는 제스처는 click 하나로 끝나지 않는다 — 두 번 눌러야 열리는
+// 경우가 흔하고(FileZilla 색상 콤보는 3번), 그러면 dedupeDoubleClicks가
+// 앞선 click들을 doubleClick 하나로 접어 넘긴다. 실측 2026-08-03 HeidiSQL
+// 녹화에서도 트리거가 click + doubleClick 두 개로 남아 있었다.
+const COMBO_OPEN_ACTIONS = new Set(['click', 'doubleClick']);
+function sameRect(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== 4 || b.length !== 4) return false;
+  return a.every((v, k) => Math.abs(v - b[k]) <= COMBO_RECT_TOLERANCE);
+}
+
+// 히트테스트가 "창을 거의 다 덮는 컨테이너"로 떨어진 클릭은 재생 가능한
+// 타깃이 아니다. 실측 2026-08-03(TeamViewer, WebView2 콘텐츠): 버튼 클릭이
+// controlType=Group / AutomationId="root" / rect 1283x930 — 창(1300x977)의
+// 94% — 으로 잡혔다. agent.py의 _deepen()이 그 지점에서 쓸 만한 자식을 찾지
+// 못하고 컨테이너를 그대로 채택한 결과다.
+//
+// 이걸 그대로 두면 재생이 그 컨테이너 정중앙을 클릭한다. 셀렉터는 멀쩡히
+// 찾아지므로 스텝은 **성공으로 집계되지만 화면에서는 아무 일도 없다** —
+// 실측에서 정확히 그렇게 됐고(스텝 5·6이 에러 없이 통과), 그 클릭이 열었어야
+// 할 다이얼로그가 안 떠서 이후 5개 스텝이 전부 target-not-found로 무너졌다.
+// 조용한 거짓 성공은 §3 "No false PASS"에 정면으로 걸린다. 셀렉터를 비워
+// 아래 `if (!sel)` 경로로 보내 명시적 FAIL 스텝이 되게 한다.
+//
+// Document/Edit은 제외한다 — 메모장의 Document처럼 창을 꽉 채우면서도
+// 클릭(캐럿 배치)이 정당한 컨트롤이 있다.
+const WINDOW_FILL_RATIO = 0.80;
+const CONTAINER_CONTROL_TYPES = new Set(
+  ['Pane', 'Group', 'ToolBar', 'List', 'Custom', 'Window']);
+
+function stripWindowFillingContainers(events, winRect) {
+  if (!winRect || !winRect.width || !winRect.height) return events;
+  const winArea = winRect.width * winRect.height;
+  if (winArea <= 0) return events;
+  return events.map(e => {
+    const el = e.element;
+    if (!el || !CONTAINER_CONTROL_TYPES.has(el.controlType)) return e;
+    const r = el.rect;
+    if (!Array.isArray(r) || r.length !== 4) return e;
+    const area = Math.max(0, r[2] - r[0]) * Math.max(0, r[3] - r[1]);
+    const ratio = area / winArea;
+    if (ratio < WINDOW_FILL_RATIO) return e;
+    console.log(`[container] ${e.action} resolved to <${el.controlType} `
+      + `id=${JSON.stringify(el.automationId || '')}> covering `
+      + `${(ratio * 100).toFixed(0)}% of the window — no usable target, `
+      + `emitting an explicit FAIL step`);
+    return { ...e, element: { ...el,
+      automationId: '', name: '', className: '', xpath: '',
+      locatorStrategy: 'coordinate', locatorValue: '',
+      anchorId: '', anchorPath: '' } };
+  });
+}
+
 function mergeExpandCollapseClicks(events) {
   const out = [];
   for (let i = 0; i < events.length; i++) {
     let e = events[i];
+    // 항목 선택 이벤트(comboItemIndex)는 그 자체가 "이 콤보를 펼친 뒤
+    // N번째 항목" — 펼치기를 이미 포함한다. 그 바로 앞의 "콤보를 여는
+    // 클릭"까지 그대로 재생하면 목록이 두 번 열린다: 리터럴 클릭 한 번,
+    // osExpandCollapse의 Expand() 한 번. 실측 2026-08-03(HeidiSQL 네트워크
+    // 유형) — 재생 화면에서 목록이 열렸다 닫혔다 다시 열리고, 그 사이에
+    // 엉뚱한 위치가 눌리는 것이 관찰됐다.
+    //
+    // 이 트리거는 controlType/expandCollapse로는 잡을 수 없다. TComboBoxEx의
+    // 바깥 껍데기는 UIA Pane이고 ExpandCollapse를 지원하지 않아 아래
+    // EXPAND_MERGE_CONTROL_TYPES(ComboBox/MenuItem) + expandCollapse 조건을
+    // 둘 다 못 넘는다(실측: 트리거 클릭 controlType=Pane,
+    // expandCollapse=false, 항목 이벤트 controlType=ComboBox,
+    // expandCollapse=true). 대신 rect로 짝짓는다 — 두 컨트롤이 같은 rect에
+    // 겹쳐 있다는 사실이 이 케이스의 정의 그 자체다.
+    if (COMBO_OPEN_ACTIONS.has(e.action) && !Number.isInteger(e.element?.comboItemIndex)
+        && Array.isArray(e.element?.rect)) {
+      let k = i;
+      while (COMBO_OPEN_ACTIONS.has(events[k]?.action)
+             && !Number.isInteger(events[k]?.element?.comboItemIndex)
+             && sameRect(events[k]?.element?.rect, e.element.rect)) {
+        k++;      // 같은 콤보를 여닫는 연속 클릭/더블클릭을 통째로 건너뛴다
+      }
+      const pick = events[k];
+      if (k > i && Number.isInteger(pick?.element?.comboItemIndex)
+          && sameRect(pick.element?.rect, e.element.rect)) {
+        console.log(`[expand-merge] dropped ${k - i} redundant open-click(s) before `
+          + `'select item #${pick.element.comboItemIndex}' @index ${i}..${k - 1}`);
+        i = k - 1;     // 루프의 i++가 항목 이벤트를 가리키게 한다
+        continue;
+      }
+    }
     // comboItemIndex (2026-07-31): agent.py already resolved this event to
     // "expand this combo, then pick item #N" — it is a complete action, not a
     // bare trigger waiting to be paired with the click that follows. Merging
@@ -2964,7 +3191,7 @@ function osExpandCollapse(hwnd, target, itemName, itemIndex, itemCount) {
 // 검색을 별도 스텝(별도 프로세스)으로 쪼개면 그 사이 지연 동안 드롭다운이
 // 자동으로 닫혀버림을 실측으로 확인(2026-07-13 재현) — 한 프로세스 실행
 // 안에서 끊김 없이 처리해 그 레이스를 없앤다.
-function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY) {
+function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY, ownerTitle) {
     if (!hwnd) {
         _failures.push('osScopedInvoke:no-hwnd');
         console.warn('[osScopedInvoke] no window hwnd — cannot search without a window handle');
@@ -2982,8 +3209,14 @@ function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY) {
         // screen coordinate used to click (see pick_by_position there).
         const relYArg = Number.isInteger(relY) ? \`--rel-y \${relY}\` : '';
         const triggerRelYArg = Number.isInteger(triggerRelY) ? \`--trigger-rel-y \${triggerRelY}\` : '';
+        // ownerTitle: the window this event was recorded in. Searched BEFORE
+        // the main window so a bare-name selector cannot match a same-named
+        // control in the main window first (PuTTY 닫기, 2026-08-03).
+        const ownerArg = ownerTitle
+            ? \`--owner-title-b64 "\${Buffer.from(String(ownerTitle), 'utf8').toString('base64')}"\`
+            : '';
         const out = execSync(
-            \`python "\${_helperFile('osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${triggerArg} \${relYArg} \${triggerRelYArg}\`,
+            \`python "\${_helperFile('osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${triggerArg} \${relYArg} \${triggerRelYArg} \${ownerArg}\`,
             { stdio: 'pipe', timeout: 20000 }
         ).toString().trim();
         if (out) console.log(out);
@@ -3288,7 +3521,7 @@ function osExpandCollapse(hwnd, target, itemName, itemIndex, itemCount) {
 // 모든 최상위 창 순으로 직접 찾아 Invoke하므로 title 충돌 자체가 없다 —
 // 다이얼로그 내부의 개별 클릭들(트리거 병합과 무관하게 각자 cross-window로
 // 캡처됨)도 이 경로로 독립적으로 처리된다.
-function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY) {
+function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY, ownerTitle) {
     if (!hwnd) {
         _failures.push('osScopedInvoke:no-hwnd');
         console.warn('[osScopedInvoke] no window hwnd — cannot search without a window handle');
@@ -3306,8 +3539,14 @@ function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY) {
         // screen coordinate used to click (see pick_by_position there).
         const relYArg = Number.isInteger(relY) ? \`--rel-y \${relY}\` : '';
         const triggerRelYArg = Number.isInteger(triggerRelY) ? \`--trigger-rel-y \${triggerRelY}\` : '';
+        // ownerTitle: the window this event was recorded in. Searched BEFORE
+        // the main window so a bare-name selector cannot match a same-named
+        // control in the main window first (PuTTY 닫기, 2026-08-03).
+        const ownerArg = ownerTitle
+            ? \`--owner-title-b64 "\${Buffer.from(String(ownerTitle), 'utf8').toString('base64')}"\`
+            : '';
         const out = execSync(
-            \`python "\${_helperFile('osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${triggerArg} \${relYArg} \${triggerRelYArg}\`,
+            \`python "\${_helperFile('osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${triggerArg} \${relYArg} \${triggerRelYArg} \${ownerArg}\`,
             { stdio: 'pipe', timeout: 20000 }
         ).toString().trim();
         if (out) console.log(out);
@@ -4114,7 +4353,9 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
   // 것이다.
   const _mainWindowTitleForDialogRects = _rectEvent?.element?.windowTitle || '';
 
-  const filtered     = mergeCrossWindowTriggerClicks(mergeExpandCollapseClicks(_deduped), recordedRect);
+  const filtered     = stripWindowFillingContainers(
+    mergeCrossWindowTriggerClicks(mergeExpandCollapseClicks(_deduped), recordedRect),
+    recordedRect);
   const pageMethods  = [];
   const testSteps    = [];
 
@@ -4527,7 +4768,7 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       const triggerRelYArg = Number.isInteger(e.crossWindowTriggerRelY) ? e.crossWindowTriggerRelY : 'null';
       pushMethod(
 `    async click${stepNum}() {
-        osScopedInvoke(${hwndArg}, ${JSON.stringify(target)}, ${triggerTarget ? JSON.stringify(triggerTarget) : 'null'}, ${relYArg}, ${triggerRelYArg});
+        osScopedInvoke(${hwndArg}, ${JSON.stringify(target)}, ${triggerTarget ? JSON.stringify(triggerTarget) : 'null'}, ${relYArg}, ${triggerRelYArg}, ${JSON.stringify(e.element?.windowTitle || '')});
     }`
       );
       pushStep(

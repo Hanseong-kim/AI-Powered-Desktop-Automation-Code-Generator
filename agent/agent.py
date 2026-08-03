@@ -90,6 +90,31 @@ def log(*args):
     print("[agent]", *args, flush=True)
 
 
+def point_in_rect(rect, x, y):
+    """Win32/UIA rect semantics: `right` and `bottom` are EXCLUSIVE.
+
+    A pixel at y == rect.bottom is one row BELOW the control, not its last
+    row. Testing containment with `<=` therefore adopts clicks that physically
+    missed the target — measured 2026-08-03 on a TeamViewer login dialog:
+
+        click pt=(916,533)  비밀번호 Edit rect=[822,517,1022,533]  -> y == bottom
+            captured as "click 비밀번호", but the real click landed outside the
+            field, focus stayed on the 이메일 Edit above it, and the keystrokes
+            that followed were (correctly) attributed to 이메일.
+        click pt=(852,532)  same rect                              -> inside
+            focus moved, and the next keystrokes went to 비밀번호.
+
+    One pixel decided it, which is what rules out a focus/timing race and
+    pins the fault on this comparison. Replaying the fabricated event is
+    worse than dropping it: UIA clicks the element's CENTRE, so replay DOES
+    focus the field and then diverges from the recording it came from.
+    """
+    if not isinstance(rect, (tuple, list)) or len(rect) != 4:
+        return False
+    left, top, right, bottom = rect
+    return left <= x < right and top <= y < bottom
+
+
 # ----------------------------------------------------------------------------
 # UI Automation helpers (run ONLY on the worker thread - COM apartment there)
 # ----------------------------------------------------------------------------
@@ -108,6 +133,10 @@ class UIAInspector:
             "{ff48dba4-60ef-4201-aa87-54103eef594e}",
             interface=self._mod.IUIAutomation,
         )
+        # Geometry of the most recently observed OPEN dropdown list —
+        # see snapshot_open_dropdown(). One inspector lives for the whole
+        # worker loop, so this survives between events.
+        self._dropdown_cache = None
 
     # File-list rows (e.g. the "폴더 열기" dialog's Explorer ListView) hit-test
     # to this generic in-place-rename edit surrogate rather than the row
@@ -465,25 +494,49 @@ class UIAInspector:
         return (info.get("controlType") == "ComboBox"
                 or "ComboBox" in (info.get("className") or ""))
 
-    def _search_root_for(self, elem):
-        """A window element to run FindAll from, for elements that have no
-        window of their own.
+    def _search_roots_for(self, elem):
+        """Window elements to run FindAll from, most specific first.
 
         resolve_root_hwnd() walks up looking for a NativeWindowHandle and
         returns 0 when it finds none — measured 2026-07-31: an item inside an
         open combo dropdown is exactly that case, and ElementFromHandle(0)
         then raises. Fall back to the foreground window, which during capture
-        is the app window that owns both the combo and its popup list."""
+        is the app window that owns both the combo and its popup list.
+
+        Every candidate is normalised through GA_ROOT — the same walk
+        describe() already does for windowTitle. Without it this returns the
+        CONTROL, not a window, whenever the control is itself a window:
+        measured 2026-08-03 on HeidiSQL's network-type combo, a VCL
+        TComboBoxEx owns its own hwnd (which is also why its AutomationId is
+        an hwnd), so resolve_root_hwnd() returned 3674908 — the combo itself —
+        and open_dropdown_item_at()'s FindAll ran inside the COLLAPSED combo's
+        subtree, which structurally cannot contain the open list (the capture
+        log shows the watcher registering the list's own top-level windows,
+        hwnd=660188/1642736, the instant it opened). Every item click then
+        fell through to the light-dismiss fallback and was recorded as a click
+        on whatever sat BEHIND the open list — a '자격 증명 프롬프트' CheckBox
+        the user never touched. Silent false capture, worse than a FAIL step.
+        """
+        seen = set()
         for hwnd in (self.resolve_root_hwnd(elem),
                      ctypes.windll.user32.GetForegroundWindow()):
             if not hwnd:
                 continue
+            root_hwnd = ctypes.windll.user32.GetAncestor(hwnd, GA_ROOT) or hwnd
+            if root_hwnd in seen:
+                continue
+            seen.add(root_hwnd)
             try:
-                root = self._uia.ElementFromHandle(hwnd)
+                root = self._uia.ElementFromHandle(root_hwnd)
                 if root:
-                    return root
+                    yield root
             except Exception:
                 continue
+
+    def _search_root_for(self, elem):
+        """The single most specific search root — see _search_roots_for()."""
+        for root in self._search_roots_for(elem):
+            return root
         return None
 
     def _inner_expandable_combo(self, elem):
@@ -575,43 +628,176 @@ class UIAInspector:
                 return expanded[0], i, items.Length
         return None
 
+    # How long a cached dropdown geometry stays usable. Only ever consumed by
+    # the very next click, so this just bounds a stale cache.
+    DROPDOWN_CACHE_TTL = 15.0
+
+    def snapshot_open_dropdown(self, elem, info):
+        """Record the geometry of a dropdown list WHILE IT IS STILL OPEN.
+
+        Measured 2026-08-03 (HeidiSQL network-type combo): the click that
+        selects an item is also the click that CLOSES the list, and the worker
+        thread inspects 0.2-0.5s later — by then the list is gone. The capture
+        log proves it in one run: a scroll over the open list found 18
+        ListItems, while a click on an item found 0 from the same search root,
+        and the combo's Name had already flipped to the newly selected value
+        ('MySQL on RDS') by inspection time. With nothing to match, the hit
+        test fell through to the light-dismiss fallback and recorded whatever
+        the closed list had been covering — a '자격 증명 프롬프트' CheckBox the
+        user never clicked. A silent false capture, worse than a FAIL step.
+
+        So snapshot on the click that OPENS the list (that one lands inside
+        the combo's own rect, and the list is already up when it is
+        processed). The next click then resolves against this geometry. What
+        is stored is used only to answer "which item index is under this
+        point" — the emitted event still carries an index, never a
+        coordinate."""
+        if not self._is_combo_like(info):
+            return
+        inner = self._inner_expandable_combo(elem)
+        if inner is None:
+            return
+        try:
+            ecp = inner.GetCurrentPattern(self.EXPAND_COLLAPSE_PATTERN_ID)
+            expanded = bool(ecp) and ecp.QueryInterface(
+                self._mod.IUIAutomationExpandCollapsePattern
+            ).CurrentExpandCollapseState == 1
+        except Exception:
+            return
+        if not expanded:
+            # The click collapsed an already-open list — the cache would
+            # describe a list that is no longer on screen.
+            self._dropdown_cache = None
+            return
+        rows = []
+        for root in self._search_roots_for(elem):
+            try:
+                items = root.FindAll(7, self._uia.CreatePropertyCondition(
+                    30003, self.CT_LIST_ITEM))
+            except Exception:
+                continue
+            if not items or not items.Length:
+                continue
+            for i in range(items.Length):
+                it = items.GetElement(i)
+                try:
+                    r = it.CurrentBoundingRectangle
+                except Exception:
+                    continue
+                try:
+                    nm = it.CurrentName or ""
+                except Exception:
+                    nm = ""
+                rows.append(((r.left, r.top, r.right, r.bottom), nm))
+            if rows:
+                break
+        if not rows:
+            self._dropdown_cache = None
+            return
+        self._dropdown_cache = {"inner": inner, "rows": rows, "ts": time.time()}
+        log(f"[inspect] dropdown opened — cached geometry of {len(rows)} items "
+            "(the selecting click closes the list before it can be inspected)")
+
+    @staticmethod
+    def _rows_to_cache(rows):
+        """[(element, rect)] -> [((left, top, right, bottom), name)]."""
+        out = []
+        for it, r in rows:
+            try:
+                nm = it.CurrentName or ""
+            except Exception:
+                nm = ""
+            out.append(((r.left, r.top, r.right, r.bottom), nm))
+        return out
+
+    def _dropdown_item_from_cache(self, x, y):
+        """Resolve (x, y) against the geometry cached while the list was open."""
+        c = self._dropdown_cache
+        if not c:
+            return None
+        if time.time() - c["ts"] > self.DROPDOWN_CACHE_TTL:
+            self._dropdown_cache = None
+            return None
+        for i, ((left, top, right, bottom), nm) in enumerate(c["rows"]):
+            if left <= x <= right and top <= y <= bottom:
+                total = len(c["rows"])
+                self._dropdown_cache = None      # consumed; the list is closed
+                log(f"[inspect] live list already closed — ({x},{y}) matched the "
+                    f"geometry cached while it was open: item {i + 1}/{total} "
+                    f"(name={nm!r})")
+                return c["inner"], i, total, nm
+        return None
+
     def open_dropdown_item_at(self, elem, x, y):
         """A click at (x, y) that fell outside `elem`'s rect while `elem` is a
         combo: if an open dropdown item covers the point, return
-        (inner_combo, index, total, item_name). Otherwise None."""
-        root = self._search_root_for(elem)
-        if root is None:
-            return None
-        try:
-            items = root.FindAll(7, self._uia.CreatePropertyCondition(
-                30003, self.CT_LIST_ITEM))          # TreeScope_Subtree
-        except Exception:
-            return None
-        if not items or not items.Length:
-            return None
-        rows = []
-        for i in range(items.Length):
-            it = items.GetElement(i)
+        (inner_combo, index, total, item_name). Otherwise None.
+
+        Tries every candidate root, not just the most specific one: the list
+        can live in the app window's subtree, in its own top-level popup, or
+        both (measured 2026-07-31 — PuTTY 5 items, HeidiSQL 5 and 18)."""
+        scanned = []
+        for root in self._search_roots_for(elem):
             try:
-                r = it.CurrentBoundingRectangle
-                rows.append((it, r))
+                items = root.FindAll(7, self._uia.CreatePropertyCondition(
+                    30003, self.CT_LIST_ITEM))          # TreeScope_Subtree
             except Exception:
                 continue
-        hit_idx = None
-        for i, (it, r) in enumerate(rows):
-            if r.left <= x <= r.right and r.top <= y <= r.bottom:
-                hit_idx = i
-                break
-        if hit_idx is None:
-            return None
-        inner = self._inner_expandable_combo(elem)
-        if inner is None:
-            return None
-        try:
-            item_name = rows[hit_idx][0].CurrentName or ""
-        except Exception:
-            item_name = ""
-        return inner, hit_idx, len(rows), item_name
+            if not items or not items.Length:
+                scanned.append(0)
+                continue
+            rows = []
+            for i in range(items.Length):
+                it = items.GetElement(i)
+                try:
+                    r = it.CurrentBoundingRectangle
+                    rows.append((it, r))
+                except Exception:
+                    continue
+            scanned.append(len(rows))
+            hit_idx = None
+            for i, (it, r) in enumerate(rows):
+                if r.left <= x <= r.right and r.top <= y <= r.bottom:
+                    hit_idx = i
+                    break
+            if hit_idx is None:
+                continue
+            inner = self._inner_expandable_combo(elem)
+            if inner is None:
+                return None
+            try:
+                item_name = rows[hit_idx][0].CurrentName or ""
+            except Exception:
+                item_name = ""
+            # The list is on screen RIGHT NOW, so this geometry supersedes
+            # whatever was cached when it opened. Scrolling an open list moves
+            # every item, and a stale cache then maps the next click to the
+            # wrong index — measured 2026-08-03: after a scroll, the click that
+            # picked the FIRST item (y=368) resolved against the pre-scroll
+            # cache as item #5, so replay re-selected 'MySQL on RDS' instead of
+            # going back to 'MariaDB or MySQL (TCP/IP)'. The scroll event
+            # itself reads the live list, which is exactly when the cache can
+            # be refreshed.
+            self._dropdown_cache = {
+                "inner": inner,
+                "rows": self._rows_to_cache(rows),
+                "ts": time.time(),
+            }
+            return inner, hit_idx, len(rows), item_name
+        # No live list — the usual case for the click that SELECTS an item,
+        # because that click closes the list before this runs. Fall back to
+        # the geometry captured when it opened.
+        cached = self._dropdown_item_from_cache(x, y)
+        if cached is not None:
+            return cached
+        # DIAGNOSTIC — this path used to be silent, which is why the
+        # 2026-08-03 mis-capture (dropdown item recorded as the CheckBox
+        # behind the open list) gave no clue in the log about WHERE it broke.
+        log(f"[inspect] open dropdown scan found no item under ({x},{y}) — "
+            f"ListItem counts per search root: {scanned or 'no root resolved'}"
+            f"; cached geometry: "
+            f"{len(self._dropdown_cache['rows']) if self._dropdown_cache else 'none'}")
+        return None
 
     def resolve_root_hwnd(self, elem, max_up=15):
         """Walk ControlView ancestors from `elem` until one with its own
@@ -983,6 +1169,15 @@ class Recorder:
         self.proc = None
         self.target_hwnds = set()    # top-level window handles owned by the target
         self._popup_hwnds = set()    # windows discovered by watcher (always treated as popups)
+        # hwnd -> 그 창을 처음 관측했을 때의 제목. 앱이 녹화 도중 창 이름을
+        # 바꾸면(HeidiSQL 세션 관리자는 '신규'를 누르는 순간 ": Unnamed-N"이
+        # 붙는다) 이후 모든 이벤트의 windowTitle이 재생 때 재현 불가능한
+        # 값이 된다. session_meta 한 번만 찍는 것으로는 부족했다 — 실측
+        # 2026-08-03: 앱이 뜨기 전에 녹화가 시작되면 창 탐색이 포그라운드
+        # (도구 자신의 브라우저 창)로 폴백해서, 정작 진짜 앱 창은 그 뒤에
+        # 워처가 찾는다. 그래서 창을 처음 볼 때마다 여기에 적어 두고
+        # 이벤트마다 실어 보낸다.
+        self._first_titles = {}
         self._pre_hwnds = set()      # visible top-levels snapshotted before launch
         # Wall-clock time _discover_target_windows() finished resolving
         # target_hwnds (real match or fallback). Mouse/keyboard hooks are live
@@ -1029,6 +1224,7 @@ class Recorder:
         self.event_count = 0
         self.target_hwnds = set()
         self._popup_hwnds = set()
+        self._first_titles = {}
         self._probed_skip = False
         self._last_emitted_hwnd_hex = ""
         self._app_install_dir_cache = None
@@ -1377,6 +1573,7 @@ class Recorder:
                         self._popup_hwnds.add(hwnd)
                         try:
                             title = win32gui.GetWindowText(hwnd)
+                            self._remember_title(hwnd, title)
                             log(f"[watcher] added hwnd={hwnd} title='{title}'")
                         except Exception:
                             log(f"[watcher] added hwnd={hwnd}")
@@ -1649,8 +1846,7 @@ class Recorder:
             # just re-target the same wrong node through a different XPath.
             if (not light_dismiss and elem is not None
                     and isinstance(info.get("rect"), tuple)):
-                left, top, right, bottom = info["rect"]
-                if not (left <= x <= right and top <= y <= bottom):
+                if not point_in_rect(info["rect"], x, y):
                     # Before discarding: an OPEN combo dropdown always looks
                     # like this — the hit test returns the combo (rect = the
                     # collapsed box) while the click is on a list item below
@@ -1675,6 +1871,12 @@ class Recorder:
                             f"(id={info.get('automationId')!r} name={info.get('name')!r}) "
                             "— dropping selector")
                         light_dismiss = True
+                else:
+                    # The click landed ON the control. For a combo that means
+                    # it just OPENED the list, and this is the only moment the
+                    # list can be measured — the click that picks an item
+                    # closes it first. See snapshot_open_dropdown().
+                    ins.snapshot_open_dropdown(elem, info)
             if light_dismiss:
                 # The click raced a menu/flyout opening: by the time this hit
                 # test ran, the XAML light-dismiss overlay (a full-window,
@@ -1691,7 +1893,16 @@ class Recorder:
                 under = ins.element_under_overlay(x, y)
                 if under is not None:
                     resolved = ins.describe(under)
-                    if resolved.get("automationId") or resolved.get("name"):
+                    # The re-hit-test must land on something that actually
+                    # contains the point, or we would re-adopt the very kind
+                    # of near-miss the guard above just rejected — only
+                    # through a second code path (see point_in_rect).
+                    if (isinstance(resolved.get("rect"), tuple)
+                            and not point_in_rect(resolved["rect"], x, y)):
+                        log(f"[inspect] under-overlay candidate "
+                            f"{resolved.get('name')!r} rect={resolved.get('rect')!r} "
+                            f"does not contain ({x},{y}) — not adopting")
+                    elif resolved.get("automationId") or resolved.get("name"):
                         info = resolved
                         elem = under   # keep anchor/row logic consistent below
                         light_dismiss = False
@@ -1924,6 +2135,11 @@ class Recorder:
             pass
         return found[0]
 
+    def _remember_title(self, hwnd, title):
+        """First title ever seen for `hwnd` wins — see self._first_titles."""
+        if hwnd and title and hwnd not in self._first_titles:
+            self._first_titles[hwnd] = title
+
     def _emit_session_meta(self):
         """Emit a session_meta event with initial window geometry."""
         hwnd = self._pick_frame_hwnd()
@@ -1942,6 +2158,25 @@ class Recorder:
                 "left": win_left, "top": win_top,
                 "width": win_w, "height": win_h,
             }
+        # 창 발견 시점의 제목 — 사용자 조작으로 이름이 바뀌기 전의 "안정된"
+        # 제목이다. HeidiSQL 세션 관리자는 '신규'를 누르는 순간 제목 뒤에
+        # ": Unnamed-N"(실행마다 새로 매겨지는 일련번호)이 붙는데, 그 클릭이
+        # 첫 이벤트면 녹화된 모든 이벤트가 바뀐 제목만 갖게 되어 codegen이
+        # 되돌릴 근거를 잃는다. 실측 2026-08-03: 그렇게 만들어진 테스트는
+        # 재생 때 launchApp이 창을 영영 못 찾아(matched=[]) 스텝이 단 하나도
+        # 실행되지 않았다. server.js canonicalizeWindowTitles()가 이 값을
+        # 병합 대상으로만 쓴다(별도 창 세그먼트를 만들지는 않는다).
+        titles = []
+        for h in sorted(self.target_hwnds):
+            try:
+                t = win32gui.GetWindowText(h)
+            except Exception:
+                continue
+            self._remember_title(h, t)
+            if t and t not in titles:
+                titles.append(t)
+        if titles:
+            meta["discoveredTitles"] = titles
         try:
             requests.post(EXPRESS_EVENTS_URL, json=meta, timeout=3)
             log(f"[meta] session_meta emitted window={meta.get('initialWindow')}")
@@ -2140,6 +2375,12 @@ class Recorder:
                 "comboItemIndex": elem.get("comboItemIndex"),
                 "comboItemCount": elem.get("comboItemCount"),
                 "comboItemName": elem.get("comboItemName", ""),
+                # 이 창을 처음 봤을 때의 제목 (2026-08-03, self._first_titles).
+                # windowTitle은 앱이 실행 중 창 이름을 바꾸면 재생 때 재현
+                # 불가능한 값이 된다("...: Unnamed-14"). server.js
+                # canonicalizeWindowTitles()가 이 값을 병합 대상으로 쓴다.
+                # 위 주석대로 화이트리스트라 여기 빠뜨리면 조용히 전달 안 됨.
+                "stableWindowTitle": self._first_titles.get(root_hwnd, ""),
             },
             "timestamp": time.time(),
             "app": self.session.get("appName", ""),

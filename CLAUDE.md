@@ -145,6 +145,12 @@ PuTTY (Tier 1), HeidiSQL (Tier 3, correctly names the owner-drawn session list),
 TeamViewer (Tier 4). Run this *first* — it turns "it doesn't work" into a
 measurement, and it is the intended answer to "is app X in scope?".
 
+> **Give a WebView2/Electron app a few seconds before probing it.** Measured
+> 2026-08-03: TeamViewer's app-window subtree reads 25 elements at t=0s and 61
+> at t=3s. A probe that samples once on launch will under-report and can hand
+> back a Tier 4 verdict the app does not deserve — that is exactly how the
+> 2026-07-31 TeamViewer verdict went wrong (see §4 Tier 4 detail).
+
 
 "Native app" is not a useful category. The real question is **whether the app
 implements a UIA provider that is both reachable and wired to real behaviour.**
@@ -155,41 +161,71 @@ Four tiers, established by measurement:
 | **1. OS-standard controls** — Win32/WinForms/WPF/MFC | PuTTY, 7-Zip, FileZilla, Notepad, Calculator | **Works.** One provider, one tree, UIA actions reach real handlers. |
 | **2. Custom framework, accessibility implemented** | Delphi/VCL (HeidiSQL), wxWidgets (FileZilla tabs) | **Works with per-family fixes** — e.g. VCL fills AutomationId with the window handle (rejected automatically); wx tabs need `LegacyIAccessible`. |
 | **3. Owner-drawn, no accessibility objects** | HeidiSQL session list (`TVirtualStringTree`), Qt/QML `MouseArea` | **Not possible.** The control paints pixels and publishes *zero* UIA children. Nothing to select. |
-| **4. Web content in a native frame** | Electron, CEF, **WebView2** — VSCode, **TeamViewer 15** | **Not possible in this architecture.** See below. |
+| **4. Web content in a native frame** | Electron, CEF, **WebView2** — VSCode, **TeamViewer 15** | **Partially works.** Blocked by selector stability and one capture gap — not by the architecture. See below. |
 
-### Tier 4 detail (measured 2026-07-31, TeamViewer 15.79)
+### Tier 4 detail — CORRECTED 2026-08-03 (TeamViewer 15.79)
 
-TeamViewer looks native but its whole UI is WebView2:
+TeamViewer's UI is WebView2:
 `MainWindowOne → TV_WebView2Control → Chrome_WidgetWin_0/1 → RootWebArea`.
 
-- `FindAll(Subtree)` from the **app window** returns **2 elements** — no web
-  content at all. Reproduced three times independently.
-- `FindAll(Subtree)` from **`Chrome_WidgetWin_0`** returns **53** — the whole UI.
-- `ElementFromPoint` (hit-test) always returns real web elements.
+> **The 2026-07-31 verdict for this row ("not possible in this architecture")
+> was wrong, and it was wrong because of a measurement error.** Two of its
+> three pillars do not reproduce. Re-measured with `poc/PoC_teamviewer.py` —
+> five runs plus a controlled cold start.
 
-That asymmetry is why **capture works and replay does not**: `agent.py` captures
-by hit-test; replay searches downward from the app window.
+| 2026-07-31 claim | 2026-08-03 measurement |
+|---|---|
+| app-window subtree returns **2** elements | **61–63**, five runs, stable |
+| `TogglePattern.Toggle()` changes nothing | `ToggleState` **0→1**, then **1→0** next run |
+| empty AutomationId, render-counter ids | **holds** — 9 of 11 interactive controls have no AutomationId |
 
-Rooting the search at the Chromium child hwnd *finds* the element — but nothing
-**actuates** it: `GetClickablePoint` refuses, `SendInput` at the element's own
-rect (same PID, window foreground, verified) leaves `ToggleState` at 0, and
-`TogglePattern.Toggle()` returns without error and changes nothing.
+**Why the old number was wrong: the tree needs ~3s to populate.** Cold start,
+same window sampled repeatedly:
 
-Diagnostics: `poc/diag_teamviewer_tree.py`, `poc/diag_teamviewer_a11y_wakeup.py`,
-`poc/diag_teamviewer_id_stability.py`, `poc/diag_teamviewer_human_click.py`.
+```
+t=0s   t=1s   t=3s   t=7s
+  25     26     61     61
+```
 
-Dead ends already tried — **do not retry**:
-- accessibility "warm-up" (hit-test probe, or `ElementFromHandle` on the renderer
-  child): the app-window subtree never grows
-- `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--force-renderer-accessibility`: needs
-  control of the launch environment and still leaves actuation broken
-- inspecting the element to harvest AutomationId/ClassName: the controls in
-  question expose **empty** AutomationId *and* ClassName; the ids that do exist
-  (`TextField113`, `field-542`, `button-466`) are React/Fluent render counters
-  that change between builds
+Sampling once, right after launch, reports a nearly empty subtree — that is
+what "2 elements, reproduced three times" was measuring. The old note's "dead
+end: the app-window subtree never grows" is the same error restated as a
+conclusion. **It does grow.** Replay against a WebView2 app must wait for the
+tree instead of sampling it once.
 
-The only real path for Tier 4 is a hybrid architecture (CDP/WebDriver for web
-content, UIA for the native frame). That is a separate project, not a fix.
+**Actuation reaches real application state.** `TogglePattern.Toggle()` on
+"Windows와 함께 TeamViewer 시작" flipped 0→1; TeamViewer was then killed and
+relaunched, and the *fresh process* reported that control as **1** — the change
+had been persisted, so it was not an accessibility-layer phantom. Toggling it
+again restored 0. (The other toggle, "Easy Access", never changes — it requires
+a signed-in account, so it is disabled, not broken.)
+
+**What actually blocks TeamViewer today**, from a real record→replay run:
+
+1. **Selector stability.** 9/11 interactive controls expose no AutomationId;
+   `ClassName` is a Tailwind class string ending in a render counter
+   (`button-461`, `connectButton-498`, `primary-492`). `Name` usually IS
+   present and usable (`세션 참가`, `ID를 복사하세요`) — but it is localized, so a
+   Name-based selector breaks when the UI language changes.
+2. **Some controls hit-test to the container.** In a real recording the click
+   that opens the 빠른 연결 허용 dialog captured as `Group` / `AutomationId="root"`
+   / rect covering 94% of the window — `element_at()`'s `_deepen()` found no
+   usable child. Replay then clicks the container's centre, nothing happens,
+   and every later step that needed that dialog fails. This one capture gap is
+   the whole reason that run failed. Codegen now turns such an event into an
+   explicit FAIL step instead of a silent no-op (§3).
+3. The **native** parts are fine: 빠른 연결 허용 is a plain `#32770` with
+   `Edit`/`Button` children and classic numeric ids.
+
+PoC for third parties (self-contained, only needs `comtypes`):
+`python poc/PoC_teamviewer.py [--launch] [--actuate] [--json out.json]`.
+Older one-off diagnostics `poc/diag_teamviewer_*.py` predate this correction —
+do not trust their conclusions without re-running them.
+
+**On inspect.exe**: it finds elements by hit-testing the pixel under the mouse,
+which is the same path the *recorder* uses. An element being visible in
+inspect.exe therefore says nothing about whether replay can find it — replay
+has no mouse position and must search downward from the window.
 
 ---
 
