@@ -1,9 +1,8 @@
 """Inline harness — agent.py has no test suite; this file is run directly."""
-import ctypes
 import sys
 
 sys.path.insert(0, ".")
-from agent import CHROMIUM_HOST_CLASSES, is_web_host   # noqa: E402
+from agent import is_chromium_host_class, is_web_host   # noqa: E402
 
 failures = []
 
@@ -15,15 +14,18 @@ def check(label, ok):
 
 
 def main():
-    check("Chrome_WidgetWin is a known host class",
-          any(c.startswith("Chrome_WidgetWin") for c in CHROMIUM_HOST_CLASSES))
-    check("TV_WebView2Control is a known host class",
-          "TV_WebView2Control" in CHROMIUM_HOST_CLASSES)
+    check("Chrome_WidgetWin_1 is recognised",
+          is_chromium_host_class("Chrome_WidgetWin_1") is True)
+    check("Chrome_RenderWidgetHostHWND is recognised",
+          is_chromium_host_class("Chrome_RenderWidgetHostHWND") is True)
+    check("TV_WebView2Control is recognised",
+          is_chromium_host_class("TV_WebView2Control") is True)
+    check("a native class is not recognised",
+          is_chromium_host_class("Notepad") is False)
+    check("an empty class name is not recognised",
+          is_chromium_host_class("") is False)
     # hwnd 0 is never a window -> must not raise, must be False
     check("is_web_host(0) is False", is_web_host(0) is False)
-    # The desktop window has no Chromium child
-    desktop = ctypes.windll.user32.GetDesktopWindow()
-    check("is_web_host(desktop) is False", is_web_host(desktop) is False)
     print(f"\n{len(failures)} failure(s)")
     return 1 if failures else 0
 

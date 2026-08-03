@@ -128,6 +128,18 @@ CHROMIUM_HOST_CLASSES = (
 )
 
 
+def is_chromium_host_class(class_name):
+    """True when a window class name belongs to embedded Chromium.
+
+    Split out from is_web_host() so the matching rule is testable without a
+    live UI: is_web_host() answers "is any Chromium window under this hwnd",
+    which depends on what happens to be running on the machine and cannot be
+    asserted deterministically.
+    """
+    return bool(class_name) and any(
+        class_name.startswith(c) for c in CHROMIUM_HOST_CLASSES)
+
+
 def is_web_host(hwnd):
     """True when `hwnd` has a descendant window belonging to embedded Chromium.
 
@@ -143,7 +155,7 @@ def is_web_host(hwnd):
         try:
             buf = ctypes.create_unicode_buffer(256)
             ctypes.windll.user32.GetClassNameW(child, buf, 256)
-            if any(buf.value.startswith(c) for c in CHROMIUM_HOST_CLASSES):
+            if is_chromium_host_class(buf.value):
                 found.append(child)
                 return False
         except Exception:
