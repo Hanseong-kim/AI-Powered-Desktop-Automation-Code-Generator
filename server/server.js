@@ -2321,23 +2321,42 @@ function stripWindowFillingContainers(events, winRect) {
   if (!winRect || !winRect.width || !winRect.height) return events;
   const winArea = winRect.width * winRect.height;
   if (winArea <= 0) return events;
-  return events.map(e => {
+  const out = [];
+  for (const e of events) {
     const el = e.element;
-    if (!el || !CONTAINER_CONTROL_TYPES.has(el.controlType)) return e;
-    const r = el.rect;
-    if (!Array.isArray(r) || r.length !== 4) return e;
-    const area = Math.max(0, r[2] - r[0]) * Math.max(0, r[3] - r[1]);
-    const ratio = area / winArea;
-    if (ratio < WINDOW_FILL_RATIO) return e;
+    const r = el?.rect;
+    const isContainer = el && CONTAINER_CONTROL_TYPES.has(el.controlType)
+      && Array.isArray(r) && r.length === 4;
+    const ratio = isContainer
+      ? Math.max(0, r[2] - r[0]) * Math.max(0, r[3] - r[1]) / winArea
+      : 0;
+    if (!isContainer || ratio < WINDOW_FILL_RATIO) {
+      out.push(e);
+      continue;
+    }
+    // 2026-08-04: controlType==='Window' 케이스는 그 나머지(Pane/Group/...)와
+    // 성격이 다르다 — 저것들은 "뭔가 있었는데 캡처를 놓친" 진짜 컨테이너지만,
+    // 이건 최상위 창 자체를 클릭한 것 = 사실상 포커스 주기다. 재생은 창을
+    // 실행/전환할 때 이미 활성화·정규화하므로(launchApp/getWindowSession/
+    // osActivate) 이 클릭은 애초에 재현할 동작이 없다 — FAIL로 만들 게 아니라
+    // 스텝 자체를 건너뛴다. 나머지 컨테이너 타입은 여전히 명시적 FAIL로 남겨
+    // 거짓 성공을 막는다(§3 No false PASS).
+    if (el.controlType === 'Window') {
+      console.log(`[container] ${e.action} resolved to the top-level window `
+        + `itself (covering ${(ratio * 100).toFixed(0)}%) — treating as a `
+        + `focus/activation click that replay already performs; dropping the step`);
+      continue;
+    }
     console.log(`[container] ${e.action} resolved to <${el.controlType} `
       + `id=${JSON.stringify(el.automationId || '')}> covering `
       + `${(ratio * 100).toFixed(0)}% of the window — no usable target, `
       + `emitting an explicit FAIL step`);
-    return { ...e, element: { ...el,
+    out.push({ ...e, element: { ...el,
       automationId: '', name: '', className: '', xpath: '',
       locatorStrategy: 'coordinate', locatorValue: '',
-      anchorId: '', anchorPath: '' } };
-  });
+      anchorId: '', anchorPath: '' } });
+  }
+  return out;
 }
 
 function mergeExpandCollapseClicks(events) {

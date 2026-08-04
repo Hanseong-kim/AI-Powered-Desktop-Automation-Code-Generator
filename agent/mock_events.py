@@ -646,6 +646,74 @@ def step_wdio_generate_doubleclick_row():
         )
 
 
+# Window-filling-container scenario (2026-08-04, 7-Zip regression run).
+# stripWindowFillingContainers() correctly turns a click that resolved to a
+# real container (Pane/Group/...) covering >=80% of the window into an
+# explicit FAIL — no usable target, don't fabricate a coordinate click. But a
+# click that resolved to controlType='Window' itself (the top-level window)
+# is different: it's an activation/focus click, and replay already
+# activates/normalizes the window on launch and on every window switch, so
+# there is nothing left to replay. Turning THAT into a FAIL step meant an
+# otherwise-perfect run could never report PASS (measured: 7-Zip's first
+# captured click was exactly this — the window body before any menu
+# interaction — and it alone kept the whole run at [FAIL]).
+WINCLICK_APP = "MockWindowClick"
+WINCLICK_EVENTS = [
+    make_event("click", name="MyApp", automation_id="", class_name="",
+               control_type="Window", window_title="MyApp",
+               app_name=WINCLICK_APP, x=40, y=20, index=1),
+    make_event("click", name="root", automation_id="", class_name="",
+               control_type="Pane", window_title="MyApp",
+               app_name=WINCLICK_APP, x=50, y=40, index=2),
+    make_event("click", name="OK", automation_id="ok1", class_name="Button",
+               control_type="Button", window_title="MyApp",
+               app_name=WINCLICK_APP, x=60, y=60, index=3),
+]
+WINCLICK_EVENTS[0]["element"]["rect"] = [0, 0, 1000, 800]
+WINCLICK_EVENTS[1]["element"]["rect"] = [0, 0, 1000, 800]
+WINCLICK_EVENTS[2]["element"]["rect"] = [10, 10, 90, 40]
+WINCLICK_SESSION_META = {
+    "action": "session_meta",
+    "app": WINCLICK_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 0, "top": 0, "width": 1000, "height": 800},
+}
+
+
+def step_wdio_generate_window_click():
+    print("\n[17] a click on the top-level window itself is dropped, not FAILed")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", WINCLICK_SESSION_META)
+    for ev in WINCLICK_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": WINCLICK_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (window click) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped window-click checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname, content = f.get("filename", ""), f.get("content", "")
+        fails = re.findall(r"_failures\.push\('(\d+):(\w+):no-selector'\)", content)
+        check(
+            f"  {fname} has exactly one no-selector FAIL (the Pane, not the Window)",
+            len(fails) == 1,
+            f"expected 1 (the real container), got {len(fails)}: {fails} — a click "
+            "resolved to the top-level Window itself is an activation click "
+            "replay already performs on launch/switch, so it must be dropped "
+            "rather than turned into a FAIL step",
+        )
+        check(
+            f"  {fname} still runs the real OK click after the dropped Window step",
+            '"name":"OK"' in content or "'OK'" in content or "OK" in content,
+            "the real click after the container clicks must still be generated",
+        )
+
+
 # Trigger-click-vanishes-behind-a-standalone-expandCollapse scenario
 # (2026-07-29, HeidiSQL "더보기" SplitButton -> native popup menu ->
 # "환경설정" MenuItem follow-up). mergeExpandCollapseClicks() runs first and
@@ -2727,7 +2795,7 @@ def step_output_folders_isolated():
         EXPAND_REDUNDANT_APP, NATIVE_APP, VCL_APP, TRIGGER_EXPAND_APP,
         NAMELESS_ITEM_APP, HWND_TRIGGER_APP, DUP_DROPDOWN_APP, ANIM_APP,
         NESTED_DROPDOWN_APP, SIMPLE_ROOTHWND_APP, TITLE_COLLISION_DIALOGRECT_APP,
-        WEB_APP, DBLROW_APP,
+        WEB_APP, DBLROW_APP, WINCLICK_APP,
         "SevenZipStateReset",
     })
     for name in targets:
@@ -2772,6 +2840,7 @@ def main():
     step_wdio_generate_vcl_hwnd_id()
     step_wdio_generate_web_content()
     step_wdio_generate_doubleclick_row()
+    step_wdio_generate_window_click()
     step_wdio_generate_trigger_expand_merge_order()
     step_wdio_generate_nameless_item_no_fake_itemname()
     step_wdio_generate_owner_drawn_dropdown_by_index()
