@@ -3,7 +3,9 @@ import ctypes
 import sys
 
 sys.path.insert(0, ".")
-from agent import is_chromium_host_class, is_web_host, UIAInspector   # noqa: E402
+from agent import (   # noqa: E402
+    is_chromium_host_class, is_web_host, smallest_rect_index, UIAInspector,
+)
 
 failures = []
 
@@ -33,6 +35,19 @@ def main():
     n = ins.settled_subtree_count(root, timeout=2.0, quiet_for=0.3)
     check("settled_subtree_count returns a positive int for the desktop",
           isinstance(n, int) and n > 0)
+
+    #        rect list                              point       expected index
+    cases = [
+        ([(0, 0, 100, 100), (10, 10, 20, 20)],      (15, 15),   1),   # inner wins
+        ([(10, 10, 20, 20), (0, 0, 100, 100)],      (15, 15),   0),   # order-independent
+        ([(0, 0, 100, 100)],                        (15, 15),   0),
+        ([(0, 0, 100, 100), (10, 10, 20, 20)],      (99, 99),   0),   # only outer contains
+        ([(0, 0, 10, 10)],                          (10, 10),   None),  # half-open: bottom/right excluded
+        ([],                                        (1, 1),     None),
+    ]
+    for rects, (px, py), want in cases:
+        got = smallest_rect_index(rects, px, py)
+        check(f"smallest_rect_index({rects}, {px},{py}) == {want}", got == want)
 
     print(f"\n{len(failures)} failure(s)")
     return 1 if failures else 0

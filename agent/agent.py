@@ -169,6 +169,22 @@ def is_web_host(hwnd):
     return bool(found)
 
 
+def smallest_rect_index(rects, x, y):
+    """Index of the smallest rect containing (x, y), or None.
+
+    Split out from the UIA walk so the selection rule is testable without a
+    live UI. Ties go to the first rect, which is the tree order UIA returned.
+    """
+    best_i, best_area = None, None
+    for i, r in enumerate(rects):
+        if not point_in_rect(r, x, y):
+            continue
+        area = max(0, r[2] - r[0]) * max(0, r[3] - r[1])
+        if best_area is None or area < best_area:
+            best_i, best_area = i, area
+    return best_i
+
+
 # ----------------------------------------------------------------------------
 # UI Automation helpers (run ONLY on the worker thread - COM apartment there)
 # ----------------------------------------------------------------------------
@@ -281,13 +297,21 @@ class UIAInspector:
                     except Exception:
                         pass
                 if needs_deepen:
-                    deeper = self._deepen(elem, int(x), int(y))
+                    deeper = None
+                    root = self.from_handle_safe(self.resolve_root_hwnd(elem))
+                    if root:
+                        deeper = self.smallest_element_at(root, int(x), int(y))
+                    if deeper is None:
+                        deeper = self._deepen(elem, int(x), int(y))
+                    # Adopt even when the result has neither id nor name — the
+                    # anchor_path machinery downstream turns that into a
+                    # relative XPath, and if even that fails the event becomes
+                    # an explicit FAIL step. The old rule kept the ORIGINAL
+                    # element in that case, which is how a 94%-of-window
+                    # container ended up recorded as the click target
+                    # (TeamViewer, 2026-08-03).
                     if deeper is not None:
-                        try:
-                            if deeper.CurrentAutomationId or deeper.CurrentName:
-                                elem = deeper
-                        except Exception:
-                            pass
+                        elem = deeper
             except Exception:
                 pass
         try:
@@ -629,6 +653,46 @@ class UIAInspector:
             return el if el else None      # comtypes returns NULL, not None
         except Exception:
             return None
+
+    # A candidate covering at least this fraction of the window is a container,
+    # not a target — same threshold as server.js WINDOW_FILL_RATIO.
+    WINDOW_FILL_RATIO = 0.80
+
+    def smallest_element_at(self, root, x, y):
+        """The smallest element in root's subtree containing (x, y).
+
+        Replaces the first-containing-child descent of _deepen(): that walk
+        could not backtrack out of a dead-end branch, and its depth cap had to
+        be retuned per UI framework. Selecting by area is independent of tree
+        shape and depth.
+        """
+        try:
+            arr = root.FindAll(7, self._uia.CreateTrueCondition())
+        except Exception:
+            return None
+        if not arr or not arr.Length:
+            return None
+        try:
+            wr = root.CurrentBoundingRectangle
+            win_area = max(1, (wr.right - wr.left) * (wr.bottom - wr.top))
+        except Exception:
+            win_area = None
+        els, rects = [], []
+        for i in range(arr.Length):
+            el = arr.GetElement(i)
+            try:
+                r = el.CurrentBoundingRectangle
+            except Exception:
+                continue
+            rect = (r.left, r.top, r.right, r.bottom)
+            if win_area:
+                area = max(0, rect[2] - rect[0]) * max(0, rect[3] - rect[1])
+                if area / win_area >= self.WINDOW_FILL_RATIO:
+                    continue        # a window-filling container is not a target
+            els.append(el)
+            rects.append(rect)
+        idx = smallest_rect_index(rects, x, y)
+        return els[idx] if idx is not None else None
 
     def _inner_expandable_combo(self, elem):
         """The control that actually owns the dropdown. For a ComboBoxEx the
