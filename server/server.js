@@ -955,7 +955,7 @@ def _same_or_descendant(uia, ancestor, el, max_up=6):
     return False
 
 
-def send_input_click(uia, el, tag):
+def send_input_click(uia, el, tag, double=False):
     """UIA로 방금 찾은 요소를 실제 마우스 입력으로 클릭한다.
 
     안전 검증을 하나라도 통과 못 하면 사유를 남기고 False — 호출자는 기존
@@ -1034,7 +1034,26 @@ def send_input_click(uia, el, tag):
     time.sleep(0.04)
     send(MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)
 
-    print("[COM-SendInput] " + tag + " clicked '" + label + "' at (%d,%d)" % (x, y))
+    # 두 번째 누름/뗌 — 시스템 더블클릭 간격(기본 500ms) 안에 보내야 앱이
+    # 더블클릭으로 인식한다. 여기 간격 합은 ~90ms.
+    #
+    # 2026-08-04: 이 분기가 없어서 녹화된 더블클릭이 앱에는 단일 클릭으로
+    # 도달했다. 네이티브 리스트 행에서 단일 클릭은 "선택"이지 "열기"가 아니다.
+    # 원래 설계는 InvokePattern.Invoke()(=기본 동작=열기)에 기대고 있었는데
+    # (server.js ListItem 분기 주석, 2026-07-15 실측), 2026-07-24에
+    # send_input_click()이 invoke_item() 체인 맨 앞에 붙으면서
+    # "if send_input_click(...): return True"가 되어 그 Invoke()가 도달 불가능한
+    # 죽은 코드가 됐다. 결과: 7-Zip에서 "3:doubleClick 컴퓨터"가 성공으로
+    # 보고되지만 폴더는 안 열리고, "4:doubleClick C:"부터 전부 무너진다
+    # (2026-08-04 두 번 연속 동일 재현).
+    if double:
+        time.sleep(0.05)
+        send(MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)
+        time.sleep(0.04)
+        send(MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)
+
+    verb = " double-clicked '" if double else " clicked '"
+    print("[COM-SendInput] " + tag + verb + label + "' at (%d,%d)" % (x, y))
     time.sleep(0.05)
     return True
 
@@ -1637,7 +1656,7 @@ def ensure_visible(uia, mod, el):
         pass
 
 
-def invoke_item(uia, mod, el):
+def invoke_item(uia, mod, el, double=False):
     ensure_visible(uia, mod, el)
     focus_ok = False
     try:
@@ -1647,7 +1666,9 @@ def invoke_item(uia, mod, el):
         pass
     # 시각적 재생 우선(2026-07-24, §6) — 성공하면 반드시 여기서 반환한다.
     # 이어서 Invoke()까지 부르면 같은 동작이 두 번 실행된다.
-    if send_input_click(uia, el, "osScopedInvoke"):
+    # double=True면 두 번 누른다 — 아래 Invoke() 폴백은 기본 동작(=열기)이라
+    # 더블클릭 의미를 그대로 만족하므로 폴백 체인은 손대지 않는다.
+    if send_input_click(uia, el, "osScopedInvoke", double):
         return True
     try:
         el.GetCurrentPattern(UIA_InvokePatternId).QueryInterface(mod.IUIAutomationInvokePattern).Invoke()
@@ -1839,6 +1860,9 @@ def main():
     ap.add_argument("--trigger-rel-y", type=int, default=None)
     # 이 이벤트가 실제로 녹화된 창의 제목 — owner_window_for() 참고.
     ap.add_argument("--owner-title-b64", default=None)
+    # 녹화된 동작이 더블클릭이었는가. 네이티브 리스트 행에서 단일 클릭은
+    # 선택일 뿐 열기가 아니라 이 구분이 필요하다 (2026-08-04).
+    ap.add_argument("--double", action="store_true")
     args = ap.parse_args()
 
     enable_per_monitor_dpi()
@@ -1906,7 +1930,7 @@ def main():
     # 컨트롤에 타이핑하기 위해 도입 — Root 세션 REST 폴백의 15~20초 고정
     # 비용을 피한다. 검색 로직((a)(b) 둘 다)은 클릭과 완전히 동일).
     act = (lambda el: type_item(uia, mod, el, base64.b64decode(args.text_b64).decode("utf-8"))) \
-        if args.text_b64 else (lambda el: invoke_item(uia, mod, el))
+        if args.text_b64 else (lambda el: invoke_item(uia, mod, el, args.double))
     verb = 'typed into' if args.text_b64 else 'invoked'
 
     # 최대 4회 시도(즉시 1회 + 300ms 간격 재시도 3회, 총 최대 ~0.9초) — 2026-07-17
@@ -3213,7 +3237,7 @@ function osExpandCollapse(hwnd, target, itemName, itemIndex, itemCount) {
 // 검색을 별도 스텝(별도 프로세스)으로 쪼개면 그 사이 지연 동안 드롭다운이
 // 자동으로 닫혀버림을 실측으로 확인(2026-07-13 재현) — 한 프로세스 실행
 // 안에서 끊김 없이 처리해 그 레이스를 없앤다.
-function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY, ownerTitle) {
+function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY, ownerTitle, double) {
     if (!hwnd) {
         _failures.push('osScopedInvoke:no-hwnd');
         console.warn('[osScopedInvoke] no window hwnd — cannot search without a window handle');
@@ -3237,8 +3261,11 @@ function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY, ownerTit
         const ownerArg = ownerTitle
             ? \`--owner-title-b64 "\${Buffer.from(String(ownerTitle), 'utf8').toString('base64')}"\`
             : '';
+        // double: 녹화된 동작이 더블클릭이었을 때만. 네이티브 리스트 행에서
+        // 단일 클릭은 선택이지 열기가 아니다 (2026-08-04, 7-Zip 컴퓨터→C:).
+        const doubleArg = double ? '--double' : '';
         const out = execSync(
-            \`python "\${_helperFile('osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${triggerArg} \${relYArg} \${triggerRelYArg} \${ownerArg}\`,
+            \`python "\${_helperFile('osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${triggerArg} \${relYArg} \${triggerRelYArg} \${ownerArg} \${doubleArg}\`,
             { stdio: 'pipe', timeout: 20000 }
         ).toString().trim();
         if (out) console.log(out);
@@ -3543,7 +3570,7 @@ function osExpandCollapse(hwnd, target, itemName, itemIndex, itemCount) {
 // 모든 최상위 창 순으로 직접 찾아 Invoke하므로 title 충돌 자체가 없다 —
 // 다이얼로그 내부의 개별 클릭들(트리거 병합과 무관하게 각자 cross-window로
 // 캡처됨)도 이 경로로 독립적으로 처리된다.
-function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY, ownerTitle) {
+function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY, ownerTitle, double) {
     if (!hwnd) {
         _failures.push('osScopedInvoke:no-hwnd');
         console.warn('[osScopedInvoke] no window hwnd — cannot search without a window handle');
@@ -3567,8 +3594,11 @@ function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY, ownerTit
         const ownerArg = ownerTitle
             ? \`--owner-title-b64 "\${Buffer.from(String(ownerTitle), 'utf8').toString('base64')}"\`
             : '';
+        // double: 녹화된 동작이 더블클릭이었을 때만. 네이티브 리스트 행에서
+        // 단일 클릭은 선택이지 열기가 아니다 (2026-08-04, 7-Zip 컴퓨터→C:).
+        const doubleArg = double ? '--double' : '';
         const out = execSync(
-            \`python "\${_helperFile('osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${triggerArg} \${relYArg} \${triggerRelYArg} \${ownerArg}\`,
+            \`python "\${_helperFile('osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${triggerArg} \${relYArg} \${triggerRelYArg} \${ownerArg} \${doubleArg}\`,
             { stdio: 'pipe', timeout: 20000 }
         ).toString().trim();
         if (out) console.log(out);
@@ -4806,15 +4836,27 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       // browser.$(sel).click()은 요소를 찾아 클릭 자체는 에러 없이 끝나면서도
       // 목록을 전혀 갱신시키지 않았다(클릭 전/후 노출된 이름 목록이 글자 그대로
       // 동일 — diagnostic script로 직접 확인). InvokePattern은 이 프로젝트의
-      // 다른 COM 경로(osScopedInvoke/osExpandCollapse)와 같은 "기본 동작 실행"이라
-      // doubleClick도 별도 처리 없이 Invoke() 1회로 충분(실측: "컴퓨터" 단일 클릭
-      // 캡처가 Invoke() 1회로 이미 폴더 진입까지 완료). 좌표는 어디에도 안 씀 —
-      // osScopedInvoke.py가 hwnd 서브트리에서 셀렉터로 직접 찾아 Invoke.
+      // 다른 COM 경로(osScopedInvoke/osExpandCollapse)와 같은 "기본 동작 실행"이다.
+      // 좌표는 어디에도 안 씀 — osScopedInvoke.py가 hwnd 서브트리에서 셀렉터로
+      // 직접 찾아 Invoke.
+      //
+      // ⚠️ 2026-08-04 수정: 여기 원래 "doubleClick도 Invoke() 1회로 충분"이라고
+      // 적혀 있었고(2026-07-15 실측: Invoke()=기본 동작=폴더 진입), 그래서
+      // 더블클릭에 아무 표시도 싣지 않았다. 그 전제는 2026-07-24에 깨졌다 —
+      // osScopedInvoke.py의 invoke_item() 맨 앞에 send_input_click()이 붙고
+      // 성공 시 즉시 return하게 되면서 그 Invoke()가 도달 불가능해졌고,
+      // send_input_click()은 down/up을 한 번만 보낸다. 결과: 녹화된 더블클릭이
+      // 앱에는 단일 클릭(=행 선택)으로 도달해 폴더가 열리지 않고, 그에 의존한
+      // 이후 스텝이 전부 무너졌다(7-Zip: 3:doubleClick 컴퓨터는 "성공",
+      // 4:doubleClick C: 부터 target not found — 2026-08-04 2회 연속 동일 재현).
+      // 이제 doubleClick이면 --double을 넘겨 실제로 두 번 누른다.
+      // 회귀 게이트: mock_events.py의 MockDoubleClickRow 시나리오.
       const target = comSafeTarget(e.element);
       const hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
+      const isDbl = e.action === 'doubleClick';
       pushMethod(
 `    async click${stepNum}() {
-        osScopedInvoke(${hwndArg}, ${JSON.stringify(target)});
+        osScopedInvoke(${hwndArg}, ${JSON.stringify(target)}${isDbl ? ', null, null, null, null, true' : ''});
     }`
       );
       pushStep(

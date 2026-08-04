@@ -563,6 +563,89 @@ def step_wdio_generate_web_content():
         )
 
 
+# doubleClick-on-a-native-list-row scenario (2026-08-04, 7-Zip 재생 실패 2회
+# 연속 동일 재현). server.js의 ListItem 분기는 "doubleClick도 Invoke() 1회면
+# 폴더 진입까지 완료"라는 2026-07-15 실측을 근거로 더블클릭을 단일 호출로
+# 내보낸다. 그런데 2026-07-24에 osScopedInvoke.py의 invoke_item() 맨 앞에
+# send_input_click()이 삽입되면서 `if send_input_click(...): return True`가
+# 되어 **Invoke()는 도달 불가능한 죽은 코드**가 됐고, send_input_click()은
+# down/up을 한 번만 보낸다. 네이티브 리스트에서 단일 클릭은 선택일 뿐 열기가
+# 아니므로, 폴더가 열리지 않고 이후 스텝이 전부 무너진다(실측: 3:doubleClick
+# 컴퓨터가 "invoked" 성공 보고 → 4:doubleClick C:가 target not found).
+#
+# 이 게이트는 수정 방식을 특정하지 않는다 — doubleClick 스텝이 만들어내는
+# 호출이 동일 조건의 click 스텝과 **구별되기만** 하면 된다. 라벨 문자열만
+# 다르고 실제 호출이 같으면(현재 상태) 실패한다.
+DBLROW_APP = "MockDoubleClickRow"
+DBLROW_EVENTS = [
+    make_event("click", name="RowA", control_type="ListItem",
+               window_title="Rows", app_name=DBLROW_APP, x=100, y=100, index=1),
+    # 좌표를 200px 떨어뜨려 dedupeDoubleClicks()가 앞의 click을 더블클릭
+    # 구성요소로 병합하지 않게 한다(DEDUPE_RADIUS=6px).
+    make_event("doubleClick", name="RowB", control_type="ListItem",
+               window_title="Rows", app_name=DBLROW_APP, x=100, y=300, index=2),
+]
+DBLROW_SESSION_META = {
+    "action": "session_meta",
+    "app": DBLROW_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 0, "top": 0, "width": 900, "height": 700},
+}
+
+_METHOD_RE = re.compile(r"async (click\d+)\(\)\s*\{(.*?)\n    \}", re.S)
+_STEP_RE = re.compile(r"await _step\('(\d+):(\w+) ([^']*)'.*?page\.(click\d+)\(\)\)")
+
+
+def step_wdio_generate_doubleclick_row():
+    print("\n[16] doubleClick on a native list row must not replay as a single click")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", DBLROW_SESSION_META)
+    for ev in DBLROW_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": DBLROW_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (doubleClick row) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped doubleClick-row checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname, content = f.get("filename", ""), f.get("content", "")
+        bodies = dict(_METHOD_RE.findall(content))
+        click_fn = dbl_fn = None
+        for _num, action, label, fn in _STEP_RE.findall(content):
+            if action == "click" and "RowA" in label:
+                click_fn = fn
+            elif action == "doubleClick" and "RowB" in label:
+                dbl_fn = fn
+        if not click_fn or not dbl_fn:
+            check(f"  {fname} emits both the click and the doubleClick step",
+                  False, f"click={click_fn} doubleClick={dbl_fn}")
+            continue
+        norm_click = bodies.get(click_fn, "").replace("RowA", "ROW").strip()
+        norm_dbl = bodies.get(dbl_fn, "").replace("RowB", "ROW").strip()
+        check(
+            f"  {fname} replays a doubleClick row differently from a click row",
+            norm_click != norm_dbl,
+            "the two generated calls are byte-identical — 'doubleClick' survives "
+            "only in the log label, so a recorded double-click reaches the app as "
+            "a single click. On a native list that selects the row instead of "
+            "opening it, and every later step that depended on the navigation "
+            "fails (7-Zip 컴퓨터→C:, reproduced identically twice on 2026-08-04)",
+        )
+        check(
+            f"  {fname} embeds an osScopedInvoke.py that accepts a double-click flag",
+            "--double" in content,
+            "the helper has no way to express a double click — send_input_click() "
+            "sends exactly one down/up pair and returns True, which also makes the "
+            "InvokePattern fallback beneath it unreachable (osScopedInvoke.py "
+            "invoke_item, 2026-07-24)",
+        )
+
+
 # Trigger-click-vanishes-behind-a-standalone-expandCollapse scenario
 # (2026-07-29, HeidiSQL "더보기" SplitButton -> native popup menu ->
 # "환경설정" MenuItem follow-up). mergeExpandCollapseClicks() runs first and
@@ -2644,7 +2727,7 @@ def step_output_folders_isolated():
         EXPAND_REDUNDANT_APP, NATIVE_APP, VCL_APP, TRIGGER_EXPAND_APP,
         NAMELESS_ITEM_APP, HWND_TRIGGER_APP, DUP_DROPDOWN_APP, ANIM_APP,
         NESTED_DROPDOWN_APP, SIMPLE_ROOTHWND_APP, TITLE_COLLISION_DIALOGRECT_APP,
-        WEB_APP,
+        WEB_APP, DBLROW_APP,
         "SevenZipStateReset",
     })
     for name in targets:
@@ -2688,6 +2771,7 @@ def main():
     step_wdio_generate_native()
     step_wdio_generate_vcl_hwnd_id()
     step_wdio_generate_web_content()
+    step_wdio_generate_doubleclick_row()
     step_wdio_generate_trigger_expand_merge_order()
     step_wdio_generate_nameless_item_no_fake_itemname()
     step_wdio_generate_owner_drawn_dropdown_by_index()
