@@ -2734,6 +2734,32 @@ function isRenderCounterId(el) {
   return RENDER_COUNTER_ID.test(el.automationId);
 }
 
+// A freshly-opened popup menu's items are brand-new controls, and a VCL/Win32
+// default UIA provider without a declared AutomationId fills one in from an
+// app-wide running control-creation counter — not a per-item identity.
+// Measured 2026-08-04 (HeidiSQL "더 보기" overflow menu): the SAME menu,
+// opened three times in one recording session, yielded AutomationId 474,
+// then 475, then 477 for the SAME visual item — each open advances the
+// counter by however many controls the app happened to create meanwhile.
+// Between recording and a separate replay launch the counter start point
+// differs, so the captured number essentially never matches. Same disease as
+// hwnd-as-AutomationId (isWindowHandleId above), but the number here isn't
+// the hwnd — these items report hwnd=0 — so that guard can't catch it.
+//
+// SCOPED DELIBERATELY at selector-build time, not capture time: agent.py
+// briefly cleared this at capture (2026-08-04) and it broke
+// mergeCrossWindowTriggerClicks(), which uses "does this event have ANY
+// automationId/name at all" as its signal for "pair this with the trigger
+// that opened it" — clearing the id there silently starved that pairing and
+// dropped the trigger click entirely. Keeping capture-time data intact and
+// rejecting the id only here (alongside isWindowHandleId/isRenderCounterId)
+// keeps "is there something here" and "is this value trustworthy in a final
+// selector" separate.
+function isVolatileMenuItemId(el) {
+  if (el?.controlType !== 'MenuItem' || el?.hwnd || !el?.automationId) return false;
+  return /^\d+$/.test(el.automationId);
+}
+
 // Builds the {automationId, className, name} object passed to the COM
 // helpers (osScopedInvoke/osExpandCollapse target + triggerTarget) with the
 // same hwnd-as-automationId guard as the WAD-path selectors
@@ -2750,8 +2776,8 @@ function isRenderCounterId(el) {
 // actually trustworthy; an hwnd-id is not, so Name is kept as the fallback.
 function comSafeTarget(el, { dropNameIfStableId = false, forceDropName = false } = {}) {
   el = el || {};
-  const stableId = (el.automationId && !isWindowHandleId(el) && !isRenderCounterId(el))
-    ? el.automationId : '';
+  const stableId = (el.automationId && !isWindowHandleId(el) && !isRenderCounterId(el)
+    && !isVolatileMenuItemId(el)) ? el.automationId : '';
   return {
     automationId: stableId,
     className: el.className || '',
@@ -2800,7 +2826,7 @@ function wdioSelectorById(el, ambiguousIds) {
   const isNumeric = el.automationId && /^\d+$/.test(el.automationId);
   const isSlotIndex = isNumeric && SLOT_INDEX_CONTROL_TYPES.has(el.controlType);
   const hasStableId = el.automationId && !isSlotIndex && !isWindowHandleId(el)
-    && !isRenderCounterId(el)
+    && !isRenderCounterId(el) && !isVolatileMenuItemId(el)
     && !(GENERIC_AUTOMATION_IDS.has(el.automationId) && el.name);
   if (hasStableId) {
     // Same Win32 dialog can reuse one numeric AutomationId across several
@@ -2859,7 +2885,8 @@ function wdioSelectorByClass(el) {
   // 폴백하기 전에 유니크할 가능성이 훨씬 높은 automationId를 먼저 시도하도록
   // 순서를 맞춘다. className+name 조합(위 분기, 이미 유니크)은 그대로 최우선.
   const isSlotIndex = /^\d+$/.test(el.automationId || '') && SLOT_INDEX_CONTROL_TYPES.has(el.controlType);
-  if (el.automationId && !isSlotIndex && !isWindowHandleId(el) && !isRenderCounterId(el))
+  if (el.automationId && !isSlotIndex && !isWindowHandleId(el) && !isRenderCounterId(el)
+      && !isVolatileMenuItemId(el))
     return `'~${escapeAttr(el.automationId)}'`;
   if (el.className && isStableClassName(el.className)) return `'//${tag}[@ClassName="${escapeAttr(el.className)}"]'`;
   if (el.name)         return `'//${tag}[@Name="${escapeAttr(el.name)}"]'`;

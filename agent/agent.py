@@ -169,14 +169,6 @@ def is_web_host(hwnd):
     return bool(found)
 
 
-def is_volatile_menuitem_id(control_type, hwnd, automation_id):
-    """True when an AutomationId is a per-session control-creation counter,
-    not a stable identity — see the describe() call site for the measurement
-    this is based on. Split out for testing without a live UIA element, same
-    reasoning as smallest_rect_index / is_chromium_host_class."""
-    return control_type == "MenuItem" and not hwnd and bool(automation_id) and automation_id.isdigit()
-
-
 def smallest_rect_index(rects, x, y):
     """Index of the smallest rect containing (x, y), or None.
 
@@ -1098,24 +1090,20 @@ class UIAInspector:
         except Exception:
             info["isWebContent"] = False
 
-        # A freshly-opened popup menu's items are brand-new controls, and a
-        # VCL/Win32 default UIA provider without a declared AutomationId fills
-        # one in from an app-wide running control-creation counter — not a
-        # per-item identity. Measured 2026-08-04 (HeidiSQL "더 보기" overflow
-        # menu): the SAME menu, opened three times in one recording session,
-        # yielded automationId 474, then 475, then 477 for the SAME visual
-        # item — each open advances the counter by however many controls the
-        # app happened to create meanwhile. Between recording and replay
-        # (separate process launches) the counter start point differs, so the
-        # captured number essentially never matches — exactly like the
-        # hwnd-as-AutomationId disease (isWindowHandleId in server.js), but
-        # the number here isn't the hwnd (these items report hwnd=0) so that
-        # guard can't catch it. A MenuItem with hwnd==0 and a purely numeric
-        # AutomationId is this counter, not a stable id — discard it so the
-        # anchor-path / explicit-FAIL fallback below runs instead of building
-        # a selector that looks fine and never matches.
-        if is_volatile_menuitem_id(info["controlType"], info["hwnd"], info["automationId"]):
-            info["automationId"] = ""
+        # NOTE: a popup MenuItem's AutomationId can be a volatile per-session
+        # control-creation counter (measured 2026-08-04, HeidiSQL "더 보기"
+        # overflow menu — see is_volatile_menuitem_id's history in git log for
+        # the full measurement). That rejection intentionally does NOT happen
+        # here: server.js's merge passes (mergeCrossWindowTriggerClicks) use
+        # "does this event have ANY automationId/name at all" as the signal
+        # for "this looks like a real interactive element worth pairing with
+        # its trigger" — clearing it at capture time silently starved that
+        # pairing and dropped the trigger click entirely (regression found
+        # 2026-08-04 replaying the very fix meant to help this flow). The
+        # volatility check now lives where the OTHER two id diseases
+        # (isWindowHandleId, isRenderCounterId) already live — server.js's
+        # selector builders — so structural "is there something here" and
+        # "is this value trustworthy in a final selector" stay separate.
 
         # Locator strategy — explicit, so SYSTEM_PROMPT never guesses
         if info["automationId"]:

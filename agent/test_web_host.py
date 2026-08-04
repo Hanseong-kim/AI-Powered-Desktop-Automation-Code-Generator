@@ -4,8 +4,7 @@ import sys
 
 sys.path.insert(0, ".")
 from agent import (   # noqa: E402
-    is_chromium_host_class, is_volatile_menuitem_id, is_web_host,
-    smallest_rect_index, UIAInspector,
+    is_chromium_host_class, is_web_host, smallest_rect_index, UIAInspector,
 )
 
 failures = []
@@ -49,18 +48,6 @@ def main():
     for rects, (px, py), want in cases:
         got = smallest_rect_index(rects, px, py)
         check(f"smallest_rect_index({rects}, {px},{py}) == {want}", got == want)
-
-    #       controlType   hwnd     automationId   expected
-    mi_cases = [
-        ("MenuItem",      0,       "477",         True),   # HeidiSQL 더보기, measured 2026-08-04
-        ("MenuItem",      0,       "",             False),  # no id at all -> nothing to discard
-        ("MenuItem",      920420,  "474",          False),  # real hwnd -> not this disease
-        ("MenuItem",      0,       "SaveItem",     False),  # non-numeric -> a real declared id
-        ("Button",        0,       "474",          False),  # only MenuItem is affected
-    ]
-    for ct, hwnd, aid, want in mi_cases:
-        got = is_volatile_menuitem_id(ct, hwnd, aid)
-        check(f"is_volatile_menuitem_id({ct!r}, {hwnd}, {aid!r}) == {want}", got == want)
 
     print(f"\n{len(failures)} failure(s)")
     return 1 if failures else 0

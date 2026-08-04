@@ -857,6 +857,76 @@ HWND_TRIGGER_SESSION_META = {
     "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
 }
 
+# Volatile popup-MenuItem-id scenario (2026-08-04, HeidiSQL "더 보기" overflow
+# menu, follow-up to HWND_TRIGGER_APP above). The item's AutomationId here is
+# a per-session control-creation counter (numeric, hwnd=0) — same shape as
+# the HWND_TRIGGER item's hwnd-id disease, but the item ALSO has no Name
+# (icon-only overflow menu item), which is what makes this scenario
+# necessary: it proves the id gets rejected WITHOUT starving
+# mergeCrossWindowTriggerClicks() of the "something is here, pair it with
+# its trigger" signal that a real (if untrustworthy) id/name still provides.
+# A first attempt at this fix (2026-08-04) cleared the id at CAPTURE time in
+# agent.py, which made the item look like it had nothing at all — the merge
+# never fired, the trigger click vanished, and the item was left standalone
+# with a totally empty selector. Rejecting it here (selector-build time)
+# instead keeps the merge intact.
+VOLATILE_MENUITEM_APP = "MockVolatileMenuItem"
+VOLATILE_MENUITEM_EVENTS = [
+    make_event("click", name="More", automation_id="", class_name="SplitButton",
+               control_type="SplitButton", app_name=VOLATILE_MENUITEM_APP,
+               winLeft=100, winTop=100, winWidth=600, winHeight=400, index=1),
+    make_event("click", name="", automation_id="477", class_name="",
+               control_type="MenuItem", app_name=VOLATILE_MENUITEM_APP,
+               expand_collapse=True, index=2,
+               winLeft=999, winTop=999, winWidth=50, winHeight=50),
+]
+VOLATILE_MENUITEM_EVENTS[1]["element"]["hwnd"] = 0
+VOLATILE_MENUITEM_SESSION_META = {
+    "action": "session_meta",
+    "app": VOLATILE_MENUITEM_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
+
+def step_wdio_generate_volatile_menuitem_id():
+    print("\n[16] a volatile popup-MenuItem id is rejected without dropping the trigger pairing (HeidiSQL 더보기, 2026-08-04)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", VOLATILE_MENUITEM_SESSION_META)
+    for ev in VOLATILE_MENUITEM_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": VOLATILE_MENUITEM_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (volatile menuitem) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped volatile-menuitem checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname, content = f.get("filename", ""), f.get("content", "")
+        check(
+            f"  {fname} never embeds the item's volatile counter id as its automationId",
+            '"automationId":"477"' not in content,
+            "a popup MenuItem's numeric AutomationId with hwnd=0 is a "
+            "per-session control-creation counter, not a stable id — "
+            "measured 2026-08-04: the same menu opened 3 times in one "
+            "recording session yielded 474, 475, 477 for the SAME item",
+        )
+        check(
+            f"  {fname} still pairs the item with its opening trigger",
+            '"name":"More"' in content,
+            "the trigger click ('더 보기'/More) must survive in the "
+            "generated triggerTarget — a first attempt at rejecting the "
+            "volatile id cleared it at capture time instead of selector-"
+            "build time, which starved mergeCrossWindowTriggerClicks() of "
+            "the signal it needs to pair trigger+item, and the trigger "
+            "click silently vanished from the generated test entirely",
+        )
+
+
 # Reused-DropDown-in-the-same-window scenario (2026-07-29, HeidiSQL "새 세션"
 # dialog: the network-type combo and the encoding combo sit one above the
 # other, both exposing a dropdown arrow with automationId="DropDown" — WAD's
@@ -2280,7 +2350,13 @@ def step_wdio_generate_trigger_expand_merge_order():
         # the item search fails every time (measured live against HeidiSQL).
         check(
             f"  {fname} merges the trigger and the cross-window expandCollapse item into one osScopedInvoke call",
-            'osScopedInvoke(_appHwnd, {"automationId":"473","className":"","name":""}, {"automationId":"btnMore","className":"Button","name":""}, null, null, "Calculator");' in content,
+            # automationId "" not "473" (2026-08-04): a popup MenuItem's numeric
+            # id with hwnd=0 is a volatile per-session counter (isVolatileMenuItemId)
+            # — rejected here same as the item's own Name (empty, icon-only item).
+            # The merge itself (trigger+item, one osScopedInvoke call) is the
+            # thing this check actually guards; see MockVolatileMenuItem for the
+            # id-rejection assertion in isolation.
+            'osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":""}, {"automationId":"btnMore","className":"Button","name":""}, null, null, "Calculator");' in content,
             "trigger (More) and item (the cross-window standalone toggle) "
             "must run in the SAME process so the popup the trigger opens is "
             "visible to the item search's new-window baseline",
@@ -2813,7 +2889,7 @@ def step_output_folders_isolated():
         EXPAND_REDUNDANT_APP, NATIVE_APP, VCL_APP, TRIGGER_EXPAND_APP,
         NAMELESS_ITEM_APP, HWND_TRIGGER_APP, DUP_DROPDOWN_APP, ANIM_APP,
         NESTED_DROPDOWN_APP, SIMPLE_ROOTHWND_APP, TITLE_COLLISION_DIALOGRECT_APP,
-        WEB_APP, DBLROW_APP, WINCLICK_APP,
+        WEB_APP, DBLROW_APP, WINCLICK_APP, VOLATILE_MENUITEM_APP,
         "SevenZipStateReset",
     })
     for name in targets:
@@ -2864,6 +2940,7 @@ def main():
     step_wdio_generate_owner_drawn_dropdown_by_index()
     step_wdio_generate_combobox_ex_reclick_drops_name()
     step_wdio_generate_hwnd_trigger_keeps_name()
+    step_wdio_generate_volatile_menuitem_id()
     step_wdio_generate_dup_dropdown_position_disambiguation()
     step_com_sendinput_helpers()
     step_esc_recovery_guards()
