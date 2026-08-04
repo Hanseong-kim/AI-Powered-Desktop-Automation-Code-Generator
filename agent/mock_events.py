@@ -2635,6 +2635,24 @@ def step_com_sendinput_helpers():
             "destroys the traceability the exception path exists to provide",
         )
 
+    ec_path = os.path.join(out_dir, "osExpandCollapse.py")
+    if os.path.exists(ec_path):
+        with open(ec_path, encoding="utf-8") as fh:
+            ec_src = fh.read()
+        check(
+            "  osExpandCollapse.py retries resolve_target() for a slow post-navigation render",
+            "for attempt in range(10):" in ec_src
+            and "target = resolve_target(uia, root, sel)" in ec_src,
+            "measured 2026-08-04 (HeidiSQL '환경 설정' -> '파일 및 탭' tab switch): "
+            "the tab-switch click reports success in a separate process before "
+            "this process's search runs, but the new tab's controls (e.g. "
+            "TComboBox) had not reached the UIA tree yet — a single-shot "
+            "resolve_target() failed every time with 'target element not "
+            "found'. osScopedInvoke.py already carries this exact retry budget "
+            "for the same class of render race (2026-07-17/24); this helper "
+            "never got it",
+        )
+
     path = os.path.join(out_dir, "osScopedInvoke.py")
     if os.path.exists(path):
         with open(path, encoding="utf-8") as fh:

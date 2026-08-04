@@ -1364,7 +1364,21 @@ def main():
         sys.exit(2)
 
     sel = json.loads(base64.b64decode(args.sel_b64).decode("utf-8"))
-    target = resolve_target(uia, root, sel)
+    # 2026-08-04 실측(HeidiSQL "환경 설정" -> "파일 및 탭" 탭 전환 직후 콤보
+    # 검색): 탭 클릭(osScopedInvoke, 별도 프로세스) 자체는 성공으로 보고되는데,
+    # 그 직후 이 프로세스가 즉시 자식 트리를 검색하면 그 탭의 컨트롤(TComboBox
+    # 등)이 아직 UIA 트리에 올라오지 않아 매번 "target element not found"였다
+    # — osScopedInvoke.py가 렌더링 레이스에 대해 이미 갖고 있는 재시도 예산
+    # (2026-07-17/24, "새 사이트(N)" 인라인 이름변경 상자와 같은 근거)을 이
+    # 헬퍼의 resolve_target()은 여태 갖고 있지 않았다. 클릭과 같은 예산(10회,
+    # 300ms 간격, 최대 ~2.7초)을 그대로 맞춘다.
+    target = None
+    for attempt in range(10):
+        if attempt > 0:
+            time.sleep(0.3)
+        target = resolve_target(uia, root, sel)
+        if target:
+            break
     if not target:
         print(f"osExpandCollapse: target element not found (sel={args.sel_b64})", file=sys.stderr)
         sys.exit(2)
