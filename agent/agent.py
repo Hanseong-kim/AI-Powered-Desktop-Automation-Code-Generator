@@ -1083,6 +1083,13 @@ class UIAInspector:
             except Exception:
                 pass
 
+        try:
+            info["isWebContent"] = is_web_host(
+                ctypes.windll.user32.GetAncestor(info.get("hwnd", 0) or 0, GA_ROOT)
+                or info.get("hwnd", 0) or 0)
+        except Exception:
+            info["isWebContent"] = False
+
         # Locator strategy — explicit, so SYSTEM_PROMPT never guesses
         if info["automationId"]:
             info["locatorStrategy"] = "automationId"
@@ -2559,6 +2566,14 @@ class Recorder:
                 # canonicalizeWindowTitles()가 이 값을 병합 대상으로 쓴다.
                 # 위 주석대로 화이트리스트라 여기 빠뜨리면 조용히 전달 안 됨.
                 "stableWindowTitle": self._first_titles.get(root_hwnd, ""),
+                # True when this element lives inside an embedded-Chromium
+                # view. server.js uses it to reject render-counter
+                # AutomationIds WITHOUT touching WinForms designer ids of the
+                # same shape (isRenderCounterId). Whitelist field — leaving it
+                # out here means it never reaches the server, the trap this
+                # dict has already sprung twice (expandCollapse 2026-07-13,
+                # comboItemIndex 2026-07-31).
+                "isWebContent": bool(elem.get("isWebContent", False)),
             },
             "timestamp": time.time(),
             "app": self.session.get("appName", ""),

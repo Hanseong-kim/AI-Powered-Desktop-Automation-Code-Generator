@@ -2613,6 +2613,25 @@ function isWindowHandleId(el) {
   return hwnd !== 0 && Number(el.automationId) === hwnd;
 }
 
+// A web framework numbers its rendered elements — "TextField56",
+// "button-461", "connectButton-498", "field-542", "primary-492". The counter
+// moves whenever the app is rebuilt, so a selector built from one matches
+// today and silently stops matching after an update. Same disease as an
+// hwnd-as-AutomationId (isWindowHandleId above), different source.
+//
+// SCOPED DELIBERATELY: WinForms designer ids ("button1", "textBox1",
+// "label3") have exactly this shape and are perfectly stable, and WinForms is
+// a required target framework. The discriminator is element.isWebContent,
+// which agent.py sets only when the element's owning window hosts embedded
+// Chromium. Pure-numeric ids ("1125", "900", "2") are classic Win32 resource
+// ids and are never rejected here or anywhere else.
+const RENDER_COUNTER_ID = /^[A-Za-z][A-Za-z]*[-_]?\d+$/;
+
+function isRenderCounterId(el) {
+  if (!el?.isWebContent || !el?.automationId) return false;
+  return RENDER_COUNTER_ID.test(el.automationId);
+}
+
 // Builds the {automationId, className, name} object passed to the COM
 // helpers (osScopedInvoke/osExpandCollapse target + triggerTarget) with the
 // same hwnd-as-automationId guard as the WAD-path selectors
@@ -2629,7 +2648,8 @@ function isWindowHandleId(el) {
 // actually trustworthy; an hwnd-id is not, so Name is kept as the fallback.
 function comSafeTarget(el, { dropNameIfStableId = false, forceDropName = false } = {}) {
   el = el || {};
-  const stableId = (el.automationId && !isWindowHandleId(el)) ? el.automationId : '';
+  const stableId = (el.automationId && !isWindowHandleId(el) && !isRenderCounterId(el))
+    ? el.automationId : '';
   return {
     automationId: stableId,
     className: el.className || '',
@@ -2678,6 +2698,7 @@ function wdioSelectorById(el, ambiguousIds) {
   const isNumeric = el.automationId && /^\d+$/.test(el.automationId);
   const isSlotIndex = isNumeric && SLOT_INDEX_CONTROL_TYPES.has(el.controlType);
   const hasStableId = el.automationId && !isSlotIndex && !isWindowHandleId(el)
+    && !isRenderCounterId(el)
     && !(GENERIC_AUTOMATION_IDS.has(el.automationId) && el.name);
   if (hasStableId) {
     // Same Win32 dialog can reuse one numeric AutomationId across several
@@ -2736,7 +2757,8 @@ function wdioSelectorByClass(el) {
   // 폴백하기 전에 유니크할 가능성이 훨씬 높은 automationId를 먼저 시도하도록
   // 순서를 맞춘다. className+name 조합(위 분기, 이미 유니크)은 그대로 최우선.
   const isSlotIndex = /^\d+$/.test(el.automationId || '') && SLOT_INDEX_CONTROL_TYPES.has(el.controlType);
-  if (el.automationId && !isSlotIndex && !isWindowHandleId(el)) return `'~${escapeAttr(el.automationId)}'`;
+  if (el.automationId && !isSlotIndex && !isWindowHandleId(el) && !isRenderCounterId(el))
+    return `'~${escapeAttr(el.automationId)}'`;
   if (el.className && isStableClassName(el.className)) return `'//${tag}[@ClassName="${escapeAttr(el.className)}"]'`;
   if (el.name)         return `'//${tag}[@Name="${escapeAttr(el.name)}"]'`;
   return anchorSelector(el);

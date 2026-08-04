@@ -481,6 +481,88 @@ VCL_SESSION_META = {
     "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
 }
 
+# Embedded-Chromium (WebView2) selector policy scenario (2026-08-03,
+# TeamViewer 15.79). Web frameworks emit AutomationIds that are render
+# counters — "TextField56", "button-461", "connectButton-498" — which change
+# between builds of the app, so a selector built from one silently stops
+# matching after an update. They must be rejected, but ONLY inside web
+# content: WinForms designer ids ("button1", "textBox1") have exactly the
+# same shape and are perfectly stable, and WinForms is a required framework.
+# The discriminator is element.isWebContent, set by agent.py when the
+# element's owning window has an embedded-Chromium child.
+WEB_APP = "MockWebContent"
+WEB_EVENTS = [
+    make_event("click", name="세션 참가", automation_id="connectButton-498",
+               class_name="", control_type="Button",
+               window_title="TeamViewer", app_name=WEB_APP, x=300, y=300, index=1),
+    make_event("click", name="", automation_id="TextField56",
+               class_name="", control_type="Edit",
+               window_title="TeamViewer", app_name=WEB_APP, x=320, y=340, index=2),
+    make_event("click", name="Save", automation_id="button1",
+               class_name="Button", control_type="Button",
+               window_title="TeamViewer", app_name=WEB_APP, x=360, y=380, index=3),
+]
+WEB_EVENTS[0]["element"]["isWebContent"] = True
+WEB_EVENTS[1]["element"]["isWebContent"] = True
+WEB_EVENTS[2]["element"]["isWebContent"] = False   # native control in the same app
+WEB_SESSION_META = {
+    "action": "session_meta",
+    "app": WEB_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 1000, "height": 800},
+}
+
+
+def step_wdio_generate_web_content():
+    print("\n[14] Embedded-Chromium render-counter AutomationId rejection")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", WEB_SESSION_META)
+    for ev in WEB_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": WEB_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (web content) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped web-content checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname, content = f.get("filename", ""), f.get("content", "")
+        check(
+            f"  {fname} rejects a render-counter id inside web content",
+            "connectButton-498" not in content,
+            "web-framework ids are render counters and change between builds "
+            "of the app, so a selector built from one stops matching after an "
+            "update (TeamViewer 15.79, 2026-08-03)",
+        )
+        check(
+            f"  {fname} falls back to the Name for that element",
+            "세션 참가" in content,
+            "Name is the only durable field left once the counter id is "
+            "rejected — dropping both leaves no selector at all",
+        )
+        # wdioSelectorByClass prefers a ClassName+Name combo over a bare
+        # automationId whenever the ClassName is stable ("Button" qualifies),
+        # so the id itself ("button1") only ever shows up in the ById file.
+        # Either form proves the same thing: a WinForms-shaped id was NOT
+        # treated as a render counter and rejected.
+        not_rejected = (
+            "button1" in content
+            or '@ClassName="Button" and @Name="Save"' in content
+        )
+        check(
+            f"  {fname} keeps a WinForms-shaped id when NOT web content",
+            not_rejected,
+            "button1/textBox1 are WinForms designer names — same shape as a "
+            "render counter but perfectly stable. Rejecting them would break "
+            "a required framework, which is why the rule is scoped to "
+            "element.isWebContent",
+        )
+
+
 # Trigger-click-vanishes-behind-a-standalone-expandCollapse scenario
 # (2026-07-29, HeidiSQL "더보기" SplitButton -> native popup menu ->
 # "환경설정" MenuItem follow-up). mergeExpandCollapseClicks() runs first and
@@ -2562,6 +2644,7 @@ def step_output_folders_isolated():
         EXPAND_REDUNDANT_APP, NATIVE_APP, VCL_APP, TRIGGER_EXPAND_APP,
         NAMELESS_ITEM_APP, HWND_TRIGGER_APP, DUP_DROPDOWN_APP, ANIM_APP,
         NESTED_DROPDOWN_APP, SIMPLE_ROOTHWND_APP, TITLE_COLLISION_DIALOGRECT_APP,
+        WEB_APP,
         "SevenZipStateReset",
     })
     for name in targets:
@@ -2604,6 +2687,7 @@ def main():
     step_wdio_generate_expand_redundant_trigger()
     step_wdio_generate_native()
     step_wdio_generate_vcl_hwnd_id()
+    step_wdio_generate_web_content()
     step_wdio_generate_trigger_expand_merge_order()
     step_wdio_generate_nameless_item_no_fake_itemname()
     step_wdio_generate_owner_drawn_dropdown_by_index()

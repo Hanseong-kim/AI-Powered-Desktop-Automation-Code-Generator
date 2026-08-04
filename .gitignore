@@ -34,6 +34,7 @@ generated-wdio/MockHwndTrigger/
 generated-wdio/MockDupDropdown/
 generated-wdio/MockComboIndex/
 generated-wdio/MockComboBoxExReclick/
+generated-wdio/MockWebContent/
 
 # 위와 동일한 산출물의 _debug-helpers 사본(2026-07-27 saveFiles 분리 이후 생성)
 generated-wdio/_debug-helpers/MockCalculator/
@@ -54,6 +55,7 @@ generated-wdio/_debug-helpers/MockHwndTrigger/
 generated-wdio/_debug-helpers/MockDupDropdown/
 generated-wdio/_debug-helpers/MockComboIndex/
 generated-wdio/_debug-helpers/MockComboBoxExReclick/
+generated-wdio/_debug-helpers/MockWebContent/
 
 Claude code task server token opt.md
 Claude code task v2.md
@@ -92,3 +94,5 @@ server/_*
 
 # ensureAppium()이 각 앱 폴더에서 standalone 실행할 때 남기는 Appium 서버 로그
 generated-wdio/**/appium.log
+# subagent-driven-development scratch (ledger, briefs, review packages)
+.superpowers/
