@@ -932,6 +932,49 @@ def clickable_point(el):
     return None
 
 
+def listitem_label_point(uia, el):
+    """리포트 뷰 행에서 실제로 항목을 여는 지점 — 이름(첫 컬럼) 셀의 중심.
+
+    실측 2026-08-04 (7-Zip SysListView32, poc 프로브):
+        행(ListItem) rect = (797, 267, 1405, 286)   중심 x=1101
+        이름 셀(Edit)  rect = (800, 267,  833, 286)  중심 x=816
+        중심(1101) 더블클릭 -> 제목/행 목록 전부 불변 (아무 일도 안 일어남)
+        이름 셀(816) 더블클릭 -> 즉시 진입, 행 1개에서 25개로
+
+    행 rect는 모든 컬럼을 가로지르므로 그 중심은 "수정한 날짜/크기" 컬럼의
+    빈 공간이다. 선택(단일 클릭)은 full-row select라 어디를 눌러도 되지만
+    활성화(더블클릭)는 이름 셀에서만 일어난다 — 그래서 단일 클릭 스텝은
+    멀쩡했고 폴더 진입만 조용히 실패했다.
+
+    좌표를 저장하지 않는다: 재생 시점에 살아 있는 자식 요소의 rect에서
+    계산한다(§3의 dynamic ClickablePoint 규칙 그대로). 자식이 없는 행이면
+    None을 돌려 기존 clickable_point() 동작을 그대로 쓴다.
+    """
+    TS_CHILDREN = 2
+    UIA_ListItem = 50007
+    try:
+        if el.CurrentControlType != UIA_ListItem:
+            return None
+    except Exception:
+        return None
+    try:
+        arr = el.FindAll(TS_CHILDREN, uia.CreateTrueCondition())
+    except Exception:
+        return None
+    best = None
+    for i in range(arr.Length if arr else 0):
+        try:
+            r = arr.GetElement(i).CurrentBoundingRectangle
+        except Exception:
+            continue
+        if r.right <= r.left or r.bottom <= r.top:
+            continue
+        # 가장 왼쪽 셀 = 이름 컬럼. 아이콘+라벨이 여기 있다.
+        if best is None or r.left < best[0]:
+            best = (r.left, (r.left + r.right) // 2, (r.top + r.bottom) // 2)
+    return (best[1], best[2]) if best else None
+
+
 def _same_or_descendant(uia, ancestor, el, max_up=6):
     cur = el
     try:
@@ -983,7 +1026,9 @@ def send_input_click(uia, el, tag, double=False):
     except Exception:
         label = "?"
 
-    pt = clickable_point(el)
+    # 리포트 뷰 행은 rect 중심이 빈 컬럼이라 더블클릭이 안 먹는다 —
+    # listitem_label_point() 참고 (2026-08-04 실측).
+    pt = listitem_label_point(uia, el) or clickable_point(el)
     if not pt:
         return bail("no-clickable-point")
     x, y = pt
