@@ -548,6 +548,36 @@ class UIAInspector:
         return (info.get("controlType") == "ComboBox"
                 or "ComboBox" in (info.get("className") or ""))
 
+    def settled_subtree_count(self, root, timeout=8.0, quiet_for=1.5):
+        """Poll the subtree size until it stops growing, then return it.
+
+        An embedded-Chromium app publishes its accessibility tree
+        progressively. Measured 2026-08-03 (TeamViewer 15.79), the SAME window
+        sampled repeatedly from a cold start:
+
+            t=0s   t=1s   t=3s   t=7s
+              25     26     61     61
+
+        Sampling once reports the observer's timing, not the app. That single
+        mistake is what produced the 2026-07-31 "TeamViewer is Tier 4, not
+        automatable" verdict, which did not survive re-measurement.
+        """
+        best, stable_since = 0, None
+        deadline = time.time() + timeout
+        while True:
+            try:
+                found = root.FindAll(7, self._uia.CreateTrueCondition())
+                cur = found.Length if found else 0
+            except Exception:
+                cur = 0
+            if cur > best:
+                best, stable_since = cur, time.time()
+            elif stable_since is None:
+                stable_since = time.time()
+            if time.time() - stable_since >= quiet_for or time.time() >= deadline:
+                return best
+            time.sleep(0.3)
+
     def _search_roots_for(self, elem):
         """Window elements to run FindAll from, most specific first.
 
@@ -592,6 +622,13 @@ class UIAInspector:
         for root in self._search_roots_for(elem):
             return root
         return None
+
+    def from_handle_safe(self, hwnd):
+        try:
+            el = self._uia.ElementFromHandle(hwnd)
+            return el if el else None      # comtypes returns NULL, not None
+        except Exception:
+            return None
 
     def _inner_expandable_combo(self, elem):
         """The control that actually owns the dropdown. For a ComboBoxEx the
@@ -1478,7 +1515,27 @@ class Recorder:
         img = image_path_of_pid(pid)
         return bool(img) and os.path.dirname(img).lower().rstrip("\\/") == app_dir
 
-    def _discover_target_windows(self):
+    def _settle_web_hosts(self, ins):
+        """An embedded-Chromium app is not ready to be recorded the moment its
+        window appears: its accessibility tree is still filling in, and a
+        hit-test during that gap returns a container instead of the control
+        under the cursor. Measured 2026-08-03 — TeamViewer's opening click
+        captured as Group/AutomationId="root" covering 94% of the window,
+        which made the whole replay unusable. Non-web apps skip this
+        entirely, so nothing already-verified gets slower."""
+        if ins is None:
+            return
+        for h in sorted(self.target_hwnds):
+            if not is_web_host(h):
+                continue
+            root = ins.from_handle_safe(h)
+            if not root:
+                continue
+            n = ins.settled_subtree_count(root)
+            log(f"[target] web host hwnd={h} — accessibility tree settled "
+                f"at {n} elements")
+
+    def _discover_target_windows(self, ins=None):
         """Poll up to DISCOVER_TIMEOUT for the window(s) the launched app opens.
         Primary signal: top-level windows that appeared AFTER launch (diff vs
         the pre-launch snapshot). Also accept windows owned by the launch pid
@@ -1582,6 +1639,7 @@ class Recorder:
                 log(f"[target] hwnds={self.target_hwnds} titles={titles}")
                 for h in found:
                     probe_window("appwin", h)
+                self._settle_web_hosts(ins)
                 self._discovery_done_ts = time.time()
                 return
             time.sleep(0.2)
@@ -1598,6 +1656,7 @@ class Recorder:
                 f"(zero-size fallback — no sized window appeared in time)")
             for h in best_found:
                 probe_window("appwin", h)
+            self._settle_web_hosts(ins)
             self._discovery_done_ts = time.time()
             return
 
@@ -1608,6 +1667,7 @@ class Recorder:
                 f"title='{win32gui.GetWindowText(fg)}'")
         else:
             log("[target] discovery failed — filtering disabled (accept all)")
+        self._settle_web_hosts(ins)
         self._discovery_done_ts = time.time()
 
     def _watch_windows(self):
@@ -1644,7 +1704,7 @@ class Recorder:
             traceback.print_exc()
             return
 
-        self._discover_target_windows()
+        self._discover_target_windows(inspector)
         self._emit_session_meta()
 
         while True:

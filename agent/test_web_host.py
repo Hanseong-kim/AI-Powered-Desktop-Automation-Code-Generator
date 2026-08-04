@@ -1,8 +1,9 @@
 """Inline harness — agent.py has no test suite; this file is run directly."""
+import ctypes
 import sys
 
 sys.path.insert(0, ".")
-from agent import is_chromium_host_class, is_web_host   # noqa: E402
+from agent import is_chromium_host_class, is_web_host, UIAInspector   # noqa: E402
 
 failures = []
 
@@ -26,6 +27,13 @@ def main():
           is_chromium_host_class("") is False)
     # hwnd 0 is never a window -> must not raise, must be False
     check("is_web_host(0) is False", is_web_host(0) is False)
+
+    ins = UIAInspector()
+    root = ins._uia.ElementFromHandle(ctypes.windll.user32.GetDesktopWindow())
+    n = ins.settled_subtree_count(root, timeout=2.0, quiet_for=0.3)
+    check("settled_subtree_count returns a positive int for the desktop",
+          isinstance(n, int) and n > 0)
+
     print(f"\n{len(failures)} failure(s)")
     return 1 if failures else 0
 
