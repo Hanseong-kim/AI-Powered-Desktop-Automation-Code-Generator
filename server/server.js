@@ -1137,6 +1137,52 @@ def toggle_item(mod, el, tag):
     print("[" + tag + "] TogglePattern.Toggle() left ToggleState unchanged (%d)"
           " - falling through to the remaining patterns" % before, file=sys.stderr)
     return False
+
+
+# ── checkbox 값-변경 검증 (2026-08-04) ───────────────────────────────────────
+# 위 toggle_item()은 invoke_item()의 체인 맨 끝(Legacy 폴백보다 앞)에서만
+# 쓰인다 — invoke_item()이 맨 앞에서 시도하는 send_input_click()(실제 화면
+# 클릭)이 성공하면 그 자리에서 곧바로 True를 반환하므로(§6 "재생은 시각적으로
+# 확인 가능해야 한다"는 요구를 만족하는 기본 경로), 대다수 체크박스 클릭은
+# toggle_item()까지 내려가지도 않는다. 그 결과 "클릭 자체는 에러 없이 끝났다"만
+# 보고 실제로 체크 상태가 바뀌었는지는 아무도 확인하지 않는다 — TeamViewer
+# WebView2 토글에서 실측된 것과 같은 종류의 거짓 PASS 위험이 CheckBox
+# controlType 전반에 구조적으로 남아 있다(HeidiSQL/PuTTY의 TCheckBox·Button
+# 스타일 체크박스도 이 경로를 그대로 탄다 — 2026-08-04 점검 시점엔 아직 실제
+# 재생 실패로 드러난 적은 없지만, 다음에 체크박스가 있는 녹화를 재생하면 언제든
+# 조용히 터질 수 있는 잠재적 구멍). 시각적 클릭은 그대로 유지하면서(§6), 클릭
+# 전후 ToggleState를 비교해 실제로 바뀌었는지만 추가로 검증한다 — 안 바뀌었으면
+# toggle_item()의 직접 Toggle() 호출로 한 번 더 보정 시도하고, 그래도 안 바뀌면
+# 정직하게 실패로 보고한다(호출부가 exit code로 판단해 _failures에 기록).
+def verified_toggle_click(uia, mod, el, tag="osScopedInvoke", double=False):
+    try:
+        tp = el.GetCurrentPattern(UIA_TogglePatternId).QueryInterface(
+            mod.IUIAutomationTogglePattern)
+    except Exception:
+        # TogglePattern이 없다 = 이 컨트롤은 애초에 체크박스가 아니다(예:
+        # CheckBox로 잘못 태깅됐거나 캡처 시점 이후 컨트롤이 바뀐 경우) —
+        # 검증할 상태 자체가 없으므로 평범한 클릭으로 폴백한다. 없는 걸
+        # 있다고 우기며 거짓 실패를 만들지 않는다.
+        return invoke_item(uia, mod, el, double)
+    try:
+        before = tp.CurrentToggleState
+    except Exception:
+        return invoke_item(uia, mod, el, double)
+    if not invoke_item(uia, mod, el, double):
+        return False
+    time.sleep(0.05)
+    try:
+        after = tp.CurrentToggleState
+    except Exception as e:
+        print(f"[{tag}] click succeeded but ToggleState could not be "
+              f"re-read afterward ({e}) — cannot verify, trusting the click", file=sys.stderr)
+        return True
+    if after != before:
+        print(f"[{tag}] checkbox toggled {before} -> {after} (verified)")
+        return True
+    print(f"[{tag}] click reported success but ToggleState stayed {before} "
+          "unchanged — retrying via TogglePattern.Toggle() directly", file=sys.stderr)
+    return toggle_item(mod, el, tag)
 `;
 
 // ExpandCollapsePattern 재생 헬퍼 (2026-07-13 진단, poc/diag_expandcollapse.py
@@ -1176,6 +1222,7 @@ UIA_SELECTIONFLAG_TAKESELECTION = 1
 UIA_ScrollPatternId = 10004
 UIA_ControlTypeProperty = 30003
 UIA_ListItem = 50007
+UIA_MenuItem = 50011
 TreeScope_Descendants = 4
 TreeScope_Subtree = 7
 ExpandCollapseState_Expanded = 1
@@ -1430,28 +1477,39 @@ def main():
     time.sleep(0.4)
     print(f"[osExpandCollapse] state after Expand() = {ecp.CurrentExpandCollapseState}")
 
-    # ── 인덱스로 항목 선택 (2026-07-31, owner-drawn ComboBoxEx) ─────────────
-    # 항목 Name이 전부 빈 드롭다운은 이름 조건으로 못 찾는다. 펼친 뒤 보이는
-    # ListItem을 트리 순서대로 모아 N번째를 실행한다. 창 서브트리와 새로 뜬
-    # 팝업 창을 모두 훑는다(Win32 콤보는 목록을 별도 ComboLBox 창에 그리기도
-    # 한다). 좌표는 쓰지 않는다.
+    # ── 인덱스로 항목 선택 (2026-07-31, owner-drawn ComboBoxEx;
+    #    2026-08-04 확장: owner-drawn 팝업 메뉴, HeidiSQL "더 보기") ────────
+    # 항목 Name이 전부 빈 드롭다운/메뉴는 이름 조건으로 못 찾는다. 펼친 뒤
+    # 보이는 ListItem(콤보) 또는 MenuItem(팝업 메뉴)을 트리 순서대로 모아
+    # N번째를 실행한다. 창 서브트리와 새로 뜬 팝업 창을 모두 훑는다(Win32
+    # 콤보는 목록을 별도 ComboLBox 창에 그리기도 한다). 어느 컨트롤 타입인지
+    # 알려주는 별도 플래그는 없다 — 그 시점에 실제로 열려 있는 게 콤보든
+    # 메뉴든 둘 중 하나뿐이므로, 두 타입 다 후보 풀에 넣고 기존 루프가
+    # item_count 일치 여부로 걸러내게 둔다. 좌표는 쓰지 않는다.
     if args.item_index is not None:
         time.sleep(0.2)
         li_cond = uia.CreatePropertyCondition(UIA_ControlTypeProperty, UIA_ListItem)
+        mi_cond = uia.CreatePropertyCondition(UIA_ControlTypeProperty, UIA_MenuItem)
         pools = []
-        try:
-            pools.append(("main window", root.FindAll(TreeScope_Subtree, li_cond)))
-        except Exception:
-            pass
+        for cond, kind in ((li_cond, "ListItem"), (mi_cond, "MenuItem")):
+            try:
+                pools.append((f"main window ({kind})", root.FindAll(TreeScope_Subtree, cond)))
+            except Exception:
+                pass
         for h in top_windows():
             if h in baseline:
                 continue
             try:
                 pr = uia.ElementFromHandle(h)
-                if pr:
-                    pools.append((f"popup hwnd={h}", pr.FindAll(TreeScope_Subtree, li_cond)))
             except Exception:
                 continue
+            if not pr:
+                continue
+            for cond, kind in ((li_cond, "ListItem"), (mi_cond, "MenuItem")):
+                try:
+                    pools.append((f"popup hwnd={h} ({kind})", pr.FindAll(TreeScope_Subtree, cond)))
+                except Exception:
+                    continue
         for where, arr in pools:
             if not arr or not arr.Length:
                 continue
@@ -1922,6 +1980,10 @@ def main():
     # 녹화된 동작이 더블클릭이었는가. 네이티브 리스트 행에서 단일 클릭은
     # 선택일 뿐 열기가 아니라 이 구분이 필요하다 (2026-08-04).
     ap.add_argument("--double", action="store_true")
+    # 체크박스 클릭 전후 ToggleState를 비교해 실제로 바뀌었는지 검증한다
+    # (2026-08-04, verified_toggle_click 참고 — CheckBox controlType 전반의
+    # 잠재적 거짓 PASS 구멍을 막는다).
+    ap.add_argument("--verify-toggle", action="store_true")
     args = ap.parse_args()
 
     enable_per_monitor_dpi()
@@ -1989,7 +2051,10 @@ def main():
     # 컨트롤에 타이핑하기 위해 도입 — Root 세션 REST 폴백의 15~20초 고정
     # 비용을 피한다. 검색 로직((a)(b) 둘 다)은 클릭과 완전히 동일).
     act = (lambda el: type_item(uia, mod, el, base64.b64decode(args.text_b64).decode("utf-8"))) \
-        if args.text_b64 else (lambda el: invoke_item(uia, mod, el, args.double))
+        if args.text_b64 else (
+            (lambda el: verified_toggle_click(uia, mod, el, "osScopedInvoke", args.double))
+            if args.verify_toggle else (lambda el: invoke_item(uia, mod, el, args.double))
+        )
     verb = 'typed into' if args.text_b64 else 'invoked'
 
     # 최대 4회 시도(즉시 1회 + 300ms 간격 재시도 3회, 총 최대 ~0.9초) — 2026-07-17
@@ -2391,30 +2456,37 @@ function mergeExpandCollapseClicks(events) {
     // expandCollapse=false, 항목 이벤트 controlType=ComboBox,
     // expandCollapse=true). 대신 rect로 짝짓는다 — 두 컨트롤이 같은 rect에
     // 겹쳐 있다는 사실이 이 케이스의 정의 그 자체다.
-    if (COMBO_OPEN_ACTIONS.has(e.action) && !Number.isInteger(e.element?.comboItemIndex)
+    // menuItemIndex (2026-08-04, HeidiSQL "더 보기"): same "already a
+    // complete position-resolved action" case as comboItemIndex just below —
+    // every guard that excludes one must exclude the other, or the generic
+    // merge logic treats a fully-resolved menu-item pick as a bare trigger
+    // and swallows the user's next click as if it were this menu's item.
+    const hasItemIdx = el => Number.isInteger(el?.comboItemIndex) || Number.isInteger(el?.menuItemIndex);
+    const itemIdxOf = el => Number.isInteger(el?.comboItemIndex) ? el.comboItemIndex : el?.menuItemIndex;
+    if (COMBO_OPEN_ACTIONS.has(e.action) && !hasItemIdx(e.element)
         && Array.isArray(e.element?.rect)) {
       let k = i;
       while (COMBO_OPEN_ACTIONS.has(events[k]?.action)
-             && !Number.isInteger(events[k]?.element?.comboItemIndex)
+             && !hasItemIdx(events[k]?.element)
              && sameRect(events[k]?.element?.rect, e.element.rect)) {
-        k++;      // 같은 콤보를 여닫는 연속 클릭/더블클릭을 통째로 건너뛴다
+        k++;      // 같은 콤보/메뉴를 여닫는 연속 클릭/더블클릭을 통째로 건너뛴다
       }
       const pick = events[k];
-      if (k > i && Number.isInteger(pick?.element?.comboItemIndex)
+      if (k > i && hasItemIdx(pick?.element)
           && sameRect(pick.element?.rect, e.element.rect)) {
         console.log(`[expand-merge] dropped ${k - i} redundant open-click(s) before `
-          + `'select item #${pick.element.comboItemIndex}' @index ${i}..${k - 1}`);
+          + `'select item #${itemIdxOf(pick.element)}' @index ${i}..${k - 1}`);
         i = k - 1;     // 루프의 i++가 항목 이벤트를 가리키게 한다
         continue;
       }
     }
-    // comboItemIndex (2026-07-31): agent.py already resolved this event to
-    // "expand this combo, then pick item #N" — it is a complete action, not a
-    // bare trigger waiting to be paired with the click that follows. Merging
-    // it would swallow the user's NEXT click as if it were this dropdown's
-    // item, which it is not.
+    // comboItemIndex/menuItemIndex (2026-07-31 / 2026-08-04): agent.py
+    // already resolved this event to "expand this combo/menu, then pick item
+    // #N" — it is a complete action, not a bare trigger waiting to be paired
+    // with the click that follows. Merging it would swallow the user's NEXT
+    // click as if it were this dropdown/menu's item, which it is not.
     if (e.action === 'click' && e.element?.expandCollapse
-        && !Number.isInteger(e.element?.comboItemIndex)
+        && !hasItemIdx(e.element)
         && EXPAND_MERGE_CONTROL_TYPES.has(e.element?.controlType)) {
       // Collapse consecutive RE-clicks of the identical trigger before
       // merging with an item (2026-07-17, real FileZilla GUI run — the
@@ -2774,13 +2846,26 @@ function isVolatileMenuItemId(el) {
 // target/triggerTarget drop Name when a trustworthy automationId exists
 // (state-dependent Name protection, 2026-07-14) — but only when that id is
 // actually trustworthy; an hwnd-id is not, so Name is kept as the fallback.
+// 2026-08-04 (TeamViewer WebView2 재생 실측): 웹 콘텐츠의 className은 네이티브
+// 앱의 "Button"/"TComboBoxEx" 같은 의미 있는 타입명이 아니라 렌더된 DOM의
+// class 속성 그대로 — Tailwind 유틸리티 클래스 수십 개가 공백으로 이어진
+// 문자열이다(예: "inline-flex items-center gap-s8 ... hover:bg-button-
+// secondary-neutral-hover active:bg-button-secondary-neutral-pressed ...").
+// resolve_cond()는 이걸 정확히 일치해야 하는 AND 조건으로 쓰므로, 캡처와
+// 재생 사이에 하나라도 다르면(호버/포커스 등 상태 클래스, 클래스 순서,
+// 리렌더 시점 차이) 전체 조건이 매칭 실패한다. 실측: 캡처된 className
+// 그대로 넣은 6개 스텝 전부 "target not found" — Name만으로는(대부분
+// 존재하고 안정적, CLAUDE.md §4 Tier 4 절 참고) 충분한데 className까지
+// AND에 들어가는 바람에 매칭 자체가 막혔다. isRenderCounterId가
+// automationId에 대해 하는 것과 같은 원리로, isWebContent 요소는
+// className을 통째로 버린다.
 function comSafeTarget(el, { dropNameIfStableId = false, forceDropName = false } = {}) {
   el = el || {};
   const stableId = (el.automationId && !isWindowHandleId(el) && !isRenderCounterId(el)
     && !isVolatileMenuItemId(el)) ? el.automationId : '';
   return {
     automationId: stableId,
-    className: el.className || '',
+    className: el.isWebContent ? '' : (el.className || ''),
     name: forceDropName ? '' : ((dropNameIfStableId && stableId) ? '' : (el.name || '')),
   };
 }
@@ -3342,7 +3427,7 @@ function osExpandCollapse(hwnd, target, itemName, itemIndex, itemCount) {
 // 검색을 별도 스텝(별도 프로세스)으로 쪼개면 그 사이 지연 동안 드롭다운이
 // 자동으로 닫혀버림을 실측으로 확인(2026-07-13 재현) — 한 프로세스 실행
 // 안에서 끊김 없이 처리해 그 레이스를 없앤다.
-function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY, ownerTitle, double) {
+function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY, ownerTitle, double, verifyToggle) {
     if (!hwnd) {
         _failures.push('osScopedInvoke:no-hwnd');
         console.warn('[osScopedInvoke] no window hwnd — cannot search without a window handle');
@@ -3369,8 +3454,11 @@ function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY, ownerTit
         // double: 녹화된 동작이 더블클릭이었을 때만. 네이티브 리스트 행에서
         // 단일 클릭은 선택이지 열기가 아니다 (2026-08-04, 7-Zip 컴퓨터→C:).
         const doubleArg = double ? '--double' : '';
+        // verifyToggle (2026-08-04): CheckBox 클릭 전후 ToggleState를 비교해
+        // 실제로 바뀌었는지 검증 — verified_toggle_click 참고.
+        const verifyToggleArg = verifyToggle ? '--verify-toggle' : '';
         const out = execSync(
-            \`python "\${_helperFile('osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${triggerArg} \${relYArg} \${triggerRelYArg} \${ownerArg} \${doubleArg}\`,
+            \`python "\${_helperFile('osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${triggerArg} \${relYArg} \${triggerRelYArg} \${ownerArg} \${doubleArg} \${verifyToggleArg}\`,
             { stdio: 'pipe', timeout: 20000 }
         ).toString().trim();
         if (out) console.log(out);
@@ -3675,7 +3763,7 @@ function osExpandCollapse(hwnd, target, itemName, itemIndex, itemCount) {
 // 모든 최상위 창 순으로 직접 찾아 Invoke하므로 title 충돌 자체가 없다 —
 // 다이얼로그 내부의 개별 클릭들(트리거 병합과 무관하게 각자 cross-window로
 // 캡처됨)도 이 경로로 독립적으로 처리된다.
-function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY, ownerTitle, double) {
+function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY, ownerTitle, double, verifyToggle) {
     if (!hwnd) {
         _failures.push('osScopedInvoke:no-hwnd');
         console.warn('[osScopedInvoke] no window hwnd — cannot search without a window handle');
@@ -3702,8 +3790,11 @@ function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY, ownerTit
         // double: 녹화된 동작이 더블클릭이었을 때만. 네이티브 리스트 행에서
         // 단일 클릭은 선택이지 열기가 아니다 (2026-08-04, 7-Zip 컴퓨터→C:).
         const doubleArg = double ? '--double' : '';
+        // verifyToggle (2026-08-04): CheckBox 클릭 전후 ToggleState를 비교해
+        // 실제로 바뀌었는지 검증 — verified_toggle_click 참고.
+        const verifyToggleArg = verifyToggle ? '--verify-toggle' : '';
         const out = execSync(
-            \`python "\${_helperFile('osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${triggerArg} \${relYArg} \${triggerRelYArg} \${ownerArg} \${doubleArg}\`,
+            \`python "\${_helperFile('osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" \${triggerArg} \${relYArg} \${triggerRelYArg} \${ownerArg} \${doubleArg} \${verifyToggleArg}\`,
             { stdio: 'pipe', timeout: 20000 }
         ).toString().trim();
         if (out) console.log(out);
@@ -4749,7 +4840,26 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       // session, so inserting the switch step ahead of them would be dead
       // weight (see the segBoundary comment above).
       let usesGetWindowSession = false;
-      if (useSession && electronCtx) {
+      if (e.element?.isWebContent) {
+        // 2026-08-04 (TeamViewer "세션 코드" 입력란 실측): 클릭 3개는
+        // COM SendInput으로 실제 동작했는데, 이 타이핑 스텝은 _typeScoped()가
+        // 에러 없이 ok=true를 보고했음에도 입력란이 완전히 비어 있었다 —
+        // WAD의 element/value(내부적으로 ValuePattern.SetValue와 동급)는
+        // React 등 웹 프레임워크가 실제로 듣는 키보드 이벤트를 전혀 발생시키지
+        // 않는다. 클릭 쪽에서 이미 확립한 원칙(§3 No false PASS: 패턴 호출의
+        // "성공"이 실제 앱 상태 변화를 보장하지 않음)과 같은 문제라, 웹 콘텐츠는
+        // UIA 값 설정 시도 자체를 건너뛰고 처음부터 진짜 키보드 입력
+        // (osType, SendInput 기반)으로만 타이핑한다.
+        const activateArgs = (useSession && relTitle)
+          ? `'${escapeStr(relTitle)}', _hwndCache['${escapeStr(relTitle)}']`
+          : `''`;
+        pushMethod(
+`    async type${stepNum}(value) {
+        osActivate(${activateArgs});
+        osType(value);
+    }`
+        );
+      } else if (useSession && electronCtx) {
         // Electron 입력 → UIA 세션 조회(45초 실패 경로) 제거, OS 키 주입
         // (SendKeys — 키보드 폴백, 좌표 실행 아님).
         pushMethod(
@@ -4830,18 +4940,26 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       // (comboItemIndex), 펼친 뒤 그 순서의 항목을 실행한다. 좌표가 아니라
       // 구조적 인덱스이며, comboItemCount가 재생 시점 목록 길이와 다르면
       // 헬퍼가 선택을 거부한다(엉뚱한 값 선택 방지).
+      // 2026-08-04 (HeidiSQL "더 보기" 팝업 메뉴): comboItem*과 완전히 같은
+      // 문제 — 아이콘 전용 메뉴 항목은 이름으로 못 찾는다. agent.py가
+      // menuItemIndex/menuItemCount로 같은 방식(인덱스)을 기록한다.
+      // 한 이벤트에 콤보와 메뉴 인덱스가 동시에 실릴 일은 없으므로 존재하는
+      // 쪽을 그대로 쓴다 — osExpandCollapse.py 쪽도 두 컨트롤 타입을 같은
+      // --item-index 인자 하나로 받아 후보 풀만 늘려 처리한다.
       const comboIdx = Number.isInteger(e.element?.comboItemIndex)
-        ? e.element.comboItemIndex : null;
+        ? e.element.comboItemIndex
+        : (Number.isInteger(e.element?.menuItemIndex) ? e.element.menuItemIndex : null);
       const comboCnt = Number.isInteger(e.element?.comboItemCount)
-        ? e.element.comboItemCount : null;
-      const comboLabel = e.element?.comboItemName || '';
+        ? e.element.comboItemCount
+        : (Number.isInteger(e.element?.menuItemCount) ? e.element.menuItemCount : null);
+      const comboLabel = e.element?.comboItemName || e.element?.menuItemName || '';
       pushMethod(
 `    async click${stepNum}() {
         osExpandCollapse(${hwndArg}, ${JSON.stringify(target)}, ${itemName ? JSON.stringify(itemName) : 'null'}, ${comboIdx === null ? 'null' : comboIdx}, ${comboCnt === null ? 'null' : comboCnt});
     }`
       );
       const stepLabel = comboIdx !== null
-        ? `${stepNum}:select dropdown item #${comboIdx}${comboLabel ? ' ' + escapeStr(comboLabel) : ' (unnamed)'}`
+        ? `${stepNum}:select item #${comboIdx}${comboLabel ? ' ' + escapeStr(comboLabel) : ' (unnamed)'}`
         : `${stepNum}:expandCollapse ${escapeStr(e.element?.name || '')}${itemName ? ' -> ' + escapeStr(itemName) : ''}`;
       pushStep(
 `            await _step('${stepLabel}', () => page.click${stepNum}());`
@@ -4923,9 +5041,16 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       // MORE THAN ONE candidate for the same selector — see pick_by_position.
       const relYArg = Number.isInteger(e.relY) ? e.relY : 'null';
       const triggerRelYArg = Number.isInteger(e.crossWindowTriggerRelY) ? e.crossWindowTriggerRelY : 'null';
+      // 2026-08-04: 이 이벤트 자신이 체크박스면(팝업/다이얼로그 안의
+      // 체크박스 등) 여기서도 verified_toggle_click 검증을 태운다 — 이
+      // cross-window 분기가 아래 CheckBox 전용 분기보다 먼저 걸리므로
+      // 여기서 안 하면 검증이 통째로 스킵된다. 체크박스가 아닌 절대다수의
+      // 기존 호출은 인자 개수를 그대로 유지한다(불필요한 출력 변경 방지).
+      const isCheckbox = e.element?.controlType === 'CheckBox';
+      const verifyToggleTail = isCheckbox ? ', false, true' : '';
       pushMethod(
 `    async click${stepNum}() {
-        osScopedInvoke(${hwndArg}, ${JSON.stringify(target)}, ${triggerTarget ? JSON.stringify(triggerTarget) : 'null'}, ${relYArg}, ${triggerRelYArg}, ${JSON.stringify(e.element?.windowTitle || '')});
+        osScopedInvoke(${hwndArg}, ${JSON.stringify(target)}, ${triggerTarget ? JSON.stringify(triggerTarget) : 'null'}, ${relYArg}, ${triggerRelYArg}, ${JSON.stringify(e.element?.windowTitle || '')}${verifyToggleTail});
     }`
       );
       pushStep(
@@ -4967,6 +5092,27 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       pushStep(
 `            await _step('${stepNum}:${e.action} ${escapeStr(e.element?.name || '')}', () => page.click${stepNum}());`
       );
+    } else if (e.action === 'click' && e.element?.controlType === 'CheckBox') {
+      // 2026-08-04: 체크박스 값-검증 잠재적 구멍 선제 조치 — WAD의 element/click
+      // (아래 else 분기의 일반 XPath 경로)은 클릭이 에러 없이 끝나기만 하면
+      // 성공으로 기록하고, 실제로 체크 상태가 바뀌었는지는 보지 않는다.
+      // TeamViewer WebView2 토글에서 실측된 것과 같은 종류의 거짓 PASS가
+      // PuTTY/HeidiSQL의 일반 TCheckBox/Button 스타일 체크박스에도 구조적으로
+      // 남아 있다(2026-08-04 점검 시점엔 실제 재생 실패로 드러난 적은 없지만,
+      // 다음에 체크박스가 있는 녹화를 재생하면 언제든 조용히 터질 수 있는
+      // 잠재적 구멍이라 선제적으로 막는다). COM 경로(osScopedInvoke)로 돌려
+      // verified_toggle_click()이 클릭 전후 ToggleState를 비교하게 한다 —
+      // 시각적 클릭(send_input_click, §6)은 그대로 유지하고 검증만 추가.
+      const target = comSafeTarget(e.element);
+      const hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
+      pushMethod(
+`    async click${stepNum}() {
+        osScopedInvoke(${hwndArg}, ${JSON.stringify(target)}, null, null, null, ${JSON.stringify(e.element?.windowTitle || '')}, false, true);
+    }`
+      );
+      pushStep(
+`            await _step('${stepNum}:click ${escapeStr(e.element?.name || '')}', () => page.click${stepNum}());`
+      );
     } else if (e.action === 'click'
         && (isComboDropDownArrow(e.element) || isStateDependentValueDisplay(e.element))) {
       // 2026-07-29 (HeidiSQL): 같은 창 안에 automationId="DropDown"을 공유하는
@@ -4996,6 +5142,32 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       );
       pushStep(
 `            await _step('${stepNum}:click ${escapeStr(e.element?.name || '')}', () => page.click${stepNum}());`
+      );
+    } else if ((e.action === 'click' || e.action === 'doubleClick') && e.element?.isWebContent) {
+      // 2026-08-04 (TeamViewer WebView2): WAD가 이 창에 scoped session을
+      // 만드는 데는 성공해도(launch/switch 로그에 "scoped session ... ready"),
+      // 그 세션이 쓰는 .NET 관리형 UIA 클라이언트는 WebView2/Chromium이 그리는
+      // DOM 요소를 아예 보지 못한다 — 라이브 재생 실측: 클릭마다 예외 없이
+      // `[getCenter-diag] UIA-exposed rows (0 total)`, `[COM-SendInput]` 로그
+      // 자체가 한 줄도 없어 매 스텝이 WAD의 element/click(REST) 경로로 갔고
+      // 조용히 no-op이었다("비밀번호를 복사하세요"/"세션 참가" 등 핵심 동작이
+      // 전부 무반응). agent.py의 캡처가 같은 창에서 61개 요소를 정상적으로 보는
+      // 것과 같은 comtypes COM 스택(osScopedInvoke)으로 재생도 우회한다 —
+      // "WAD가 창에 붙을 수 있다"가 "그 안의 요소도 찾을 수 있다"를 보장하지
+      // 않는다는, 이 프로젝트가 이미 겪은 "UIA 스택 3개가 서로 다른 트리를
+      // 본다"는 문제의 재발. isWebContent가 있는 요소의 automationId는
+      // comSafeTarget이 이미 렌더-카운터 id로 걸러내므로(isRenderCounterId,
+      // Task 4) Name/ClassName 위주로 안정적으로 좁혀진다.
+      const target = comSafeTarget(e.element);
+      const hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
+      const isDbl = e.action === 'doubleClick';
+      pushMethod(
+`    async click${stepNum}() {
+        osScopedInvoke(${hwndArg}, ${JSON.stringify(target)}${isDbl ? ', null, null, null, null, true' : ''});
+    }`
+      );
+      pushStep(
+`            await _step('${stepNum}:${e.action} ${escapeStr(e.element?.name || '')}', () => page.click${stepNum}());`
       );
     } else {
       // Click / DoubleClick — XPath-only (2026-07-10: 좌표 재생 전면 금지).

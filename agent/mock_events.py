@@ -561,6 +561,32 @@ def step_wdio_generate_web_content():
             "a required framework, which is why the rule is scoped to "
             "element.isWebContent",
         )
+        # 2026-08-04 (TeamViewer WebView2 replay routing fix): a live replay
+        # of TeamViewer showed every single click on a web-content button
+        # ("비밀번호를 복사하세요", "세션 참가", ...) silently no-op through
+        # WAD's element/click — `[getCenter-diag] UIA-exposed rows (0 total)`
+        # on every step, because WAD attaching to the HOST window (it does)
+        # does not mean its managed UIA client can see DOM-hosted elements
+        # (it can't). isWebContent elements must route through the same COM
+        # stack (osScopedInvoke) agent.py's capture already uses to see them.
+        check(
+            f"  {fname} routes a web-content click through osScopedInvoke (COM), not WAD element/click",
+            'osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"세션 참가"})' in content,
+            "WAD successfully creates a scoped session for the WebView2 host "
+            "window, but its managed UIA client reports zero exposed rows for "
+            "everything inside it — every click through element/click is a "
+            "silent no-op (measured live, TeamViewer 2026-08-04: 비밀번호를 "
+            "복사하세요/세션 참가 등 핵심 동작이 전부 무반응)",
+        )
+        check(
+            f"  {fname} does NOT route a native (non-web-content) click through osScopedInvoke",
+            "_clickBySid(_appSid, null, '~button1')" in content
+            or '_clickBySid(_appSid, null, \'//Button[@ClassName="Button" and @Name="Save"]\')' in content,
+            "native controls in the same app window (e.g. TeamViewer's "
+            "native '빠른 연결 허용' dialog) are reachable via WAD just fine — "
+            "forcing them through COM too would be an unnecessary, unproven "
+            "widening of the WAD-primary/COM-narrow-exception boundary",
+        )
 
 
 # doubleClick-on-a-native-list-row scenario (2026-08-04, 7-Zip 재생 실패 2회
@@ -2109,12 +2135,29 @@ def step_wdio_generate_native():
         content = f.get("content", "")
         if "ById" not in fname:
             continue
+        # 2026-08-04: a CheckBox click now routes through osScopedInvoke's
+        # verified_toggle_click (checkbox value-verification gap fix) instead
+        # of a bare '~1049' accessibility-id click() — the numeric id itself
+        # must still survive (not be rejected as a volatile slot index), just
+        # embedded in the JSON selector this call carries instead of a
+        # standalone '~id' string.
         check(
             f"  {fname} trusts a numeric AutomationId on a Button/CheckBox",
-            "'~1049'" in content,
+            '"automationId":"1049"' in content and 'osScopedInvoke(' in content,
             "stable Win32 resource ID (1049) was rejected as if it were a "
             "ListView slot index — breaks AutomationId-based XPath on "
             "native dialogs (PuTTY 2026-07-13)",
+        )
+        check(
+            f"  {fname} routes the CheckBox click through verified_toggle_click (value-verification gap fix)",
+            'osScopedInvoke(_appHwnd, {"automationId":"1049","className":"Button",'
+            '"name":"System menu appears on ALT-Space"}, null, null, null, '
+            '"Native Dialog", false, true);' in content,
+            "a plain WAD element/click() reports success whenever the click "
+            "itself doesn't error, without checking whether the checkbox's "
+            "ToggleState actually changed — the same false-PASS risk measured "
+            "on TeamViewer's WebView2 toggles (2026-07-31) is structurally "
+            "present on every native CheckBox too (2026-08-04)",
         )
         check(
             f"  {fname} still rejects a numeric AutomationId on a TreeItem",
@@ -2144,11 +2187,16 @@ def step_wdio_generate_native():
             "if the bare accessibility-id selector survives anywhere, that "
             "step still resolves to the wrong field at replay time",
         )
+        # 2026-08-04: this id (1049) is a CheckBox, which no longer emits a
+        # bare '~id' selector at all (see the verified_toggle_click checks
+        # above) — the still-relevant regression to guard is that the reused-id
+        # AND-condition machinery (Host:/Port: 5999 above) doesn't ALSO fire on
+        # this unrelated, non-reused id and mangle its selector.
         check(
-            f"  {fname} still emits the bare '~1049' for a NON-reused numeric id (regression)",
-            "'~1049'" in content,
+            f"  {fname} does not AND a Name onto the NON-reused id 1049 (regression)",
+            '"automationId":"1049","className":"Button","name":"System menu appears on ALT-Space"' in content,
             "the reuse-detection must not over-trigger on a numeric id that "
-            "only appears once — that would needlessly lengthen a selector "
+            "only appears once — that would needlessly complicate a selector "
             "that was already unambiguous",
         )
         # ExpandCollapsePattern replay (2026-07-13, poc/diag_expandcollapse.py):
