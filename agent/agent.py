@@ -1900,6 +1900,12 @@ class Recorder:
         self.proc = None
         self.target_hwnds = set()    # top-level window handles owned by the target
         self._popup_hwnds = set()    # windows discovered by watcher (always treated as popups)
+        # 2026-08-05: watcher가 새로 감지한 web-host(WebView2/Chromium) 창 중
+        # 아직 접근성 트리 settle을 못 받은 것들. _watch_windows()는 COM 없이
+        # win32gui만 쓰는 별도 스레드라 여기서 settled_subtree_count()를 직접
+        # 부를 수 없다(§ "COM은 워커 스레드 하나에만") — 대신 여기 표시만 해두고
+        # 워커 스레드의 _inspect()가 다음 클릭을 처리하기 전에 소비한다.
+        self._pending_settle = set()
         # hwnd -> 그 창을 처음 관측했을 때의 제목. 앱이 녹화 도중 창 이름을
         # 바꾸면(HeidiSQL 세션 관리자는 '신규'를 누르는 순간 ": Unnamed-N"이
         # 붙는다) 이후 모든 이벤트의 windowTitle이 재생 때 재현 불가능한
@@ -1955,6 +1961,7 @@ class Recorder:
         self.event_count = 0
         self.target_hwnds = set()
         self._popup_hwnds = set()
+        self._pending_settle = set()
         self._first_titles = {}
         self._probed_skip = False
         self._last_emitted_hwnd_hex = ""
@@ -2357,6 +2364,17 @@ class Recorder:
                     if self._owned_by_app(pid_of_hwnd(hwnd)):
                         self.target_hwnds.add(hwnd)
                         self._popup_hwnds.add(hwnd)
+                        # 2026-08-05 (TeamViewer "세션 코드가 만료되었습니다"
+                        # 대화상자 실측): 메인 창이 뜰 때는 _settle_web_hosts()가
+                        # 접근성 트리가 찰 때까지 기다려주지만(2026-08-03 수정,
+                        # CLAUDE.md §4), 녹화 도중 watcher가 감지하는 새 창(이
+                        # 대화상자처럼)은 그 대상이 아니었다. 실측: 이 창이 뜨고
+                        # 0.02초 만에 다음 클릭이 들어와 접근성 트리가 하나도
+                        # 안 찬 상태에서 히트테스트가 통째로 Window 하나만
+                        # 잡았다(원래 메인 창 버그와 동일한 증상). 워커 스레드가
+                        # 소비할 수 있게 표시만 해둔다.
+                        if is_web_host(hwnd):
+                            self._pending_settle.add(hwnd)
                         try:
                             title = win32gui.GetWindowText(hwnd)
                             self._remember_title(hwnd, title)
@@ -2575,6 +2593,25 @@ class Recorder:
 
     def _inspect(self, ins, x, y):
         try:
+            # 2026-08-05 (TeamViewer "세션 코드가 만료되었습니다" 대화상자
+            # 실측): watcher가 감지한 새 web-host 창은 여기서 소비한다 —
+            # _watch_windows()는 COM이 없는 별도 스레드라 직접 못 기다린다
+            # (표시만 해둠, 위 __init__/_pending_settle 주석 참고). 이 다음
+            # 클릭이 그 창을 히트테스트하기 전에 접근성 트리가 찰 때까지
+            # 기다려, 메인 창이 뜰 때 이미 한 번 고친 것과 같은 레이스
+            # (Group/AutomationId="root"로 통째로 잡히는 문제, CLAUDE.md §4)
+            # 가 나중에 뜨는 창에서 재발하지 않게 한다.
+            if self._pending_settle:
+                pending, self._pending_settle = self._pending_settle, set()
+                for h in pending:
+                    try:
+                        root = ins.from_handle_safe(h)
+                        if root:
+                            n = ins.settled_subtree_count(root)
+                            log(f"[inspect] settled new web-host hwnd={h} "
+                                f"at {n} elements before hit-testing")
+                    except Exception:
+                        pass
             # An item-PICKING click (as opposed to the click that opens the
             # list) closes the list before this runs, so its own hit test is
             # never going to succeed live — the entire reason

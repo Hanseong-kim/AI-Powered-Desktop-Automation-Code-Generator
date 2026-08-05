@@ -1170,8 +1170,8 @@ async function _step(label, fn) {
 
 // Windows in this recording:
 //   [W1] "FileZilla" (main)
-//   [W2] "방화벽 및 라우터 설정 마법사" (opened during recording)
-//   [W3] "사이트 관리자" (opened during recording)
+//   [W2] "사이트 관리자" (opened during recording)
+//   [W3] "방화벽 및 라우터 설정 마법사" (opened during recording)
 
 class FileZillaPageById {
 
@@ -1179,123 +1179,76 @@ class FileZillaPageById {
     // [W1] FileZilla (main window)
     // ════════════════════════════════════════════════════════════
     async click1() {
-        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"편집(E)"}, null, 0, 3);
-    }
-
-
-    // ════════════════════════════════════════════════════════════
-    // [W2] 방화벽 및 라우터 설정 마법사 (new window)
-    // ════════════════════════════════════════════════════════════
-    async click2() {
-        await _clickScoped('방화벽 및 라우터 설정 마법사', '~5106', true);
-    }
-
-    async click3() {
-        await _clickScoped('방화벽 및 라우터 설정 마법사', '~5106');
-    }
-
-    async click4() {
-        await _clickScoped('방화벽 및 라우터 설정 마법사', '//RadioButton[@AutomationId="5999" and @Name="다음의 IP 주소 사용:"]');
-    }
-
-    async click5() {
-        await _clickScoped('방화벽 및 라우터 설정 마법사', '//RadioButton[@AutomationId="5999" and @Name="다음의 URL로부터 외부 IP 주소 가져오기:"]');
-    }
-
-    async click6() {
-        await _clickScoped('방화벽 및 라우터 설정 마법사', '//Edit[@AutomationId="5999" and @Name="이 기능은 라우터에 연동되지 않은 경우만 작동합니다. 그렇지 않으면 사용자의 내부 주소밖에\n알아내지 못합니다."]');
-    }
-
-    async type7(value) {
-        const ok = await _typeScopedOrCom('방화벽 및 라우터 설정 마법사', '//Edit[@AutomationId="5999" and @Name="이 기능은 라우터에 연동되지 않은 경우만 작동합니다. 그렇지 않으면 사용자의 내부 주소밖에\n알아내지 못합니다."]', value);
-        if (!ok) {
-            console.warn('[type7] scoped sendKeys failed — falling back to OS-level typing');
-            osActivate('방화벽 및 라우터 설정 마법사', _hwndCache['방화벽 및 라우터 설정 마법사']);
-            osType(value);
-        }
-    }
-
-    async click8() {
-        await _clickScoped('방화벽 및 라우터 설정 마법사', '~-31782');
-    }
-
-    async click9() {
-        await _clickScoped('방화벽 및 라우터 설정 마법사', '~5107', true);
-    }
-
-    async click10() {
-        await _clickScoped('방화벽 및 라우터 설정 마법사', '~5107');
-    }
-
-    async click11() {
-        await _clickScoped('방화벽 및 라우터 설정 마법사', '~5101');
-    }
-
-    async click12() {
         osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"파일(F)"}, null, 0, 8);
     }
 
 
     // ════════════════════════════════════════════════════════════
-    // [W3] 사이트 관리자 (new window)
+    // [W2] 사이트 관리자 (new window)
     // ════════════════════════════════════════════════════════════
-    async click13() {
+    async click2() {
         await _clickScoped('사이트 관리자', '~-31982');
     }
 
-    async type14(value) {
+    async type3(value) {
         const ok = await _typeScopedOrCom('사이트 관리자', '~1', value);
         if (!ok) {
-            console.warn('[type14] scoped sendKeys failed — falling back to OS-level typing');
+            console.warn('[type3] scoped sendKeys failed — falling back to OS-level typing');
             osActivate('사이트 관리자', _hwndCache['사이트 관리자']);
             osType(value);
         }
     }
 
-    async click15() {
+    async click4() {
+        await _clickScoped('사이트 관리자', '~-31979');
+    }
+
+    async click5() {
+        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"고급"}, null, 55, null, "사이트 관리자");
+    }
+
+    async click6() {
         await _clickScoped('사이트 관리자', '~-31983');
     }
 
-    async type16(value) {
-        const ok = await _typeScopedOrCom('사이트 관리자', '~1', value);
-        if (!ok) {
-            console.warn('[type16] scoped sendKeys failed — falling back to OS-level typing');
-            osActivate('사이트 관리자', _hwndCache['사이트 관리자']);
-            osType(value);
-        }
+    async click7() {
+        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"고급"}, null, 65, null, "사이트 관리자");
     }
 
-    async click17() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"고급"}, null, 66, null, "사이트 관리자");
+    async click8() {
+        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"전송 설정"}, null, 64, null, "사이트 관리자");
     }
 
-    async click18() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"전송 설정"}, null, 66, null, "사이트 관리자");
+    async click9() {
+        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"문자셋"}, null, 59, null, "사이트 관리자");
     }
 
-    async click19() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"문자셋"}, null, 61, null, "사이트 관리자");
+    async click10() {
+        await _clickScoped('사이트 관리자', '//Button[@AutomationId="5101" and @Name="취소"]');
     }
 
-    async click20() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"일반"}, null, 63, null, "사이트 관리자");
+    async click11() {
+        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"보기(V)"}, null, null, null);
     }
 
-    async click21() {
-        await _clickScoped('사이트 관리자', '//Edit[@AutomationId="5999" and @Name="사용자(U):"]');
+    async click13() {
+        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"편집(E)"}, null, 0, 3);
     }
 
-    async type22(value) {
-        const ok = await _typeScopedOrCom('사이트 관리자', '//Edit[@AutomationId="5999" and @Name="사용자(U):"]', value);
-        if (!ok) {
-            console.warn('[type22] scoped sendKeys failed — falling back to OS-level typing');
-            osActivate('사이트 관리자', _hwndCache['사이트 관리자']);
-            osType(value);
-        }
+
+    // ════════════════════════════════════════════════════════════
+    // [W3] 방화벽 및 라우터 설정 마법사 (new window)
+    // ════════════════════════════════════════════════════════════
+    async click14() {
+        await _clickScoped('방화벽 및 라우터 설정 마법사', '~5106', true);
     }
 
-    async click23() {
-        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"5999","className":"ComboBox","name":"로그온 유형(L):"}, "취소", null, null);
+    async click15() {
+        await _clickScoped('방화벽 및 라우터 설정 마법사', '~5106', true);
+    }
+
+    async click16() {
+        await _clickScoped('방화벽 및 라우터 설정 마법사', '//Button[@AutomationId="5101" and @Name="Cancel"]');
     }
 }
 
@@ -1313,7 +1266,7 @@ async function run() {
         _warmupPowerShell();
 
     _mainTitleFrag = "FileZilla";
-    _dialogRects = {"FileZilla":{"left":563,"top":62,"width":1200,"height":947},"방화벽 및 라우터 설정 마법사":{"left":913,"top":379,"width":715,"height":522},"사이트 관리자":{"left":572,"top":216,"width":1182,"height":639}};
+    _dialogRects = {"FileZilla":{"left":563,"top":62,"width":1200,"height":947},"사이트 관리자":{"left":572,"top":216,"width":1182,"height":639},"방화벽 및 라우터 설정 마법사":{"left":913,"top":379,"width":715,"height":522}};
     await ensureAppium();
     _rootSid = await _createSession('Root');
     console.log(`[session] Root session ${_rootSid} ready`);
@@ -1324,39 +1277,33 @@ async function run() {
     // ════════════════════════════════════════════════════════════
     // [W1] FileZilla (main window)
     // ════════════════════════════════════════════════════════════
-            await _step('1:select item #0 네트워크 구성 마법사(N)...', () => page.click1());
+            await _step('1:select item #0 사이트 관리자(S)...\tCtrl+S', () => page.click1());
 
     // ════════════════════════════════════════════════════════════
-    // [W2] 방화벽 및 라우터 설정 마법사 (new window)
-    // ════════════════════════════════════════════════════════════
-            await _step('switch to window: 방화벽 및 라우터 설정 마법사', async () => { await _switchWindow('방화벽 및 라우터 설정 마법사'); });
-            await _step('2:doubleClick 다음(N) >', () => page.click2());
-            await _step('3:click 다음(N) >', () => page.click3());
-            await _step('4:click 다음의 IP 주소 사용:', () => page.click4());
-            await _step('5:click 다음의 URL로부터 외부 IP 주소 가져오기:', () => page.click5());
-            await _step('6:click 이 기능은 라우터에 연동되지 않은 경우만 작동합니다. 그렇지 않으면 사용자의 내부 주소밖에\n알아내지 못합니다.', () => page.click6());
-            await _step('7:type asdf', () => page.type7('asdf'));
-            await _step('8:click panel', () => page.click8());
-            await _step('9:doubleClick < 이전(B)', () => page.click9());
-            await _step('10:click < 이전(B)', () => page.click10());
-            await _step('11:click Cancel', () => page.click11());
-            await _step('12:select item #0 사이트 관리자(S)...\tCtrl+S', () => page.click12());
-
-    // ════════════════════════════════════════════════════════════
-    // [W3] 사이트 관리자 (new window)
+    // [W2] 사이트 관리자 (new window)
     // ════════════════════════════════════════════════════════════
             await _step('switch to window: 사이트 관리자', async () => { await _switchWindow('사이트 관리자'); });
-            await _step('13:click 새 폴더(F)', () => page.click13());
-            await _step('14:type asdf', () => page.type14('asdf'));
-            await _step('15:click 새 사이트(N)', () => page.click15());
-            await _step('16:type qwer', () => page.type16('qwer'));
-            await _step('17:click 고급 (cross-window)', () => page.click17());
-            await _step('18:click 전송 설정 (cross-window)', () => page.click18());
-            await _step('19:click 문자셋 (cross-window)', () => page.click19());
-            await _step('20:click 일반 (cross-window)', () => page.click20());
-            await _step('21:click 사용자(U):', () => page.click21());
-            await _step('22:type asdf', () => page.type22('asdf'));
-            await _step('23:expandCollapse 로그온 유형(L): -> 취소', () => page.click23());
+            await _step('2:click 새 폴더(F)', () => page.click2());
+            await _step('3:type asdf', () => page.type3('asdf'));
+            await _step('4:click 항목 선택(S):', () => page.click4());
+            await _step('5:click 고급 (cross-window)', () => page.click5());
+            await _step('6:click 새 사이트(N)', () => page.click6());
+            await _step('7:click 고급 (cross-window)', () => page.click7());
+            await _step('8:click 전송 설정 (cross-window)', () => page.click8());
+            await _step('9:click 문자셋 (cross-window)', () => page.click9());
+            await _step('10:click 취소', () => page.click10());
+            await _step('11:expandCollapse 보기(V)', () => page.click11());
+            // [STEP 12] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
+            _failures.push('12:click:no-selector');
+            await _step('13:select item #0 네트워크 구성 마법사(N)...', () => page.click13());
+
+    // ════════════════════════════════════════════════════════════
+    // [W3] 방화벽 및 라우터 설정 마법사 (new window)
+    // ════════════════════════════════════════════════════════════
+            await _step('switch to window: 방화벽 및 라우터 설정 마법사', async () => { await _switchWindow('방화벽 및 라우터 설정 마법사'); });
+            await _step('14:doubleClick 다음(N) >', () => page.click14());
+            await _step('15:doubleClick 다음(N) >', () => page.click15());
+            await _step('16:click Cancel', () => page.click16());
     } finally {
 
         for (const { sid } of Object.values(_sessionIds)) {
