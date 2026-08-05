@@ -31,7 +31,7 @@ required** (see §3 below for why this matters):
 | FileZilla | native Win32, multi-window | folder tree nav, menu bar navigation via ExpandCollapsePattern, Site Manager dialog (separate HWND session) |
 | 7-Zip | native Win32 | file list navigation, double-click into folders |
 | HeidiSQL | Delphi/VCL, multi-window | owner-drawn ComboBoxEx item selection by position (network-type combo), cross-window session-manager ↔ preferences flow. The session-list tree (`TVirtualStringTree`) exposes zero UIA children and cannot be automated — see **Known Limitations**. The "더 보기" (More) overflow menu's items are captured by position but replay doesn't select them yet (parked, see below) |
-| TeamViewer | WebView2 (Chromium), single window | first confirmed Electron/Chromium-class target — ID/password copy buttons, session-code input, "Join session" all replay end to end. **Requires the agent, Express bridge's spawned processes, and the generated test itself to all run from an elevated (Administrator) terminal** — TeamViewer runs elevated, and Windows' UIPI blocks a non-elevated automation client from seeing anything past the window shell (see **WebView2 / Electron apps** below) |
+| TeamViewer | WebView2 (Chromium), single window | first confirmed Electron/Chromium-class target — ID/password copy buttons, session-code input, "Join session", the two settings checkboxes ("Windows와 함께 TeamViewer 시작" / "이 장치에 Easy Access 권한 부여" — click the **text label**, not the checkbox glyph itself, which sits in an unnamed wrapper), and the native "빠른 연결 허용" dialog (email/password/cancel) all replay end to end (`[PASS] all steps completed`). **Requires the agent, Express bridge's spawned processes, and the generated test itself to all run from an elevated (Administrator) terminal** — TeamViewer runs elevated, and Windows' UIPI blocks a non-elevated automation client from seeing anything past the window shell (see **WebView2 / Electron apps** below). Running the generated test from a non-elevated terminal is the single most common cause of every step failing at once. |
 
 Other presets in the UI (Paint, Registry Editor, IDM, VSCode, GitHub Desktop,
 Free Download Manager, Claude Desktop) are wired up but not currently
@@ -39,6 +39,12 @@ GUI-verified end to end. VSCode/GitHub Desktop/Claude Desktop are the same
 WebView2/Electron class as TeamViewer and are expected to work the same way,
 but **only TeamViewer has actually been validated** — see **WebView2 /
 Electron apps** below before assuming another Electron host "just works".
+
+Two more presets (`PowerShell ISE`, `Everything`) were added 2026-08-05 to check
+framework coverage this project hadn't tested before — WPF and WinForms,
+respectively (the other two named target frameworks besides Win32/MFC).
+`poc/probe_app_automatability.py` reports Tier 1 (supported) for both; neither
+has a full record→replay GUI verification yet.
 
 ## Architecture
 

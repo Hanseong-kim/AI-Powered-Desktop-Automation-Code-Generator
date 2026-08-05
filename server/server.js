@@ -5143,7 +5143,18 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       pushStep(
 `            await _step('${stepNum}:click ${escapeStr(e.element?.name || '')}', () => page.click${stepNum}());`
       );
-    } else if ((e.action === 'click' || e.action === 'doubleClick') && e.element?.isWebContent) {
+    } else if ((e.action === 'click' || e.action === 'doubleClick') && e.element?.isWebContent
+        && (e.element?.name || e.element?.automationId)) {
+      // (e.element?.name || e.element?.automationId) 가드 (2026-08-05): 이
+      // 요소가 name/automationId 둘 다 없으면(예: 컨테이너 hit-test 실패로
+      // 완전히 빈 셀렉터가 캡처된 경우 — 실측: TeamViewer "빠른 연결 허용"을
+      // 여는 클릭이 창의 94%를 덮는 컨테이너로 잡혀 아무 자식도 못 찾은
+      // 기존부터 있던 캡처 갭, CLAUDE.md §4 기록 참고) osScopedInvoke를 호출해
+      // 봐야 "selector has no usable fields"로 실패할 뿐이다. 이 가드가 없으면
+      // 그 뻔한 실패를 위해 불필요한 서브프로세스를 띄우고, 아래 최종 else의
+      // 깔끔한 "n:click:no-selector" 명시적 FAIL 대신 지저분한 일반
+      // 'osScopedInvoke' 실패로 잘못 분류된다 — 결과(FAIL)는 같지만 원인
+      // 추적이 어려워진다.
       // 2026-08-04 (TeamViewer WebView2): WAD가 이 창에 scoped session을
       // 만드는 데는 성공해도(launch/switch 로그에 "scoped session ... ready"),
       // 그 세션이 쓰는 .NET 관리형 UIA 클라이언트는 WebView2/Chromium이 그리는

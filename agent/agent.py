@@ -308,6 +308,7 @@ class UIAInspector:
                              f"rect={raw.get('rect')!r} hwnd={raw.get('hwnd')!r}")
         except Exception:
             trace["raw"] = "ERR"
+        elem_was_deepened = False
         if elem is not None:
             try:
                 needs_deepen = not elem.CurrentAutomationId
@@ -328,6 +329,30 @@ class UIAInspector:
                 if needs_deepen:
                     deeper = None
                     root_hwnd = self.resolve_root_hwnd(elem)
+                    if not root_hwnd:
+                        # 2026-08-05 (TeamViewer "빠른 연결 허용"/"Easy Access"
+                        # 트리거 실측, 2차 수정 — 1차는 self.target_hwnds를
+                        # 참조하는 버그였다: 그 속성은 Recorder 클래스에 있고
+                        # UIAInspector에는 없어 AttributeError가 조용히 삼켜져
+                        # root_hwnd/root_ok가 트레이스에 아예 안 찍혔다):
+                        # 깊은 Chromium/React DOM은 resolve_root_hwnd()의
+                        # 15-hop 상한을 통째로 넘을 수 있다 — root_hwnd=0이 되어
+                        # smallest_element_at()가 아예 시도되지도 못하고
+                        # depth-capped _deepen()로 떨어졌고, _deepen()도 못
+                        # 찾아 결국 nameless raw 요소가 그대로 남아
+                        # _nearest_named_ancestor()가 창의 94%를 덮는 훨씬
+                        # 못 쓸 조상으로 대체해버렸다. resolve_root_hwnd() 자신을
+                        # 고치면 안 된다 — 그 0 반환값은 _inspect()의 자기-오염
+                        # 방지 가드(2026-08-04 주석 참고)에서 그대로 신뢰된다.
+                        # 같은 클래스의 _search_roots_for()가 이미 똑같은
+                        # 상황에서 쓰는 검증된 폴백(foreground window, GA_ROOT로
+                        # 정규화)을 그대로 재사용한다 — smallest_element_at()가
+                        # 찾은 결과는 어차피 _inspect()의 별도 tracked-window
+                        # 검사를 다시 통과해야 하므로, 여기서 잘못된 창을
+                        # 골라도 그 검사가 걸러낸다.
+                        fg = ctypes.windll.user32.GetForegroundWindow()
+                        if fg:
+                            root_hwnd = ctypes.windll.user32.GetAncestor(fg, GA_ROOT) or fg
                     root = self.from_handle_safe(root_hwnd)
                     trace["root_hwnd"] = root_hwnd
                     trace["root_ok"] = bool(root)
@@ -348,6 +373,7 @@ class UIAInspector:
                     # (TeamViewer, 2026-08-03).
                     if deeper is not None:
                         elem = deeper
+                        elem_was_deepened = True
                     else:
                         trace["picked_by"] = "raw-kept (deepen found nothing)"
                 else:
@@ -382,7 +408,22 @@ class UIAInspector:
                 if row is not None:
                     trace["picked_by"] = "row-ancestor"
                     return row
-                if not aid and not name:
+                # 2026-08-05 (TeamViewer "빠른 연결 허용"/"Easy Access" 트리거
+                # 실측): elem_was_deepened가 참이면 elem은 이미
+                # smallest_element_at()/_deepen()이 명시적으로 골라낸, 창을
+                # 덮지 않는 작고 위치가 정확한 요소다. 그런데 바로 아래
+                # _nearest_named_ancestor()가 "이름이 없다"는 이유만으로 그
+                # 결과를 다시 위로 4단계까지 올려버려, 정확히 그 큰 컨테이너
+                # 문제를 피하려고 만든 결과를 도로 큰 컨테이너로 바꿔치기했다
+                # (실측: 이름 없는 위치-정확 요소 대신 창의 94%를 덮는 root
+                # 컨테이너가 채택됨). 이 조상-탐색은 딥닝이 아예 실패해서
+                # elem이 여전히 최초 ElementFromPoint의 raw 히트인 경우에만
+                # 의미가 있다(원래 의도: HeidiSQL SplitButton의 장식용 화살표
+                # 글리프처럼, 진짜 컨트롤은 한 단계 위에 있는 raw-hit 케이스,
+                # 2026-07-29). 딥닝이 성공한 결과에는 적용하지 않는다 —
+                # 이름이 없어도 anchor_path 메커니즘이 그 작고 정확한 위치를
+                # 그대로 살릴 수 있다.
+                if not aid and not name and not elem_was_deepened:
                     named = self._nearest_named_ancestor(elem)
                     if named is not None:
                         trace["picked_by"] = "named-ancestor"
@@ -2500,6 +2541,22 @@ class Recorder:
             # emit a selector for a control the recording was never tracking.
             if not light_dismiss and elem is not None:
                 elem_hwnd = ins.resolve_root_hwnd(elem)
+                # 2026-08-05 (TeamViewer 체크박스/라벨 실측): resolve_root_hwnd()는
+                # elem 자신의 hwnd=0인 WebView2 콘텐츠에서 항상 0을 반환하므로,
+                # 이 요소가 진짜 추적 중인 창에 속해도 매번 "추적 안 됨"으로
+                # 떨어져 light_dismiss 복구(element_under_overlay, 아래)로
+                # 넘어간다 — element_at()이 이미 성공적으로 찾아낸(스몰리스트,
+                # 2026-08-05 수정 참고) 결과를 버리고 다른 방식으로 다시
+                # 검색하는 셈인데, 이 재검색이 실패하는 경우가 있다(실측:
+                # "이 장치에 Easy Access 권한 부여" 체크박스). element_at()이
+                # 이 요소를 찾기 위해 실제로 검색한 창(trace의 root_hwnd)은
+                # 이미 그 시점에 resolve_root_hwnd() 또는 GetForegroundWindow()
+                # 폴백을 거쳐 검증된 값이므로, elem_hwnd가 0일 때 그 값을
+                # 대신 쓴다 — 이 도구 자신의 Chrome 창이 오염원이었다면 그
+                # root_hwnd도 마찬가지로 그 창을 가리켰을 것이므로(같은 신뢰
+                # 경계), 자기 오염 방지 효과는 그대로 유지된다.
+                if not elem_hwnd:
+                    elem_hwnd = ins._last_trace.get("root_hwnd") or 0
                 if (elem_hwnd not in self.target_hwnds
                         and elem_hwnd not in self._popup_hwnds):
                     # elem_hwnd == 0 means resolve_root_hwnd() gave up after
