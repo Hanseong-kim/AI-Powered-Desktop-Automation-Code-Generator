@@ -953,6 +953,56 @@ def step_wdio_generate_volatile_menuitem_id():
         )
 
 
+# Post-navigation windowTitle on a position-resolved menu item (2026-08-05,
+# FileZilla 파일(F) -> 사이트 관리자(S)...). agent.py resolves a menu pick into
+# ONE event carrying menuItemIndex/menuItemCount, and codegen's
+# COMBO_OPEN_ACTIONS block drops the preceding trigger click as redundant.
+# But the item click's own windowTitle is captured by the worker thread AFTER
+# the item has already opened its dialog, so the hit-test reports the NEW
+# window's title ("사이트 관리자") even though the 파일 menu itself lives in the
+# main "FileZilla" window — the same post-navigation race dedupeDoubleClicks
+# already guards against by trusting only the earliest constituent click.
+#
+# Dropping the trigger threw away the only event that still had the correct
+# title, so the surviving merged event became filtered[0] and its corrupted
+# title flowed straight into launchFrag/_mainTitleFrag for the entire script.
+# Measured live: the generated test called
+# launchApp(..., "사이트 관리자", ...) and waited 8 polls for a window that
+# cannot exist yet ("[launch] window not detected within timeout"), then
+# _hwndCache["사이트 관리자"] stayed empty and every later step died with
+# "no window hwnd" / "window not found — failing fast". The app never even
+# came up as far as the test was concerned.
+POSTNAV_TITLE_APP = "MockPostNavTitle"
+POSTNAV_TITLE_EXE = "C:\\Program Files\\FileZilla FTP Client\\filezilla.exe"
+POSTNAV_TITLE_EVENTS = [
+    # The trigger: 파일(F) menu bar item, correctly attributed to the main window.
+    make_event("click", name="File", automation_id="", class_name="",
+               control_type="MenuItem", window_title="MainWin",
+               app_name=POSTNAV_TITLE_APP, expand_collapse=True, index=1,
+               winLeft=100, winTop=100, winWidth=600, winHeight=400),
+    # The item pick: same rect (menu bar item), already resolved to
+    # "expand this menu, take item #0 of 8" — but its windowTitle was
+    # hit-tested after the dialog it opens had already appeared.
+    make_event("click", name="File", automation_id="", class_name="",
+               control_type="MenuItem", window_title="SiteManagerDlg",
+               app_name=POSTNAV_TITLE_APP, expand_collapse=True, index=2,
+               winLeft=100, winTop=100, winWidth=600, winHeight=400),
+]
+for _ev in POSTNAV_TITLE_EVENTS:
+    _ev["element"]["rect"] = [572, 100, 637, 124]
+POSTNAV_TITLE_EVENTS[1]["element"]["menuItemIndex"] = 0
+POSTNAV_TITLE_EVENTS[1]["element"]["menuItemCount"] = 8
+POSTNAV_TITLE_EVENTS[1]["element"]["menuItemName"] = "Site Manager\tCtrl+S"
+POSTNAV_TITLE_SESSION_META = {
+    "action": "session_meta",
+    "app": POSTNAV_TITLE_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
+
 # Reused-DropDown-in-the-same-window scenario (2026-07-29, HeidiSQL "새 세션"
 # dialog: the network-type combo and the encoding combo sit one above the
 # other, both exposing a dropdown arrow with automationId="DropDown" — WAD's
@@ -2114,6 +2164,51 @@ def step_wdio_generate_expand_redundant_trigger():
         )
 
 
+def step_wdio_generate_postnav_title_keeps_trigger_window():
+    print("\n[9d] A dropped trigger must not take the main window's title with it "
+          "(2026-08-05 FileZilla 파일 -> 사이트 관리자 launch timeout)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", POSTNAV_TITLE_SESSION_META)
+    for ev in POSTNAV_TITLE_EVENTS:
+        request("POST", "/api/events", ev)
+
+    status, body = request("POST", "/api/generate", {
+        "appName": POSTNAV_TITLE_APP,
+        "exePath": POSTNAV_TITLE_EXE,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (postnav-title) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped postnav-title checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname, content = f.get("filename", ""), f.get("content", "")
+        check(
+            f"  {fname} launches/tracks the TRIGGER's window, not the dialog the item opened",
+            '_mainTitleFrag = "MainWin"' in content,
+            "the merged menu-pick event inherits the trigger's window because "
+            "that is where the menu bar actually lives — its own windowTitle "
+            "was hit-tested post-navigation and names the dialog the pick "
+            "opens, which does not exist yet at launch time",
+        )
+        check(
+            f"  {fname} never waits for the item's own dialog as the app's main window",
+            '_mainTitleFrag = "SiteManagerDlg"' not in content
+            and 'launchApp("C:\\\\Program Files\\\\FileZilla FTP Client\\\\filezilla.exe", [], "SiteManagerDlg"' not in content,
+            "this is the exact 2026-08-05 failure: launchApp() polled 8 times "
+            "for a window that only appears AFTER step 1 runs, gave up with "
+            "'window not detected within timeout', and left _hwndCache empty "
+            "so every later step failed with 'no window hwnd'",
+        )
+        check(
+            f"  {fname} still collapses the trigger into a single position-resolved menu step",
+            content.count("_step('") == 1 and "osExpandCollapse(" in content,
+            "the trigger click must stay merged away (it is redundant — "
+            "osExpandCollapse expands the menu itself); only its windowTitle "
+            "is salvaged, not the step",
+        )
+
+
 def step_wdio_generate_native():
     print("\n[10] Native Win32 dialog generation — numeric AutomationId handling")
     request("DELETE", "/api/events")
@@ -2978,6 +3073,7 @@ def main():
     step_wdio_generate_window_collision()
     step_wdio_generate_delayed_hwnd()
     step_wdio_generate_expand_redundant_trigger()
+    step_wdio_generate_postnav_title_keeps_trigger_window()
     step_wdio_generate_native()
     step_wdio_generate_vcl_hwnd_id()
     step_wdio_generate_web_content()

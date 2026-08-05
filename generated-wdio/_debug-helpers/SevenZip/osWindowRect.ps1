@@ -1,4 +1,4 @@
-﻿param([string]$titleLike, [string]$hwnd, [switch]$listOnly, [switch]$ownerOnly)
+﻿param([string]$titleLike, [string]$hwnd, [switch]$listOnly, [switch]$ownerOnly, [string]$siblingOf)
 Add-Type @"
 using System;
 using System.Text;
@@ -14,6 +14,7 @@ public class WinEnum {
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hWnd, uint cmd);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   public static List<IntPtr> Find(string titleLike) {
     var found = new List<IntPtr>();
@@ -28,8 +29,36 @@ public class WinEnum {
     }, IntPtr.Zero);
     return found;
   }
+  // Sibling top-level windows of the same process as hwndOf, excluding
+  // hwndOf itself, restricted to ones with a real (non-zero) rect. Used to
+  // recover from WinAppDriver/OS binding the "main" window to a hidden 0x0
+  // helper window instead of the app's actual visible form (observed with
+  // HeidiSQL's Delphi/VCL 'TApplication' window).
+  public static List<IntPtr> FindSizedSiblings(IntPtr hwndOf) {
+    var found = new List<IntPtr>();
+    uint pid;
+    GetWindowThreadProcessId(hwndOf, out pid);
+    if (pid == 0) return found;
+    EnumWindows((hWnd, lParam) => {
+      if (hWnd == hwndOf || !IsWindowVisible(hWnd)) return true;
+      uint wpid;
+      GetWindowThreadProcessId(hWnd, out wpid);
+      if (wpid != pid) return true;
+      RECT r;
+      if (GetWindowRect(hWnd, out r) && (r.Right - r.Left) > 0 && (r.Bottom - r.Top) > 0) {
+        found.Add(hWnd);
+      }
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
 }
 "@ -ErrorAction SilentlyContinue
+if ($siblingOf) {
+  $sibs = [WinEnum]::FindSizedSiblings([IntPtr]([int64]$siblingOf))
+  if ($sibs.Count -gt 0) { Write-Output ([int64]$sibs[0]) }
+  exit
+}
 # -hwnd targets one specific window directly, bypassing title matching entirely.
 # Title matching alone is ambiguous whenever more than one window shares a
 # substring (e.g. every VS Code window's title ends in "Visual Studio Code") —

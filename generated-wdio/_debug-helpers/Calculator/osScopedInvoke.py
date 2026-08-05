@@ -124,6 +124,49 @@ def clickable_point(el):
     return None
 
 
+def listitem_label_point(uia, el):
+    """리포트 뷰 행에서 실제로 항목을 여는 지점 — 이름(첫 컬럼) 셀의 중심.
+
+    실측 2026-08-04 (7-Zip SysListView32, poc 프로브):
+        행(ListItem) rect = (797, 267, 1405, 286)   중심 x=1101
+        이름 셀(Edit)  rect = (800, 267,  833, 286)  중심 x=816
+        중심(1101) 더블클릭 -> 제목/행 목록 전부 불변 (아무 일도 안 일어남)
+        이름 셀(816) 더블클릭 -> 즉시 진입, 행 1개에서 25개로
+
+    행 rect는 모든 컬럼을 가로지르므로 그 중심은 "수정한 날짜/크기" 컬럼의
+    빈 공간이다. 선택(단일 클릭)은 full-row select라 어디를 눌러도 되지만
+    활성화(더블클릭)는 이름 셀에서만 일어난다 — 그래서 단일 클릭 스텝은
+    멀쩡했고 폴더 진입만 조용히 실패했다.
+
+    좌표를 저장하지 않는다: 재생 시점에 살아 있는 자식 요소의 rect에서
+    계산한다(§3의 dynamic ClickablePoint 규칙 그대로). 자식이 없는 행이면
+    None을 돌려 기존 clickable_point() 동작을 그대로 쓴다.
+    """
+    TS_CHILDREN = 2
+    UIA_ListItem = 50007
+    try:
+        if el.CurrentControlType != UIA_ListItem:
+            return None
+    except Exception:
+        return None
+    try:
+        arr = el.FindAll(TS_CHILDREN, uia.CreateTrueCondition())
+    except Exception:
+        return None
+    best = None
+    for i in range(arr.Length if arr else 0):
+        try:
+            r = arr.GetElement(i).CurrentBoundingRectangle
+        except Exception:
+            continue
+        if r.right <= r.left or r.bottom <= r.top:
+            continue
+        # 가장 왼쪽 셀 = 이름 컬럼. 아이콘+라벨이 여기 있다.
+        if best is None or r.left < best[0]:
+            best = (r.left, (r.left + r.right) // 2, (r.top + r.bottom) // 2)
+    return (best[1], best[2]) if best else None
+
+
 def _same_or_descendant(uia, ancestor, el, max_up=6):
     cur = el
     try:
@@ -147,7 +190,7 @@ def _same_or_descendant(uia, ancestor, el, max_up=6):
     return False
 
 
-def send_input_click(uia, el, tag):
+def send_input_click(uia, el, tag, double=False):
     """UIA로 방금 찾은 요소를 실제 마우스 입력으로 클릭한다.
 
     안전 검증을 하나라도 통과 못 하면 사유를 남기고 False — 호출자는 기존
@@ -175,7 +218,9 @@ def send_input_click(uia, el, tag):
     except Exception:
         label = "?"
 
-    pt = clickable_point(el)
+    # 리포트 뷰 행은 rect 중심이 빈 컬럼이라 더블클릭이 안 먹는다 —
+    # listitem_label_point() 참고 (2026-08-04 실측).
+    pt = listitem_label_point(uia, el) or clickable_point(el)
     if not pt:
         return bail("no-clickable-point")
     x, y = pt
@@ -226,9 +271,110 @@ def send_input_click(uia, el, tag):
     time.sleep(0.04)
     send(MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)
 
-    print("[COM-SendInput] " + tag + " clicked '" + label + "' at (%d,%d)" % (x, y))
+    # 두 번째 누름/뗌 — 시스템 더블클릭 간격(기본 500ms) 안에 보내야 앱이
+    # 더블클릭으로 인식한다. 여기 간격 합은 ~90ms.
+    #
+    # 2026-08-04: 이 분기가 없어서 녹화된 더블클릭이 앱에는 단일 클릭으로
+    # 도달했다. 네이티브 리스트 행에서 단일 클릭은 "선택"이지 "열기"가 아니다.
+    # 원래 설계는 InvokePattern.Invoke()(=기본 동작=열기)에 기대고 있었는데
+    # (server.js ListItem 분기 주석, 2026-07-15 실측), 2026-07-24에
+    # send_input_click()이 invoke_item() 체인 맨 앞에 붙으면서
+    # "if send_input_click(...): return True"가 되어 그 Invoke()가 도달 불가능한
+    # 죽은 코드가 됐다. 결과: 7-Zip에서 "3:doubleClick 컴퓨터"가 성공으로
+    # 보고되지만 폴더는 안 열리고, "4:doubleClick C:"부터 전부 무너진다
+    # (2026-08-04 두 번 연속 동일 재현).
+    if double:
+        time.sleep(0.05)
+        send(MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)
+        time.sleep(0.04)
+        send(MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)
+
+    verb = " double-clicked '" if double else " clicked '"
+    print("[COM-SendInput] " + tag + verb + label + "' at (%d,%d)" % (x, y))
     time.sleep(0.05)
     return True
+
+
+# ── TogglePattern (2026-07-31) ─────────────────────────────────────────────
+# 실측(TeamViewer 15.79 WebView2, poc/diag_teamviewer_a11y_wakeup.py [D]):
+# 체크박스 2종의 지원 패턴은 정확히 {Toggle, Legacy}뿐 — Invoke도
+# SelectionItem도 없다. 기존 클릭 체인(Invoke → SelectionItem → Legacy)에는
+# Toggle이 아예 없어서 앞의 둘이 연달아 예외로 떨어진 뒤
+# Legacy.Select(TAKESELECTION)이 예외 없이 통과하며 True를 반환했다. 그런데
+# 체크박스에서 "셀렉션"은 체크 상태를 바꾸지 않으므로, 재생은 성공으로
+# 보고되는데 화면에서는 아무 일도 일어나지 않는다 — 그 체크박스가 띄우는
+# 확인 다이얼로그도 당연히 안 뜬다(2026-07-31 클라이언트 피드백 증상 그대로).
+# Legacy 폴백보다 앞서 Toggle을 시도하되, ToggleState가 실제로 바뀐 경우에만
+# 성공으로 인정한다(거짓 PASS 방지 — 2026-07-13 3차 교훈과 같은 원칙).
+UIA_TogglePatternId = 10015
+
+
+def toggle_item(mod, el, tag):
+    try:
+        tp = el.GetCurrentPattern(UIA_TogglePatternId).QueryInterface(
+            mod.IUIAutomationTogglePattern)
+    except Exception:
+        return False
+    try:
+        before = tp.CurrentToggleState
+        tp.Toggle()
+        time.sleep(0.05)
+        after = tp.CurrentToggleState
+    except Exception as e:
+        print("[" + tag + "] TogglePattern.Toggle() raised: %s" % e, file=sys.stderr)
+        return False
+    if after != before:
+        print("[" + tag + "] TogglePattern.Toggle() %d -> %d" % (before, after))
+        return True
+    print("[" + tag + "] TogglePattern.Toggle() left ToggleState unchanged (%d)"
+          " - falling through to the remaining patterns" % before, file=sys.stderr)
+    return False
+
+
+# ── checkbox 값-변경 검증 (2026-08-04) ───────────────────────────────────────
+# 위 toggle_item()은 invoke_item()의 체인 맨 끝(Legacy 폴백보다 앞)에서만
+# 쓰인다 — invoke_item()이 맨 앞에서 시도하는 send_input_click()(실제 화면
+# 클릭)이 성공하면 그 자리에서 곧바로 True를 반환하므로(§6 "재생은 시각적으로
+# 확인 가능해야 한다"는 요구를 만족하는 기본 경로), 대다수 체크박스 클릭은
+# toggle_item()까지 내려가지도 않는다. 그 결과 "클릭 자체는 에러 없이 끝났다"만
+# 보고 실제로 체크 상태가 바뀌었는지는 아무도 확인하지 않는다 — TeamViewer
+# WebView2 토글에서 실측된 것과 같은 종류의 거짓 PASS 위험이 CheckBox
+# controlType 전반에 구조적으로 남아 있다(HeidiSQL/PuTTY의 TCheckBox·Button
+# 스타일 체크박스도 이 경로를 그대로 탄다 — 2026-08-04 점검 시점엔 아직 실제
+# 재생 실패로 드러난 적은 없지만, 다음에 체크박스가 있는 녹화를 재생하면 언제든
+# 조용히 터질 수 있는 잠재적 구멍). 시각적 클릭은 그대로 유지하면서(§6), 클릭
+# 전후 ToggleState를 비교해 실제로 바뀌었는지만 추가로 검증한다 — 안 바뀌었으면
+# toggle_item()의 직접 Toggle() 호출로 한 번 더 보정 시도하고, 그래도 안 바뀌면
+# 정직하게 실패로 보고한다(호출부가 exit code로 판단해 _failures에 기록).
+def verified_toggle_click(uia, mod, el, tag="osScopedInvoke", double=False):
+    try:
+        tp = el.GetCurrentPattern(UIA_TogglePatternId).QueryInterface(
+            mod.IUIAutomationTogglePattern)
+    except Exception:
+        # TogglePattern이 없다 = 이 컨트롤은 애초에 체크박스가 아니다(예:
+        # CheckBox로 잘못 태깅됐거나 캡처 시점 이후 컨트롤이 바뀐 경우) —
+        # 검증할 상태 자체가 없으므로 평범한 클릭으로 폴백한다. 없는 걸
+        # 있다고 우기며 거짓 실패를 만들지 않는다.
+        return invoke_item(uia, mod, el, double)
+    try:
+        before = tp.CurrentToggleState
+    except Exception:
+        return invoke_item(uia, mod, el, double)
+    if not invoke_item(uia, mod, el, double):
+        return False
+    time.sleep(0.05)
+    try:
+        after = tp.CurrentToggleState
+    except Exception as e:
+        print(f"[{tag}] click succeeded but ToggleState could not be "
+              f"re-read afterward ({e}) — cannot verify, trusting the click", file=sys.stderr)
+        return True
+    if after != before:
+        print(f"[{tag}] checkbox toggled {before} -> {after} (verified)")
+        return True
+    print(f"[{tag}] click reported success but ToggleState stayed {before} "
+          "unchanged — retrying via TogglePattern.Toggle() directly", file=sys.stderr)
+    return toggle_item(mod, el, tag)
 
 
 def top_windows():
@@ -242,6 +388,50 @@ def top_windows():
 
     user32.EnumWindows(cb, 0)
     return found
+
+
+def window_title(hwnd):
+    n = user32.GetWindowTextLengthW(hwnd)
+    buf = ctypes.create_unicode_buffer(n + 1)
+    user32.GetWindowTextW(hwnd, buf, n + 1)
+    return buf.value
+
+
+def owner_window_for(main_h, main_pid, owner_title):
+    """The same-PID top-level window this event was actually recorded in.
+
+    Cross-window steps used to search the MAIN window first and only then
+    other top-level windows. That is wrong whenever the recorded selector is
+    weak enough to also match something in the main window. Measured
+    2026-08-03 (PuTTY): step '13:click 닫기' belongs to the 'PuTTY User
+    Manual' window and carries NO AutomationId and NO ClassName, so its
+    selector is the bare name 닫기 — which the main PuTTY Configuration
+    window ALSO contains (two ComboBox DropDown arrows are named 닫기, and a
+    Korean titlebar Close button is Button[@Name="닫기"] as well). The main
+    window search matched 2 elements, picked one by recorded position, and
+    closed PuTTY Configuration — after which every later step failed with
+    click-not-found.
+
+    Returning the recorded window here lets the caller search it FIRST. Match
+    on containment because titles carry volatile suffixes; skip when the hint
+    matches the main window (the ordinary same-window case) so nothing about
+    the existing path changes there.
+    """
+    if not owner_title:
+        return None
+    main_title = window_title(main_h)
+    if owner_title in main_title or main_title in owner_title:
+        return None
+    for h in top_windows():
+        if h == main_h:
+            continue
+        cand_pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(h, ctypes.byref(cand_pid))
+        if cand_pid.value != main_pid:
+            continue
+        if owner_title in window_title(h):
+            return h
+    return None
 
 
 def resolve_cond(uia, sel):
@@ -303,7 +493,7 @@ def ensure_visible(uia, mod, el):
         pass
 
 
-def invoke_item(uia, mod, el):
+def invoke_item(uia, mod, el, double=False):
     ensure_visible(uia, mod, el)
     focus_ok = False
     try:
@@ -313,13 +503,17 @@ def invoke_item(uia, mod, el):
         pass
     # 시각적 재생 우선(2026-07-24, §6) — 성공하면 반드시 여기서 반환한다.
     # 이어서 Invoke()까지 부르면 같은 동작이 두 번 실행된다.
-    if send_input_click(uia, el, "osScopedInvoke"):
+    # double=True면 두 번 누른다 — 아래 Invoke() 폴백은 기본 동작(=열기)이라
+    # 더블클릭 의미를 그대로 만족하므로 폴백 체인은 손대지 않는다.
+    if send_input_click(uia, el, "osScopedInvoke", double):
         return True
     try:
         el.GetCurrentPattern(UIA_InvokePatternId).QueryInterface(mod.IUIAutomationInvokePattern).Invoke()
         return True
     except Exception:
         pass
+    if toggle_item(mod, el, "osScopedInvoke"):
+        return True
     try:
         el.GetCurrentPattern(UIA_SelectionItemPatternId).QueryInterface(mod.IUIAutomationSelectionItemPattern).Select()
         return True
@@ -356,19 +550,52 @@ def invoke_item(uia, mod, el):
 # 여럿이면 offscreen이 아닌 것을 고른다. 여러 후보를 차례로 클릭해보는 방식은
 # 쓰지 않는다 — 실패한 후보가 드롭다운을 열어둔 채로 남아 다음 후보 클릭이
 # 그 팝업 해제에 먹히기 때문.
-def pick_trigger(uia, root, cond):
-    try:
-        arr = root.FindAll(TreeScope_Subtree, cond)
-    except Exception:
-        arr = None
-    if not arr:
-        return None
+def elements_from(arr):
     cands = []
+    if not arr:
+        return cands
     for i in range(arr.Length):
         try:
             cands.append(arr.GetElement(i))
         except Exception:
             pass
+    return cands
+
+
+# 2026-07-29 (HeidiSQL: 두 콤보박스의 드롭다운 화살표가 automationId="DropDown"을
+# 공유): pick_trigger의 기존 "offscreen 제외 후 첫 번째" 방식은 PuTTY 전용
+# 가정(비활성 패널 컨트롤이 화면 밖으로 밀려남)에 의존한다 — HeidiSQL은 두
+# 콤보가 동시에 진짜로 화면에 떠 있어 이 필터가 아무 것도 못 거른다. 캡처된
+# window-relative Y(relY)를 현재 창의 실제 위치에 매 실행마다 다시 더해
+# 절대 Y로 변환하고, 후보들 중 그 위치에 가장 가까운 rect.top을 가진 걸
+# 고른다 — 저장된 화면 좌표를 클릭에 쓰는 게 아니라(§3 금지 대상과 다름),
+# 이미 구조적으로 찾아낸 후보들 사이에서 어느 걸 고를지 정하는 신호로만
+# 쓴다(§3 2026-07-24 재정의: 매 실행 재계산·즉시 소비·저장 안 함 — 이미
+# 승인된 dynamic ClickablePoint 예외와 같은 성격).
+def pick_by_position(cands, win_top, rel_y):
+    if not cands:
+        return None
+    if len(cands) == 1 or win_top is None or rel_y is None:
+        return cands[0]
+    target_y = win_top + rel_y
+    best, best_dist = None, None
+    for c in cands:
+        try:
+            r = c.CurrentBoundingRectangle
+            d = abs(r.top - target_y)
+        except Exception:
+            continue
+        if best_dist is None or d < best_dist:
+            best, best_dist = c, d
+    return best if best is not None else cands[0]
+
+
+def pick_trigger(uia, root, cond, win_top=None, rel_y=None):
+    try:
+        arr = root.FindAll(TreeScope_Subtree, cond)
+    except Exception:
+        arr = None
+    cands = elements_from(arr)
     if not cands:
         return None
     if len(cands) == 1:
@@ -380,10 +607,17 @@ def pick_trigger(uia, root, cond):
                 visible.append(c)
         except Exception:
             visible.append(c)
+    pool = visible or cands
+    if win_top is not None and rel_y is not None:
+        picked = pick_by_position(pool, win_top, rel_y)
+        if picked is not None:
+            print(f"[osScopedInvoke] trigger selector matched {len(cands)} elements "
+                  f"({len(visible)} on screen) — disambiguated by recorded position")
+            return picked
     print(f"[osScopedInvoke] WARN trigger selector matched {len(cands)} elements "
           f"({len(visible)} on screen) — the automationId is reused across "
           f"controls; picking the first on-screen one")
-    return (visible or cands)[0]
+    return pool[0]
 
 
 # 2026-07-17: owned 다이얼로그(WAD가 scoped session을 거부하는 창)에 타이핑하기
@@ -455,6 +689,21 @@ def main():
     ap.add_argument("--sel-b64", required=True)
     ap.add_argument("--trigger-sel-b64", default=None)
     ap.add_argument("--text-b64", default=None)
+    # 2026-07-29 (HeidiSQL DropDown 재사용): 구조적으로 여러 후보가 걸릴 때
+    # 어느 걸 고를지에만 쓰는 위치 힌트 — 클릭 좌표 자체가 아니다(§3 참고,
+    # pick_by_position 주석). rel-y/trigger-rel-y는 캡처 시점의 창-상대 Y이고,
+    # 매 실행 현재 창 위치에 다시 더해서만 쓴다.
+    ap.add_argument("--rel-y", type=int, default=None)
+    ap.add_argument("--trigger-rel-y", type=int, default=None)
+    # 이 이벤트가 실제로 녹화된 창의 제목 — owner_window_for() 참고.
+    ap.add_argument("--owner-title-b64", default=None)
+    # 녹화된 동작이 더블클릭이었는가. 네이티브 리스트 행에서 단일 클릭은
+    # 선택일 뿐 열기가 아니라 이 구분이 필요하다 (2026-08-04).
+    ap.add_argument("--double", action="store_true")
+    # 체크박스 클릭 전후 ToggleState를 비교해 실제로 바뀌었는지 검증한다
+    # (2026-08-04, verified_toggle_click 참고 — CheckBox controlType 전반의
+    # 잠재적 거짓 PASS 구멍을 막는다).
+    ap.add_argument("--verify-toggle", action="store_true")
     args = ap.parse_args()
 
     enable_per_monitor_dpi()
@@ -487,6 +736,14 @@ def main():
         print("osScopedInvoke: ElementFromHandle failed", file=sys.stderr)
         sys.exit(2)
 
+    win_top = None
+    try:
+        r = wintypes.RECT()
+        if user32.GetWindowRect(main_h, ctypes.byref(r)):
+            win_top = r.top
+    except Exception:
+        pass
+
     sel = json.loads(base64.b64decode(args.sel_b64).decode("utf-8"))
     item_cond = resolve_cond(uia, sel)
     if item_cond is None:
@@ -500,7 +757,7 @@ def main():
         trigger_sel = json.loads(base64.b64decode(args.trigger_sel_b64).decode("utf-8"))
         trigger_cond = resolve_cond(uia, trigger_sel)
         if trigger_cond is not None:
-            trigger = pick_trigger(uia, root, trigger_cond)
+            trigger = pick_trigger(uia, root, trigger_cond, win_top, args.trigger_rel_y)
             if trigger:
                 invoke_item(uia, mod, trigger)
             else:
@@ -513,7 +770,10 @@ def main():
     # osScopedType() JS wrapper 전용 (2026-07-17, owned 다이얼로그 안 Edit
     # 컨트롤에 타이핑하기 위해 도입 — Root 세션 REST 폴백의 15~20초 고정
     # 비용을 피한다. 검색 로직((a)(b) 둘 다)은 클릭과 완전히 동일).
-    act = (lambda el: type_item(uia, mod, el, base64.b64decode(args.text_b64).decode("utf-8")))         if args.text_b64 else (lambda el: invoke_item(uia, mod, el))
+    act = (lambda el: type_item(uia, mod, el, base64.b64decode(args.text_b64).decode("utf-8")))         if args.text_b64 else (
+            (lambda el: verified_toggle_click(uia, mod, el, "osScopedInvoke", args.double))
+            if args.verify_toggle else (lambda el: invoke_item(uia, mod, el, args.double))
+        )
     verb = 'typed into' if args.text_b64 else 'invoked'
 
     # 최대 4회 시도(즉시 1회 + 300ms 간격 재시도 3회, 총 최대 ~0.9초) — 2026-07-17
@@ -533,15 +793,48 @@ def main():
     attempts = 20 if args.text_b64 else 10
     main_pid = wintypes.DWORD()
     user32.GetWindowThreadProcessId(main_h, ctypes.byref(main_pid))
+    owner_title = (base64.b64decode(args.owner_title_b64).decode("utf-8")
+                   if args.owner_title_b64 else "")
     for attempt in range(attempts):
         if attempt > 0:
             time.sleep(0.3)
 
+        # (a0) 이 이벤트가 녹화된 창이 메인 창이 아니라면 거기서 먼저 찾는다.
+        #      약한 셀렉터(이름 단독)가 메인 창의 엉뚱한 동명 컨트롤에 먼저
+        #      걸리는 것을 막는다 — owner_window_for() 주석의 PuTTY 닫기 사례.
+        owner_h = owner_window_for(main_h, main_pid.value, owner_title)
+        if owner_h:
+            try:
+                owner_root = uia.ElementFromHandle(owner_h)
+                if owner_root:
+                    item = owner_root.FindFirst(TreeScope_Subtree, item_cond)
+                    if item and act(item):
+                        print(f"[osScopedInvoke] {verb} under the window it was "
+                              f"recorded in ({owner_title!r} hwnd={owner_h})")
+                        sys.exit(0)
+            except Exception:
+                pass
+
         # (a) 메인 창 서브트리. Subtree = 창 자기 자신(root)도 포함해 검색한다 —
         #     Descendants만 쓰면 캡처된 타겟이 창 자체(예: className="#32770")인
         #     경우 구조적으로 못 찾는다(2026-07-16 FileZilla 다이얼로그 클릭 확인).
+        # rel_y 힌트가 있으면 FindAll로 모든 후보를 모아 위치로 가려낸다
+        # (2026-07-29, HeidiSQL: 같은 창 안에 automationId="DropDown"을
+        # 공유하는 콤보가 둘 이상 — FindFirst는 항상 같은 하나만 반환).
+        # 힌트가 없으면 기존과 동일하게 FindFirst 한 건만 본다.
+        item = None
         try:
-            item = root.FindFirst(TreeScope_Subtree, item_cond)
+            if args.rel_y is not None:
+                cands = elements_from(root.FindAll(TreeScope_Subtree, item_cond))
+                if len(cands) > 1:
+                    picked = pick_by_position(cands, win_top, args.rel_y)
+                    print(f"[osScopedInvoke] selector matched {len(cands)} elements in main "
+                          f"window — disambiguated by recorded position")
+                    item = picked
+                elif cands:
+                    item = cands[0]
+            else:
+                item = root.FindFirst(TreeScope_Subtree, item_cond)
         except Exception:
             item = None
         if item and act(item):

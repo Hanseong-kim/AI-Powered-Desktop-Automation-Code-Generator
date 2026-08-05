@@ -1267,32 +1267,118 @@ class UIAInspector:
         # content isn't always populated yet at this worker thread's first
         # look. 5 attempts / 100ms (~0.5s budget) mirrors the scale of that
         # existing fix rather than inventing a new number.
+        # 2026-08-05 (FileZilla 편집(E) -> 네트워크 구성 마법사 실측): 이 루프의
+        # 비용 자체가 자신이 막으려던 레이스를 **일으키고** 있었다.
+        # `FindAll(7=TreeScope_Descendants, ...)`는 그 창의 UIA 트리 전체를
+        # 훑는다 — FileZilla 메인 창(자식 창만 80여 개)에서는 한 번에 ~240ms다.
+        # 5회 재시도 × 창 2개 = 전체 트리 워크 10번 = **2.4초**. 실측 로그의
+        # `[diag-click] ... gap=2.4103s`가 정확히 그 값이고, 그 2.4초 동안
+        # 사용자는 이미 메뉴 항목을 골라버려서 팝업 창이 파괴됐다. 그래서
+        # 검색 대상 목록에 팝업 hwnd가 아예 없었고("searched: ['hwnd=724316',
+        # 'hwnd=1510346']" — 팝업 658780이 빠져 있음), 스냅샷이 실패했다.
+        # 그 결과 항목 선택 클릭은 캐시도 라이브 메뉴도 못 찾아 그 아래
+        # ToolBar로 잡혔고(id='5999' name=''), 재생 때 메뉴만 열리고 항목이
+        # 선택되지 않아 "방화벽 및 라우터 설정 마법사" 창이 아예 안 떠서
+        # 이후 모든 스텝이 window-not-found로 무너졌다.
+        #
+        # 해결: Win32 팝업 메뉴(TrackPopupMenu, 클래스 #32768)는 **자기 자신이
+        # 최상위 창이고 그 창의 UIA 루트 요소가 곧 Menu**다. 따라서 트리를
+        # 훑을 필요 없이 루트의 ControlType 속성 하나만 읽으면 된다(마이크로초
+        # 단위). 이 프로젝트 범위의 앱은 전부 이 경로에 해당한다(FileZilla,
+        # 7-Zip, HeidiSQL). 전체 트리 워크는 그 빠른 경로가 아무것도 못 찾았을
+        # 때의 폴백으로만 남기고, 그마저도 첫 시도에서 한 번만 한다 — 재시도의
+        # 목적은 "팝업이 아직 UIA에 안 올라왔다"를 기다리는 것이지 같은 값비싼
+        # 스캔을 5번 반복하는 게 아니다(2026-08-04 HeidiSQL SplitButton 케이스는
+        # 팝업 창은 있는데 그 **항목**이 아직 안 채워진 상황이라, 빠른 경로로
+        # Menu 루트를 찾은 뒤 items가 빌 때 재시도하는 지금 구조로 그대로 커버된다).
+        # 2026-08-05 (2차, 재녹화 3회 중 1회만 성공): 위 빠른 경로만으로는
+        # 부족했다. 실측 gap — 성공 0.70s / 실패 1.36s·1.61s·1.87s·2.62s.
+        # 실패 케이스의 공통점은 스냅샷이 도는 동안 **메뉴가 이미 파괴됐다**는
+        # 것이고(watcher가 팝업과 마법사 창을 연달아 등록한 뒤에야 스냅샷이
+        # 돌았다), 그 상태에서는 몇 번을 재시도해도 되살릴 수 없다. 그런데
+        # 기존 예산(5회 × 최대 1회 deep scan)은 그 못 찾는 상황에서 1.4~2.6초를
+        # 통째로 태웠고, 그 지연이 다음 이벤트로 전파돼(#8 1.87s -> #9 2.62s)
+        # 워커가 점점 더 뒤처지는 악순환을 만들었다. 못 찾을 때의 비용에
+        # 벽시계 상한을 둬서 그 전파를 끊는다 — 성공 케이스는 attempt 0의
+        # 빠른 경로에서 즉시 끝나므로 이 상한에 영향받지 않는다.
+        # 2026-08-05 (3차, 여전히 편집(E) 성공/파일(F) 실패로 갈림): 위
+        # "루트별로 즉시 폴백" 순서 자체가 문제였다. 후보 순회가 한 루트씩
+        # 순차 처리되는데, 그 루트에서 빠른 경로가 실패하면 **다음 루트의
+        # 빠른 경로를 확인하기도 전에** 그 자리에서 바로 비싼 전체 스캔을
+        # 돌렸다. 메인 창(hwnd=11406050)은 매번 첫 후보로 나오고, 거기엔
+        # 실제 열린 메뉴가 아닌데도 "1 Menu container(s), 0 items"로 잡히는
+        # 유령 Menu 서술자가 있다(메뉴바 자체의 정적 구조로 추정) — 이
+        # 가짜 양성 하나를 스캔하는 데만 예산 대부분(gap=1.86s의 대부분)을
+        # 썼고, 그 사이 진짜 살아있는 TrackPopupMenu 창은 다음 순번을
+        # 기다리다 파괴됐다. 이 문제는 "파일(F)"(8개 항목, 메인 메뉴바)에서만
+        # 나고 "편집(E)"(3개 항목)에서는 안 났는데 — 후보 순서상 편집 메뉴의
+        # 진짜 팝업이 이 가짜 양성보다 먼저 열거됐을 뿐, 우연이다.
+        #
+        # 고침: 모든 후보 루트에 대해 **싼 빠른 경로만** 먼저 한 바�퀴 돈다
+        # (속성 하나 읽기, 마이크로초 단위 — 전부 돌아도 총 비용이 무시할
+        # 만하다). 그래도 못 찾았을 때만 비싼 전체 스캔을 후보별로 시도한다.
+        # 이러면 살아있는 진짜 팝업이 후보 목록 어디에 있든, 죽은 지 오래인
+        # 유령 서술자의 전체 트리 스캔보다 항상 먼저 확인된다.
+        deadline = time.time() + 0.6
         for attempt in range(5):
             if attempt > 0:
+                if time.time() > deadline:
+                    tried.append(f"gave up after {attempt} attempt(s) — 0.6s budget spent")
+                    break
                 time.sleep(0.1)
             tried = []
-            for root in self._search_roots_for_menu(elem):
+            roots = list(self._search_roots_for_menu(elem))
+            menu = None
+            # 1단계: 모든 후보의 빠른 경로만 확인 (전체 트리 스캔 없음).
+            for root in roots:
                 try:
                     root_hwnd = root.CurrentNativeWindowHandle
                 except Exception:
                     root_hwnd = None
                 try:
-                    menus = root.FindAll(7, self._uia.CreatePropertyCondition(
-                        30003, self.CT_MENU))
-                except Exception as e:
-                    tried.append(f"hwnd={root_hwnd}: FindAll raised {e!r}")
-                    continue
-                menu_count = menus.Length if menus else 0
-                tried.append(f"hwnd={root_hwnd}: {menu_count} Menu container(s)")
-                if not menus or menus.Length != 1:
-                    continue
-                try:
-                    items = menus.GetElement(0).FindAll(7, self._uia.CreatePropertyCondition(
-                        30003, self.CT_MENU_ITEM))
+                    if root.CurrentControlType == self.CT_MENU:
+                        menu = root
+                        tried.append(f"hwnd={root_hwnd}: root IS a Menu (fast path)")
+                        break
                 except Exception:
-                    continue
-                if not items or not items.Length:
-                    continue
+                    pass
+                tried.append(f"hwnd={root_hwnd}: not a Menu root (fast path)")
+            # 2단계: 첫 시도에서만, 그리고 1단계가 전부 실패했을 때만 전체
+            # 트리 스캔으로 폴백한다(재시도는 "아직 안 올라왔다"를 기다리는
+            # 것이지 같은 값비싼 스캔을 반복하는 게 아니다 — 위 주석 참고).
+            if menu is None and attempt == 0:
+                for root in roots:
+                    try:
+                        root_hwnd = root.CurrentNativeWindowHandle
+                    except Exception:
+                        root_hwnd = None
+                    try:
+                        menus = root.FindAll(7, self._uia.CreatePropertyCondition(
+                            30003, self.CT_MENU))
+                    except Exception as e:
+                        tried.append(f"hwnd={root_hwnd}: FindAll raised {e!r}")
+                        continue
+                    menu_count = menus.Length if menus else 0
+                    tried.append(f"hwnd={root_hwnd}: {menu_count} Menu container(s) (deep scan)")
+                    if not menus or menus.Length != 1:
+                        continue
+                    cand = menus.GetElement(0)
+                    try:
+                        cand_items = cand.FindAll(7, self._uia.CreatePropertyCondition(
+                            30003, self.CT_MENU_ITEM))
+                    except Exception:
+                        continue
+                    if cand_items and cand_items.Length:
+                        menu = cand
+                        break
+            if menu is None:
+                continue
+            try:
+                items = menu.FindAll(7, self._uia.CreatePropertyCondition(
+                    30003, self.CT_MENU_ITEM))
+            except Exception:
+                continue
+            if items and items.Length:
                 for i in range(items.Length):
                     it = items.GetElement(i)
                     try:
@@ -1693,11 +1779,24 @@ def probe_window(tag, hwnd):
         log(f"[probe:{tag}] hwnd={hwnd} FAILED: {e}")
         return
 
+    # 2026-08-05: 자식 창을 한 줄씩 전부 찍으면 FileZilla 기준 녹화 1회당 78줄이
+    # 나오는데, 그 78줄의 pid/img가 전부 동일하고 진단에 쓰인 적이 없다. 실제로
+    # 사람이 로그를 복사해 붙여 넣는 워크플로에서는 이 덩어리가 전체의 절반
+    # 가까이를 차지해 정작 봐야 할 [trace]/[inspect]/[diag-click] 줄을 파묻는다.
+    # 클래스별 개수 요약(1줄)로 바꾸고, 전체 덤프는 AGENT_PROBE_VERBOSE=1일 때만
+    # 낸다 — 클래스 구성(SysListView32/SysTreeView32/ComboBox 유무)이 이 덤프에서
+    # 실제로 얻던 정보의 전부이고, 그건 요약으로 그대로 보존된다.
+    verbose = os.environ.get("AGENT_PROBE_VERBOSE") == "1"
+    counts = {}
+
     def _e(child, _):
         try:
-            p = pid_of_hwnd(child)
-            log(f"[probe:{tag}]   child={child} cls='{win32gui.GetClassName(child)}' "
-                f"pid={p} img='{image_path_of_pid(p)}'")
+            cls = win32gui.GetClassName(child)
+            counts[cls] = counts.get(cls, 0) + 1
+            if verbose:
+                p = pid_of_hwnd(child)
+                log(f"[probe:{tag}]   child={child} cls='{cls}' "
+                    f"pid={p} img='{image_path_of_pid(p)}'")
         except Exception:
             pass
         return True
@@ -1706,6 +1805,12 @@ def probe_window(tag, hwnd):
         win32gui.EnumChildWindows(hwnd, _e, None)
     except Exception:
         pass
+    if counts and not verbose:
+        total = sum(counts.values())
+        summary = " ".join(f"{c}x{n}" for c, n in
+                           sorted(counts.items(), key=lambda kv: -kv[1]))
+        log(f"[probe:{tag}]   {total} child windows: {summary}"
+            "   (set AGENT_PROBE_VERBOSE=1 for the per-child dump)")
 
 
 def top_window_at(x, y):
@@ -2470,6 +2575,44 @@ class Recorder:
 
     def _inspect(self, ins, x, y):
         try:
+            # An item-PICKING click (as opposed to the click that opens the
+            # list) closes the list before this runs, so its own hit test is
+            # never going to succeed live — the entire reason
+            # _dropdown_item_from_cache()/_menu_item_from_cache() exist.
+            # Position resolved from a snapshot taken while the list was
+            # genuinely open and confirmed to belong to this app is
+            # trustworthy independent of this click's own hwnd, so this
+            # answers the question outright: on a hit, every value below is
+            # overwritten by the trigger's own describe() and returned
+            # immediately.
+            #
+            # 2026-08-05 (사용자 보고 "클릭 인지가 느리다", FileZilla 실측):
+            # 이 블록은 원래 element_at()+describe() 뒤에 있었다 — 그 결과
+            # **버려질 것이 확실한** 전체 트리 탐색(ElementFromPoint →
+            # smallest_element_at → _deepen)을 매번 먼저 지불했다. 측정된
+            # [diag-click] gap: 일반 클릭 0.04~0.09s인데 캐시로 풀리는 메뉴
+            # 항목 클릭이 0.94s / 0.99s — 20배 차이가 전부 이 낭비다.
+            # 캐시 조회는 순수 기하 비교라 비용이 사실상 0이므로, 맞으면
+            # 트리 탐색 자체를 건너뛴다. 캐시가 빗나가면 종전 경로 그대로
+            # 진행하므로 판정 로직은 하나도 바뀌지 않는다.
+            cache_hit = ins._dropdown_item_from_cache(x, y)
+            cache_kind = "combo"
+            if cache_hit is None:
+                cache_hit = ins._menu_item_from_cache(x, y)
+                cache_kind = "menu"
+            if cache_hit is not None:
+                trigger, idx, total, item_name = cache_hit
+                info = ins.describe(trigger)
+                if cache_kind == "combo":
+                    info["comboItemIndex"] = idx
+                    info["comboItemCount"] = total
+                    info["comboItemName"] = item_name
+                else:
+                    info["menuItemIndex"] = idx
+                    info["menuItemCount"] = total
+                    info["menuItemName"] = item_name
+                info["expandCollapse"] = True
+                return info
             elem = ins.element_at(x, y)
             info = ins.describe(elem)
             # DIAGNOSTIC: element_at()'s full decision path in one line, plus
@@ -2490,40 +2633,15 @@ class Recorder:
             except Exception as e:
                 log(f"[trace] failed: {e}")
             light_dismiss = info.get("automationId") == "Light Dismiss"
-            # An item-PICKING click (as opposed to the click that opens the
-            # list) closes the list before this runs, so its own hit test is
-            # never going to succeed live — the entire reason
-            # _dropdown_item_from_cache()/_menu_item_from_cache() exist.
-            # Check the cache FIRST, before the tracked-window/light-dismiss
-            # machinery below: an item click is typically hwnd==0 (UIA-only
-            # sub-element) like its trigger, so it would otherwise get
-            # light_dismiss=True immediately and never reach the
-            # open_dropdown_item_at()/open_menu_item_at() branches later in
-            # this function (those require not light_dismiss too) — measured
-            # 2026-08-04 (HeidiSQL): items landed on a cached-but-unreachable
-            # path and fell through to whatever the closed list had been
-            # covering. Position resolved from a snapshot taken while the
-            # list was genuinely open and confirmed to belong to this app is
-            # trustworthy independent of this click's own hwnd.
-            cache_hit = ins._dropdown_item_from_cache(x, y)
-            cache_kind = "combo"
-            if cache_hit is None:
-                cache_hit = ins._menu_item_from_cache(x, y)
-                cache_kind = "menu"
-            if cache_hit is not None:
-                trigger, idx, total, item_name = cache_hit
-                info = ins.describe(trigger)
-                elem = trigger
-                if cache_kind == "combo":
-                    info["comboItemIndex"] = idx
-                    info["comboItemCount"] = total
-                    info["comboItemName"] = item_name
-                else:
-                    info["menuItemIndex"] = idx
-                    info["menuItemCount"] = total
-                    info["menuItemName"] = item_name
-                info["expandCollapse"] = True
-                return info
+            # NOTE: the dropdown/menu item cache is consulted at the TOP of
+            # this function now (see the comment there) — an item click is
+            # typically hwnd==0 (UIA-only sub-element) like its trigger, so
+            # it would otherwise get light_dismiss=True immediately and never
+            # reach the open_dropdown_item_at()/open_menu_item_at() branches
+            # later in this function (those require not light_dismiss too) —
+            # measured 2026-08-04 (HeidiSQL): items landed on a
+            # cached-but-unreachable path and fell through to whatever the
+            # closed list had been covering.
             # Resolved element belongs to a window this recording isn't
             # tracking at all (confirmed 2026-07-13: a PuTTY capture's very
             # first click — right after window discovery — resolved to an
@@ -2680,6 +2798,69 @@ class Recorder:
                     # snapshot_open_menu().
                     ins.snapshot_open_dropdown(elem, info)
                     ins.snapshot_open_menu(elem, info)
+            # The adopted element was DEAD by the time describe() read it —
+            # its BoundingRectangle either raised (describe stores the reason
+            # as an "ERR:..." string) or came back all-zero. Measured
+            # 2026-08-05 on two separate FileZilla recordings:
+            #
+            #   raw=[id='5101' name='취소' rect="ERR:COMError:(-2147220991,
+            #        '이벤트에서 가입자를 불러낼 수 없습니다.')" hwnd=0]
+            #   raw=[id='' name='닫기' rect=(1702,217,1746,254) hwnd=0]
+            #        -> describe() re-read it as rect=(0,0,0,0)
+            #
+            # (-2147220991 == 0x80040201 EVENT_E_ALL_SUBSCRIBERS_FAILED — the
+            # UIA provider went away.) Both were real buttons whose own click
+            # destroyed them: 취소 closes the Site Manager dialog, 닫기 closes
+            # a dialog. The worker thread inspects 0.2-0.5s later, by which
+            # time the provider is gone.
+            #
+            # The bug is what happened NEXT. A dead element falls into the
+            # light-dismiss recovery below, which re-hit-tests the foreground
+            # window's tree and adopts whatever STATIC BACKDROP happens to sit
+            # under the point — measured: FileZilla's log pane
+            # ('RichEdit Control', a Document) and its status bar
+            # ('연결되지 않았음.', a Text). Those are genuine, named, and
+            # really do contain the point, so every downstream guard accepts
+            # them; server.js's stripWindowFillingContainers can't help either
+            # (Document/Text are deliberately excluded, and neither is close
+            # to the 80% window-fill ratio). The result is a step that replays
+            # cleanly and does absolutely nothing — the exact silent false
+            # PASS §3 forbids — while the user's real 취소/닫기 click is lost.
+            #
+            # A dead element's identity cannot be recovered from a point,
+            # because the point now belongs to something else. Drop the
+            # selector so codegen emits an explicit FAIL step (§3), which is
+            # what "we could not determine what was clicked" honestly means.
+            # This is narrow by construction: every genuine recovery case has
+            # a VALID rect and is untouched — the XAML Light Dismiss overlay
+            # (2026-07-12 Notepad, rect = the whole window), the untracked
+            # WebView2 subtree (2026-08-05 TeamViewer), and the wrong-window
+            # contamination guard (2026-08-04 PuTTY/Chrome, rect=(219,367,
+            # 294,405)) all read their rects fine and are rejected for
+            # semantic reasons, not read failures.
+            if light_dismiss and elem is not None:
+                _r = info.get("rect")
+                _dead = (not isinstance(_r, tuple)) or _r == (0, 0, 0, 0)
+                if _dead:
+                    log(f"[inspect] adopted element at ({x},{y}) is dead "
+                        f"(rect={_r!r}) — its provider went away before it could "
+                        "be read, so the point no longer identifies it. Skipping "
+                        "light-dismiss recovery, which would adopt whatever "
+                        "static backdrop sits underneath (§3: an honest FAIL "
+                        "step beats a silent no-op)")
+                    # Exactly the shape the existing "no resolvable element"
+                    # drop below produces — codegen already turns that into an
+                    # explicit FAIL step; do not invent a second variant.
+                    for k in ("name", "automationId", "className", "controlType"):
+                        info[k] = ""
+                    info["locatorStrategy"] = "coordinate"
+                    info["locatorValue"] = ""
+                    # The existing drop path reaches the tail of this function
+                    # and picks this up there; an early return has to set it
+                    # itself or the event ships with a stale/absent fallback.
+                    info["locatorFallback"] = "coordinate"
+                    return info
+
             if light_dismiss:
                 # The click raced a menu/flyout opening: by the time this hit
                 # test ran, the XAML light-dismiss overlay (a full-window,
