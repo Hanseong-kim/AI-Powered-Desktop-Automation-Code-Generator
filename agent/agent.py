@@ -20,6 +20,7 @@ MUST be run from an *Administrator* terminal, otherwise UIA properties
     python agent.py
 """
 
+import hashlib
 import json
 import math
 import os
@@ -90,6 +91,101 @@ def log(*args):
     print("[agent]", *args, flush=True)
 
 
+def point_in_rect(rect, x, y):
+    """Win32/UIA rect semantics: `right` and `bottom` are EXCLUSIVE.
+
+    A pixel at y == rect.bottom is one row BELOW the control, not its last
+    row. Testing containment with `<=` therefore adopts clicks that physically
+    missed the target — measured 2026-08-03 on a TeamViewer login dialog:
+
+        click pt=(916,533)  비밀번호 Edit rect=[822,517,1022,533]  -> y == bottom
+            captured as "click 비밀번호", but the real click landed outside the
+            field, focus stayed on the 이메일 Edit above it, and the keystrokes
+            that followed were (correctly) attributed to 이메일.
+        click pt=(852,532)  same rect                              -> inside
+            focus moved, and the next keystrokes went to 비밀번호.
+
+    One pixel decided it, which is what rules out a focus/timing race and
+    pins the fault on this comparison. Replaying the fabricated event is
+    worse than dropping it: UIA clicks the element's CENTRE, so replay DOES
+    focus the field and then diverges from the recording it came from.
+    """
+    if not isinstance(rect, (tuple, list)) or len(rect) != 4:
+        return False
+    left, top, right, bottom = rect
+    return left <= x < right and top <= y < bottom
+
+
+# Window classes an embedded Chromium view publishes. Detection is by window
+# class only — never by app name or exe path — so WebView2, Electron and CEF
+# are all covered by the same rule (CLAUDE.md §6: no per-app integration).
+# Measured 2026-08-03, TeamViewer 15.79 child chain:
+#   MainWindowOne > TV_WebView2Control > Chrome_WidgetWin_0/1
+#                                      > Chrome_RenderWidgetHostHWND
+CHROMIUM_HOST_CLASSES = (
+    "Chrome_WidgetWin",
+    "Chrome_RenderWidgetHostHWND",
+    "TV_WebView2Control",
+)
+
+
+def is_chromium_host_class(class_name):
+    """True when a window class name belongs to embedded Chromium.
+
+    Split out from is_web_host() so the matching rule is testable without a
+    live UI: is_web_host() answers "is any Chromium window under this hwnd",
+    which depends on what happens to be running on the machine and cannot be
+    asserted deterministically.
+    """
+    return bool(class_name) and any(
+        class_name.startswith(c) for c in CHROMIUM_HOST_CLASSES)
+
+
+def is_web_host(hwnd):
+    """True when `hwnd` has a descendant window belonging to embedded Chromium.
+
+    Such an app publishes its accessibility tree progressively, so both
+    capture and replay must wait for it to settle (see settled_subtree_count).
+    """
+    if not hwnd:
+        return False
+    found = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    def cb(child, _):
+        try:
+            buf = ctypes.create_unicode_buffer(256)
+            ctypes.windll.user32.GetClassNameW(child, buf, 256)
+            if is_chromium_host_class(buf.value):
+                found.append(child)
+                return False
+        except Exception:
+            pass
+        return True
+
+    try:
+        ctypes.windll.user32.EnumChildWindows(hwnd, cb, 0)
+    except Exception:
+        return False
+    return bool(found)
+
+
+def smallest_rect_index(rects, x, y):
+    """Index of the smallest rect containing (x, y), or None.
+
+    Split out from the UIA walk so the selection rule is testable without a
+    live UI. Ties go to the first rect, which is the tree order UIA returned.
+    """
+    best_i, best_area = None, None
+    for i, r in enumerate(rects):
+        if not point_in_rect(r, x, y):
+            continue
+        area = max(0, r[2] - r[0]) * max(0, r[3] - r[1])
+        if best_area is None or area < best_area:
+            best_i, best_area = i, area
+    return best_i
+
+
 # ----------------------------------------------------------------------------
 # UI Automation helpers (run ONLY on the worker thread - COM apartment there)
 # ----------------------------------------------------------------------------
@@ -100,11 +196,35 @@ class UIAInspector:
         import comtypes
         import comtypes.client
         comtypes.CoInitialize()
-        # Generates/loads the UIAutomationClient wrapper module
+        # Generates/loads the UIAutomationClient wrapper module. Kept on the
+        # instance because pattern QueryInterface calls need its interface
+        # types (e.g. IUIAutomationExpandCollapsePattern).
+        self._mod = comtypes.client.GetModule("UIAutomationCore.dll")
         self._uia = comtypes.client.CreateObject(
             "{ff48dba4-60ef-4201-aa87-54103eef594e}",
-            interface=comtypes.client.GetModule("UIAutomationCore.dll").IUIAutomation,
+            interface=self._mod.IUIAutomation,
         )
+        # Geometry of the most recently observed OPEN dropdown list —
+        # see snapshot_open_dropdown(). One inspector lives for the whole
+        # worker loop, so this survives between events.
+        self._dropdown_cache = None
+        # Same as _dropdown_cache, for owner-drawn popup menu items (HeidiSQL
+        # "더 보기") — see snapshot_open_menu()/menu_item_self(). Kept
+        # separate: a combo and a popup menu are never legitimately open at
+        # once, but sharing one cache would still couple two independent
+        # state machines for no reason.
+        self._menu_cache = None
+        # DIAGNOSTIC: element_at()'s decision path for the most recent call,
+        # read back by _inspect() to emit one [trace] line. Observation
+        # only — nothing downstream reads this dict, so it cannot change
+        # behavior. Exists because [diag-click] only ever showed the FINAL
+        # adopted element, which looks identical whether it came from a
+        # correct hit-test or from a wrong-window fallback — measured
+        # 2026-08-04 (PuTTY): this tool's own control-panel elements
+        # ("Captured Events (N)", the React root div) were adopted with no
+        # log line distinguishing how they were reached, so three
+        # consecutive fix attempts couldn't be told apart from a live log.
+        self._last_trace = {}
 
     # File-list rows (e.g. the "폴더 열기" dialog's Explorer ListView) hit-test
     # to this generic in-place-rename edit surrogate rather than the row
@@ -175,8 +295,20 @@ class UIAInspector:
         return None
 
     def element_at(self, x, y):
+        # DIAGNOSTIC: reset the decision-path trace for this call — see
+        # __init__'s _last_trace comment. Every branch below records which
+        # path it took; _inspect() reads this back into one [trace] log line.
+        trace = {"picked_by": None, "root_hwnd": None, "root_ok": None}
+        self._last_trace = trace
         pt = wintypes.POINT(int(x), int(y))
         elem = self._uia.ElementFromPoint(pt)
+        try:
+            raw = self.describe(elem) if elem is not None else {}
+            trace["raw"] = (f"id={raw.get('automationId')!r} name={raw.get('name')!r} "
+                             f"rect={raw.get('rect')!r} hwnd={raw.get('hwnd')!r}")
+        except Exception:
+            trace["raw"] = "ERR"
+        elem_was_deepened = False
         if elem is not None:
             try:
                 needs_deepen = not elem.CurrentAutomationId
@@ -195,13 +327,57 @@ class UIAInspector:
                     except Exception:
                         pass
                 if needs_deepen:
-                    deeper = self._deepen(elem, int(x), int(y))
+                    deeper = None
+                    root_hwnd = self.resolve_root_hwnd(elem)
+                    if not root_hwnd:
+                        # 2026-08-05 (TeamViewer "빠른 연결 허용"/"Easy Access"
+                        # 트리거 실측, 2차 수정 — 1차는 self.target_hwnds를
+                        # 참조하는 버그였다: 그 속성은 Recorder 클래스에 있고
+                        # UIAInspector에는 없어 AttributeError가 조용히 삼켜져
+                        # root_hwnd/root_ok가 트레이스에 아예 안 찍혔다):
+                        # 깊은 Chromium/React DOM은 resolve_root_hwnd()의
+                        # 15-hop 상한을 통째로 넘을 수 있다 — root_hwnd=0이 되어
+                        # smallest_element_at()가 아예 시도되지도 못하고
+                        # depth-capped _deepen()로 떨어졌고, _deepen()도 못
+                        # 찾아 결국 nameless raw 요소가 그대로 남아
+                        # _nearest_named_ancestor()가 창의 94%를 덮는 훨씬
+                        # 못 쓸 조상으로 대체해버렸다. resolve_root_hwnd() 자신을
+                        # 고치면 안 된다 — 그 0 반환값은 _inspect()의 자기-오염
+                        # 방지 가드(2026-08-04 주석 참고)에서 그대로 신뢰된다.
+                        # 같은 클래스의 _search_roots_for()가 이미 똑같은
+                        # 상황에서 쓰는 검증된 폴백(foreground window, GA_ROOT로
+                        # 정규화)을 그대로 재사용한다 — smallest_element_at()가
+                        # 찾은 결과는 어차피 _inspect()의 별도 tracked-window
+                        # 검사를 다시 통과해야 하므로, 여기서 잘못된 창을
+                        # 골라도 그 검사가 걸러낸다.
+                        fg = ctypes.windll.user32.GetForegroundWindow()
+                        if fg:
+                            root_hwnd = ctypes.windll.user32.GetAncestor(fg, GA_ROOT) or fg
+                    root = self.from_handle_safe(root_hwnd)
+                    trace["root_hwnd"] = root_hwnd
+                    trace["root_ok"] = bool(root)
+                    if root:
+                        deeper = self.smallest_element_at(root, int(x), int(y))
+                        if deeper is not None:
+                            trace["picked_by"] = "smallest_element_at"
+                    if deeper is None:
+                        deeper = self._deepen(elem, int(x), int(y))
+                        if deeper is not None:
+                            trace["picked_by"] = "_deepen"
+                    # Adopt even when the result has neither id nor name — the
+                    # anchor_path machinery downstream turns that into a
+                    # relative XPath, and if even that fails the event becomes
+                    # an explicit FAIL step. The old rule kept the ORIGINAL
+                    # element in that case, which is how a 94%-of-window
+                    # container ended up recorded as the click target
+                    # (TeamViewer, 2026-08-03).
                     if deeper is not None:
-                        try:
-                            if deeper.CurrentAutomationId or deeper.CurrentName:
-                                elem = deeper
-                        except Exception:
-                            pass
+                        elem = deeper
+                        elem_was_deepened = True
+                    else:
+                        trace["picked_by"] = "raw-kept (deepen found nothing)"
+                else:
+                    trace["picked_by"] = "raw-direct"
             except Exception:
                 pass
         try:
@@ -230,10 +406,27 @@ class UIAInspector:
                                       or (not aid and not name) or is_unlabeled_edit):
                 row = self._nearest_row_ancestor(elem)
                 if row is not None:
+                    trace["picked_by"] = "row-ancestor"
                     return row
-                if not aid and not name:
+                # 2026-08-05 (TeamViewer "빠른 연결 허용"/"Easy Access" 트리거
+                # 실측): elem_was_deepened가 참이면 elem은 이미
+                # smallest_element_at()/_deepen()이 명시적으로 골라낸, 창을
+                # 덮지 않는 작고 위치가 정확한 요소다. 그런데 바로 아래
+                # _nearest_named_ancestor()가 "이름이 없다"는 이유만으로 그
+                # 결과를 다시 위로 4단계까지 올려버려, 정확히 그 큰 컨테이너
+                # 문제를 피하려고 만든 결과를 도로 큰 컨테이너로 바꿔치기했다
+                # (실측: 이름 없는 위치-정확 요소 대신 창의 94%를 덮는 root
+                # 컨테이너가 채택됨). 이 조상-탐색은 딥닝이 아예 실패해서
+                # elem이 여전히 최초 ElementFromPoint의 raw 히트인 경우에만
+                # 의미가 있다(원래 의도: HeidiSQL SplitButton의 장식용 화살표
+                # 글리프처럼, 진짜 컨트롤은 한 단계 위에 있는 raw-hit 케이스,
+                # 2026-07-29). 딥닝이 성공한 결과에는 적용하지 않는다 —
+                # 이름이 없어도 anchor_path 메커니즘이 그 작고 정확한 위치를
+                # 그대로 살릴 수 있다.
+                if not aid and not name and not elem_was_deepened:
                     named = self._nearest_named_ancestor(elem)
                     if named is not None:
+                        trace["picked_by"] = "named-ancestor"
                         return named
         except Exception:
             pass
@@ -291,7 +484,27 @@ class UIAInspector:
         The real control is still present in the same top-level window's
         ControlView tree as a SIBLING subtree of the overlay, so descend from
         the foreground top-level window while skipping the overlay. Returns
-        None when nothing better than the window itself is found."""
+        None when nothing better than the window itself is found.
+
+        Try smallest_element_at() (FindAll + smallest-area-wins, no depth
+        cap) before falling back to _deepen() (first-containing-child walk,
+        capped at 15 ancestor hops). This function used to call ONLY
+        _deepen() — fine for the XAML light-dismiss case it was built for
+        (2026-07-12, shallow native trees), but measured 2026-08-04
+        (TeamViewer): element_at()'s OWN first pass already found the
+        correct WebView2 button via smallest_element_at() (its rect and
+        name showed up correctly in the pre-rejection [inspect] log), then
+        got rejected as untracked (hwnd==0, routine for web content) and
+        handed to THIS function to recover — which used only the
+        depth-capped _deepen() and came back empty, because a Chromium/React
+        DOM subtree is routinely deeper than 15 hops. The recovery was
+        strictly weaker than the pass that had already succeeded moments
+        earlier, so TeamViewer's WebView2 clicks lost their selectors
+        entirely. smallest_element_at() also filters out anything covering
+        >=80% of the window (WINDOW_FILL_RATIO), which incidentally screens
+        out a full-window light-dismiss scrim on its own — the explicit
+        AutomationId=="Light Dismiss" check below stays as a second layer,
+        not the only one."""
         try:
             hwnd = foreground_top_window()
             if not hwnd:
@@ -299,7 +512,9 @@ class UIAInspector:
             root = self._uia.ElementFromHandle(hwnd)
             if root is None:
                 return None
-            deeper = self._deepen(root, int(x), int(y), skip_overlay=True)
+            deeper = self.smallest_element_at(root, int(x), int(y))
+            if deeper is None:
+                deeper = self._deepen(root, int(x), int(y), skip_overlay=True)
             if deeper is None:
                 return None
             try:
@@ -432,6 +647,752 @@ class UIAInspector:
                 continue
         return None
 
+    # ── open-dropdown item resolution (2026-07-31) ──────────────────────────
+    # Clicking an item in an OPEN combo dropdown hit-tests to the COMBO, never
+    # to the item: ElementFromPoint returns the combo whose bounding rect is
+    # still the COLLAPSED box, so the "click point outside the adopted rect"
+    # guard below used to throw the selector away and the event degraded to a
+    # click on whatever panel sat underneath (measured 2026-07-31 on HeidiSQL's
+    # network-type combo: every item click was recorded as `click '설정'
+    # TTabSheet`).
+    #
+    # Win32 ComboBoxEx is two stacked controls sharing one rect:
+    #   TComboBoxEx (Pane)  Name = the currently selected value, id = its hwnd
+    #                       -> patterns: Legacy only, CANNOT be expanded
+    #   ComboBox            Name = '', id = ''
+    #                       -> patterns: ExpandCollapse, Value, Legacy
+    # Only the inner one is drivable, and a selector built from the outer one's
+    # Name can never match before the value is already selected.
+    #
+    # The open list DOES publish its items (18 measured), each supporting
+    # Invoke/SelectionItem -- but for ComboBoxEx every item Name is EMPTY
+    # (owner-drawn, icon-per-item), so an item can only be addressed by its
+    # POSITION IN THE LIST. That is a structural index, not a screen
+    # coordinate, and it matches the slot-index handling the generator already
+    # uses for nameless ListItem/TreeItem/DataItem rows.
+    CT_COMBO_BOX = 50003
+    CT_LIST_ITEM = 50007
+    CT_MENU = 50009
+    CT_MENU_ITEM = 50011
+
+    def _is_combo_like(self, info):
+        return (info.get("controlType") == "ComboBox"
+                or "ComboBox" in (info.get("className") or ""))
+
+    def _is_menu_like(self, info):
+        # Measured 2026-08-04 (HeidiSQL "더 보기"): the TRIGGER is a VCL
+        # SplitButton, not a MenuItem — the assumption that it would mirror
+        # ComboBox's own controlType was wrong, confirmed via the diagnostic
+        # log in snapshot_open_menu(). SplitButton IS the trigger type
+        # (button + attached menu is exactly what that UIA control type
+        # means), so include it alongside MenuItem for triggers that
+        # genuinely are plain popup-menu items (e.g. a submenu opener inside
+        # an already-open menu).
+        return info.get("controlType") in ("MenuItem", "SplitButton")
+
+    def settled_subtree_count(self, root, timeout=8.0, quiet_for=1.5):
+        """Poll the subtree size until it stops growing, then return it.
+
+        An embedded-Chromium app publishes its accessibility tree
+        progressively. Measured 2026-08-03 (TeamViewer 15.79), the SAME window
+        sampled repeatedly from a cold start:
+
+            t=0s   t=1s   t=3s   t=7s
+              25     26     61     61
+
+        Sampling once reports the observer's timing, not the app. That single
+        mistake is what produced the 2026-07-31 "TeamViewer is Tier 4, not
+        automatable" verdict, which did not survive re-measurement.
+        """
+        best, stable_since = 0, None
+        deadline = time.time() + timeout
+        while True:
+            try:
+                found = root.FindAll(7, self._uia.CreateTrueCondition())
+                cur = found.Length if found else 0
+            except Exception:
+                cur = 0
+            if cur > best:
+                best, stable_since = cur, time.time()
+            elif stable_since is None:
+                stable_since = time.time()
+            if time.time() - stable_since >= quiet_for or time.time() >= deadline:
+                return best
+            time.sleep(0.3)
+
+    def _search_roots_for(self, elem):
+        """Window elements to run FindAll from, most specific first.
+
+        resolve_root_hwnd() walks up looking for a NativeWindowHandle and
+        returns 0 when it finds none — measured 2026-07-31: an item inside an
+        open combo dropdown is exactly that case, and ElementFromHandle(0)
+        then raises. Fall back to the foreground window, which during capture
+        is the app window that owns both the combo and its popup list.
+
+        Every candidate is normalised through GA_ROOT — the same walk
+        describe() already does for windowTitle. Without it this returns the
+        CONTROL, not a window, whenever the control is itself a window:
+        measured 2026-08-03 on HeidiSQL's network-type combo, a VCL
+        TComboBoxEx owns its own hwnd (which is also why its AutomationId is
+        an hwnd), so resolve_root_hwnd() returned 3674908 — the combo itself —
+        and open_dropdown_item_at()'s FindAll ran inside the COLLAPSED combo's
+        subtree, which structurally cannot contain the open list (the capture
+        log shows the watcher registering the list's own top-level windows,
+        hwnd=660188/1642736, the instant it opened). Every item click then
+        fell through to the light-dismiss fallback and was recorded as a click
+        on whatever sat BEHIND the open list — a '자격 증명 프롬프트' CheckBox
+        the user never touched. Silent false capture, worse than a FAIL step.
+        """
+        seen = set()
+        for hwnd in (self.resolve_root_hwnd(elem),
+                     ctypes.windll.user32.GetForegroundWindow()):
+            if not hwnd:
+                continue
+            root_hwnd = ctypes.windll.user32.GetAncestor(hwnd, GA_ROOT) or hwnd
+            if root_hwnd in seen:
+                continue
+            seen.add(root_hwnd)
+            try:
+                root = self._uia.ElementFromHandle(root_hwnd)
+                if root:
+                    yield root
+            except Exception:
+                continue
+
+    def _search_root_for(self, elem):
+        """The single most specific search root — see _search_roots_for()."""
+        for root in self._search_roots_for(elem):
+            return root
+        return None
+
+    def _same_process_top_windows(self, elem):
+        """Every visible top-level window owned by elem's own process.
+
+        A Win32 popup menu (TrackPopupMenu — "더 보기") always renders as a
+        SEPARATE top-level window, and measured 2026-08-04 (HeidiSQL): unlike
+        a modal dialog, it does not become GetForegroundWindow()'s return
+        value. _search_roots_for()'s two candidates (the trigger's own
+        window, the foreground window) therefore both search the wrong
+        subtree and silently find nothing — snapshot_open_menu() never
+        cached the popup's items, so the picking click had nothing to
+        resolve against. A fresh same-PID window enumeration finds it
+        without depending on watcher-thread timing or foreground/activation
+        behavior, which differs per control (a combo's own owner-drawn list
+        is a CHILD of the main window and doesn't need this at all)."""
+        pid = 0
+        try:
+            h = elem.CurrentNativeWindowHandle
+            if h:
+                pid = pid_of_hwnd(h)
+        except Exception:
+            pass
+        if not pid:
+            pid = pid_of_hwnd(foreground_top_window())
+        if not pid:
+            return []
+        out = []
+        for hwnd in visible_toplevel_windows():
+            try:
+                if pid_of_hwnd(hwnd) == pid:
+                    out.append(hwnd)
+            except Exception:
+                continue
+        return out
+
+    def _search_roots_for_menu(self, elem):
+        """_search_roots_for() plus every same-process top-level window —
+        see _same_process_top_windows()."""
+        seen = set()
+        for root in self._search_roots_for(elem):
+            try:
+                h = root.CurrentNativeWindowHandle
+            except Exception:
+                h = None
+            if h:
+                seen.add(h)
+            yield root
+        for hwnd in self._same_process_top_windows(elem):
+            if not hwnd or hwnd in seen:
+                continue
+            seen.add(hwnd)
+            try:
+                root = self._uia.ElementFromHandle(hwnd)
+                if root:
+                    yield root
+            except Exception:
+                continue
+
+    def from_handle_safe(self, hwnd):
+        try:
+            el = self._uia.ElementFromHandle(hwnd)
+            return el if el else None      # comtypes returns NULL, not None
+        except Exception:
+            return None
+
+    # A candidate covering at least this fraction of the window is a container,
+    # not a target — same threshold as server.js WINDOW_FILL_RATIO.
+    WINDOW_FILL_RATIO = 0.80
+
+    def smallest_element_at(self, root, x, y):
+        """The smallest element in root's subtree containing (x, y).
+
+        Replaces the first-containing-child descent of _deepen(): that walk
+        could not backtrack out of a dead-end branch, and its depth cap had to
+        be retuned per UI framework. Selecting by area is independent of tree
+        shape and depth.
+        """
+        try:
+            arr = root.FindAll(7, self._uia.CreateTrueCondition())
+        except Exception:
+            return None
+        if not arr or not arr.Length:
+            return None
+        try:
+            wr = root.CurrentBoundingRectangle
+            win_area = max(1, (wr.right - wr.left) * (wr.bottom - wr.top))
+        except Exception:
+            win_area = None
+        els, rects = [], []
+        for i in range(arr.Length):
+            el = arr.GetElement(i)
+            try:
+                r = el.CurrentBoundingRectangle
+            except Exception:
+                continue
+            rect = (r.left, r.top, r.right, r.bottom)
+            if win_area:
+                area = max(0, rect[2] - rect[0]) * max(0, rect[3] - rect[1])
+                if area / win_area >= self.WINDOW_FILL_RATIO:
+                    continue        # a window-filling container is not a target
+            els.append(el)
+            rects.append(rect)
+        idx = smallest_rect_index(rects, x, y)
+        return els[idx] if idx is not None else None
+
+    def _inner_expandable_combo(self, elem):
+        """The control that actually owns the dropdown. For a ComboBoxEx the
+        outer wrapper cannot be expanded; its same-rect ComboBox sibling can."""
+        try:
+            if elem.GetCurrentPattern(self.EXPAND_COLLAPSE_PATTERN_ID):
+                return elem
+        except Exception:
+            pass
+        root = self._search_root_for(elem)
+        if root is None:
+            return None
+        try:
+            r = elem.CurrentBoundingRectangle
+            cands = root.FindAll(7, self._uia.CreatePropertyCondition(
+                30003, self.CT_COMBO_BOX))          # TreeScope_Subtree
+        except Exception:
+            return None
+        for i in range(cands.Length):
+            c = cands.GetElement(i)
+            try:
+                cr = c.CurrentBoundingRectangle
+                if (abs(cr.left - r.left) <= 2 and abs(cr.top - r.top) <= 2
+                        and abs(cr.right - r.right) <= 2
+                        and c.GetCurrentPattern(self.EXPAND_COLLAPSE_PATTERN_ID)):
+                    return c
+            except Exception:
+                continue
+        return None
+
+    def combo_item_self(self, elem, info):
+        """The hit test landed ON a dropdown item (not on the combo).
+
+        Measured 2026-07-31: whether ElementFromPoint returns the ListItem or
+        the combo depends on timing — when the list has been open long enough
+        for its items to reach the accessibility tree, the item itself comes
+        back. That case never trips the "outside the adopted rect" guard, so
+        open_dropdown_item_at() below never sees it; but for an owner-drawn
+        ComboBoxEx the item has NO Name and NO AutomationId, so it still ends
+        up with no usable selector and degrades into an anchor path or a FAIL
+        step. Recognise it here and record the same
+        combo + position pair.
+
+        Returns (inner_combo, index, total) or None.
+        """
+        if info.get("controlType") != "ListItem":
+            return None
+        if info.get("name") or info.get("automationId"):
+            return None                      # a named item needs none of this
+        root = self._search_root_for(elem)
+        if root is None:
+            return None
+        try:
+            items = root.FindAll(7, self._uia.CreatePropertyCondition(
+                30003, self.CT_LIST_ITEM))
+            combos = root.FindAll(7, self._uia.CreatePropertyCondition(
+                30003, self.CT_COMBO_BOX))
+        except Exception:
+            return None
+        if not items or not items.Length:
+            return None
+        # Which combo owns this list? Exactly one should be expanded right now.
+        expanded = []
+        for i in range(combos.Length):
+            c = combos.GetElement(i)
+            try:
+                ecp = c.GetCurrentPattern(self.EXPAND_COLLAPSE_PATTERN_ID)
+                if ecp and ecp.QueryInterface(
+                        self._mod.IUIAutomationExpandCollapsePattern
+                ).CurrentExpandCollapseState == 1:      # Expanded
+                    expanded.append(c)
+            except Exception:
+                continue
+        if len(expanded) != 1:
+            return None
+        try:
+            target_rect = elem.CurrentBoundingRectangle
+        except Exception:
+            return None
+        for i in range(items.Length):
+            try:
+                r = items.GetElement(i).CurrentBoundingRectangle
+            except Exception:
+                continue
+            if (r.left == target_rect.left and r.top == target_rect.top
+                    and r.right == target_rect.right
+                    and r.bottom == target_rect.bottom):
+                return expanded[0], i, items.Length
+        return None
+
+    def menu_item_self(self, elem, info):
+        """The hit test landed ON a popup menu item (not on its trigger).
+
+        Mirrors combo_item_self() for HeidiSQL's "더 보기" overflow menu:
+        the item is icon-only (no Name, no AutomationId — measured
+        2026-08-04, PuTTY/TeamViewer/HeidiSQL logs all show the SAME shape:
+        element_at() lands directly on a small, real, but nameless MenuItem
+        rect, not on the trigger). A popup menu's items live under a
+        separate `Menu` (ControlType 50009) container distinct from the
+        `MenuItem` (50011) trigger that opened it — the same clean type
+        split ComboBox/ListItem gives the combo case, so "which popup is
+        open" is answered by "does a Menu container exist in the search
+        root". The RETURNED element is still the trigger MenuItem, not the
+        Menu container — osExpandCollapse.py needs something with
+        ExpandCollapsePattern to re-invoke, and it needs to be the same kind
+        of element open_menu_item_at()/snapshot_open_menu() already key the
+        cache on, so replay and this direct-hit path describe identical
+        things.
+
+        Returns (trigger, index, total) or None.
+        """
+        if info.get("controlType") != "MenuItem":
+            return None
+        if info.get("name") or info.get("automationId"):
+            return None                      # a named item needs none of this
+        # The Menu container and the trigger can legitimately live in
+        # DIFFERENT top-level windows (the popup vs. the main window that
+        # owns the trigger button) — search every same-process window for
+        # each independently rather than assuming one root has both.
+        menu, items = None, None
+        for root in self._search_roots_for_menu(elem):
+            try:
+                menus = root.FindAll(7, self._uia.CreatePropertyCondition(
+                    30003, self.CT_MENU))
+            except Exception:
+                continue
+            if not menus or menus.Length != 1:
+                continue                     # 0 or >1 open popups — ambiguous
+            try:
+                cand_items = menus.GetElement(0).FindAll(
+                    7, self._uia.CreatePropertyCondition(30003, self.CT_MENU_ITEM))
+            except Exception:
+                continue
+            if cand_items and cand_items.Length:
+                menu, items = menus.GetElement(0), cand_items
+                break
+        if menu is None or items is None:
+            return None
+        # Which element is the trigger? NOT found by "exactly one MenuItem
+        # with ExpandCollapseState==Expanded" — measured 2026-08-04
+        # (HeidiSQL "더 보기"): a VCL SplitButton's ExpandCollapseState is
+        # always None/unreliable, the same disease snapshot_open_menu() hit,
+        # and the real trigger isn't even a MenuItem to begin with (it's a
+        # SplitButton — a different controlType this search wouldn't find
+        # anyway). Reuse the reference snapshot_open_menu() already captured
+        # at the one moment the trigger was reliably known: the click that
+        # opened THIS SAME popup.
+        c = self._menu_cache
+        if not c or "trigger" not in c:
+            return None
+        trigger = c["trigger"]
+        try:
+            target_rect = elem.CurrentBoundingRectangle
+        except Exception:
+            return None
+        for i in range(items.Length):
+            try:
+                r = items.GetElement(i).CurrentBoundingRectangle
+            except Exception:
+                continue
+            if (r.left == target_rect.left and r.top == target_rect.top
+                    and r.right == target_rect.right
+                    and r.bottom == target_rect.bottom):
+                return trigger, i, items.Length
+        return None
+
+    # How long a cached dropdown geometry stays usable. Only ever consumed by
+    # the very next click, so this just bounds a stale cache.
+    DROPDOWN_CACHE_TTL = 15.0
+
+    def snapshot_open_dropdown(self, elem, info):
+        """Record the geometry of a dropdown list WHILE IT IS STILL OPEN.
+
+        Measured 2026-08-03 (HeidiSQL network-type combo): the click that
+        selects an item is also the click that CLOSES the list, and the worker
+        thread inspects 0.2-0.5s later — by then the list is gone. The capture
+        log proves it in one run: a scroll over the open list found 18
+        ListItems, while a click on an item found 0 from the same search root,
+        and the combo's Name had already flipped to the newly selected value
+        ('MySQL on RDS') by inspection time. With nothing to match, the hit
+        test fell through to the light-dismiss fallback and recorded whatever
+        the closed list had been covering — a '자격 증명 프롬프트' CheckBox the
+        user never clicked. A silent false capture, worse than a FAIL step.
+
+        So snapshot on the click that OPENS the list (that one lands inside
+        the combo's own rect, and the list is already up when it is
+        processed). The next click then resolves against this geometry. What
+        is stored is used only to answer "which item index is under this
+        point" — the emitted event still carries an index, never a
+        coordinate."""
+        if not self._is_combo_like(info):
+            return
+        inner = self._inner_expandable_combo(elem)
+        if inner is None:
+            return
+        try:
+            ecp = inner.GetCurrentPattern(self.EXPAND_COLLAPSE_PATTERN_ID)
+            expanded = bool(ecp) and ecp.QueryInterface(
+                self._mod.IUIAutomationExpandCollapsePattern
+            ).CurrentExpandCollapseState == 1
+        except Exception:
+            return
+        if not expanded:
+            # The click collapsed an already-open list — the cache would
+            # describe a list that is no longer on screen.
+            self._dropdown_cache = None
+            return
+        rows = []
+        for root in self._search_roots_for(elem):
+            try:
+                items = root.FindAll(7, self._uia.CreatePropertyCondition(
+                    30003, self.CT_LIST_ITEM))
+            except Exception:
+                continue
+            if not items or not items.Length:
+                continue
+            for i in range(items.Length):
+                it = items.GetElement(i)
+                try:
+                    r = it.CurrentBoundingRectangle
+                except Exception:
+                    continue
+                try:
+                    nm = it.CurrentName or ""
+                except Exception:
+                    nm = ""
+                rows.append(((r.left, r.top, r.right, r.bottom), nm))
+            if rows:
+                break
+        if not rows:
+            self._dropdown_cache = None
+            return
+        self._dropdown_cache = {"inner": inner, "rows": rows, "ts": time.time()}
+        log(f"[inspect] dropdown opened — cached geometry of {len(rows)} items "
+            "(the selecting click closes the list before it can be inspected)")
+
+    @staticmethod
+    def _rows_to_cache(rows):
+        """[(element, rect)] -> [((left, top, right, bottom), name)]."""
+        out = []
+        for it, r in rows:
+            try:
+                nm = it.CurrentName or ""
+            except Exception:
+                nm = ""
+            out.append(((r.left, r.top, r.right, r.bottom), nm))
+        return out
+
+    def _dropdown_item_from_cache(self, x, y):
+        """Resolve (x, y) against the geometry cached while the list was open."""
+        c = self._dropdown_cache
+        if not c:
+            return None
+        if time.time() - c["ts"] > self.DROPDOWN_CACHE_TTL:
+            self._dropdown_cache = None
+            return None
+        for i, ((left, top, right, bottom), nm) in enumerate(c["rows"]):
+            if left <= x <= right and top <= y <= bottom:
+                total = len(c["rows"])
+                self._dropdown_cache = None      # consumed; the list is closed
+                log(f"[inspect] live list already closed — ({x},{y}) matched the "
+                    f"geometry cached while it was open: item {i + 1}/{total} "
+                    f"(name={nm!r})")
+                return c["inner"], i, total, nm
+        return None
+
+    def open_dropdown_item_at(self, elem, x, y):
+        """A click at (x, y) that fell outside `elem`'s rect while `elem` is a
+        combo: if an open dropdown item covers the point, return
+        (inner_combo, index, total, item_name). Otherwise None.
+
+        Tries every candidate root, not just the most specific one: the list
+        can live in the app window's subtree, in its own top-level popup, or
+        both (measured 2026-07-31 — PuTTY 5 items, HeidiSQL 5 and 18)."""
+        scanned = []
+        for root in self._search_roots_for(elem):
+            try:
+                items = root.FindAll(7, self._uia.CreatePropertyCondition(
+                    30003, self.CT_LIST_ITEM))          # TreeScope_Subtree
+            except Exception:
+                continue
+            if not items or not items.Length:
+                scanned.append(0)
+                continue
+            rows = []
+            for i in range(items.Length):
+                it = items.GetElement(i)
+                try:
+                    r = it.CurrentBoundingRectangle
+                    rows.append((it, r))
+                except Exception:
+                    continue
+            scanned.append(len(rows))
+            hit_idx = None
+            for i, (it, r) in enumerate(rows):
+                if r.left <= x <= r.right and r.top <= y <= r.bottom:
+                    hit_idx = i
+                    break
+            if hit_idx is None:
+                continue
+            inner = self._inner_expandable_combo(elem)
+            if inner is None:
+                return None
+            try:
+                item_name = rows[hit_idx][0].CurrentName or ""
+            except Exception:
+                item_name = ""
+            # The list is on screen RIGHT NOW, so this geometry supersedes
+            # whatever was cached when it opened. Scrolling an open list moves
+            # every item, and a stale cache then maps the next click to the
+            # wrong index — measured 2026-08-03: after a scroll, the click that
+            # picked the FIRST item (y=368) resolved against the pre-scroll
+            # cache as item #5, so replay re-selected 'MySQL on RDS' instead of
+            # going back to 'MariaDB or MySQL (TCP/IP)'. The scroll event
+            # itself reads the live list, which is exactly when the cache can
+            # be refreshed.
+            self._dropdown_cache = {
+                "inner": inner,
+                "rows": self._rows_to_cache(rows),
+                "ts": time.time(),
+            }
+            return inner, hit_idx, len(rows), item_name
+        # No live list — the usual case for the click that SELECTS an item,
+        # because that click closes the list before this runs. Fall back to
+        # the geometry captured when it opened.
+        cached = self._dropdown_item_from_cache(x, y)
+        if cached is not None:
+            return cached
+        # DIAGNOSTIC — this path used to be silent, which is why the
+        # 2026-08-03 mis-capture (dropdown item recorded as the CheckBox
+        # behind the open list) gave no clue in the log about WHERE it broke.
+        log(f"[inspect] open dropdown scan found no item under ({x},{y}) — "
+            f"ListItem counts per search root: {scanned or 'no root resolved'}"
+            f"; cached geometry: "
+            f"{len(self._dropdown_cache['rows']) if self._dropdown_cache else 'none'}")
+        return None
+
+    # ── Owner-drawn popup menu items (HeidiSQL "더 보기") ────────────────────
+    # Same problem as the owner-drawn combo above (icon-only items, no Name,
+    # no AutomationId — the trigger click IS captured fine via RC-menuitem,
+    # 2026-08-04 f981267, but the item it opens has nothing to select by).
+    # Same three-mechanism answer, applied to Menu/MenuItem instead of
+    # ComboBox/ListItem: menu_item_self() for a live direct hit,
+    # snapshot_open_menu()/_menu_item_from_cache() for the item-picking click
+    # that closes the popup before the worker thread inspects it, and
+    # open_menu_item_at() for a live re-scan when the popup is still open but
+    # the hit landed just outside a specific item's rect. Kept in a SEPARATE
+    # cache (_menu_cache) from _dropdown_cache — a combo and a popup menu
+    # cannot both legitimately be open at once, but a shared cache would
+    # still couple two independent state machines for no reason.
+
+    def snapshot_open_menu(self, elem, info):
+        """Record the geometry of a popup menu's items WHILE IT IS STILL OPEN.
+
+        Same race as snapshot_open_dropdown(): the click that picks an item
+        also closes the popup, and the worker thread inspects 0.2-0.5s later
+        — by then the Menu container and its MenuItem children are gone. So
+        snapshot on the click that OPENS it (elem is the trigger MenuItem,
+        already Expanded by the time this runs)."""
+        if not self._is_menu_like(info):
+            # DIAGNOSTIC: only for elements that could plausibly BE a menu
+            # trigger (support ExpandCollapsePattern) — avoids logging on
+            # every ordinary click. Measured 2026-08-04 (HeidiSQL "더 보기"):
+            # _is_menu_like() assumed the trigger reports controlType
+            # "MenuItem" (mirroring how a ComboBox trigger reports
+            # "ComboBox") — unconfirmed by any log, and if this trigger is
+            # actually a VCL SplitButton/Button (plausible per CLAUDE.md's
+            # own prose calling it a "SplitButton"), the guard silently
+            # no-ops and the whole feature never engages. This makes that
+            # mismatch visible instead of guessing at a fix.
+            if self.has_expand_collapse(elem):
+                log(f"[inspect] snapshot_open_menu: {info.get('name')!r} supports "
+                    f"ExpandCollapsePattern but controlType="
+                    f"{info.get('controlType')!r} != 'MenuItem' — not treated as "
+                    "a menu trigger, no snapshot taken")
+            return
+        # Do NOT gate on ExpandCollapseState — measured 2026-08-04 (HeidiSQL
+        # "더 보기", VCL SplitButton): across two full recordings, EVERY
+        # single attempt logged ExpandCollapseState=None, even though the
+        # popup was genuinely visibly open each time (a new top-level window
+        # appears via the watcher right after the click). A SplitButton's
+        # popup is shown via a raw TrackPopupMenu() call, which has no
+        # obligation to keep this pattern's state property in sync the way a
+        # real MenuItem does — gating on it made this feature dead code for
+        # every SplitButton trigger. The reliable signal is simply "does a
+        # Menu container exist right now among same-process top-level
+        # windows" — _search_roots_for_menu() already answers that
+        # independently of anything the trigger itself reports.
+        rows = []
+        tried = []
+        # Retry budget for the SAME race osExpandCollapse.py's
+        # resolve_target() already has (2026-08-04, HeidiSQL tab-switch ->
+        # combo search): measured just now, "더 보기" clicked 7 times in one
+        # recording found 0 Menu containers on same-process windows exactly
+        # 4 times and 1 on the 3 successes — the popup window is real
+        # (the watcher confirms it a beat later) but its accessibility
+        # content isn't always populated yet at this worker thread's first
+        # look. 5 attempts / 100ms (~0.5s budget) mirrors the scale of that
+        # existing fix rather than inventing a new number.
+        for attempt in range(5):
+            if attempt > 0:
+                time.sleep(0.1)
+            tried = []
+            for root in self._search_roots_for_menu(elem):
+                try:
+                    root_hwnd = root.CurrentNativeWindowHandle
+                except Exception:
+                    root_hwnd = None
+                try:
+                    menus = root.FindAll(7, self._uia.CreatePropertyCondition(
+                        30003, self.CT_MENU))
+                except Exception as e:
+                    tried.append(f"hwnd={root_hwnd}: FindAll raised {e!r}")
+                    continue
+                menu_count = menus.Length if menus else 0
+                tried.append(f"hwnd={root_hwnd}: {menu_count} Menu container(s)")
+                if not menus or menus.Length != 1:
+                    continue
+                try:
+                    items = menus.GetElement(0).FindAll(7, self._uia.CreatePropertyCondition(
+                        30003, self.CT_MENU_ITEM))
+                except Exception:
+                    continue
+                if not items or not items.Length:
+                    continue
+                for i in range(items.Length):
+                    it = items.GetElement(i)
+                    try:
+                        r = it.CurrentBoundingRectangle
+                    except Exception:
+                        continue
+                    try:
+                        nm = it.CurrentName or ""
+                    except Exception:
+                        nm = ""
+                    rows.append(((r.left, r.top, r.right, r.bottom), nm))
+                if rows:
+                    break
+            if rows:
+                break
+        if not rows:
+            log(f"[inspect] snapshot_open_menu: {info.get('name')!r} was "
+                f"Expanded but no Menu container with items was found — "
+                f"searched: {tried or 'no root resolved'}")
+            self._menu_cache = None
+            return
+        self._menu_cache = {"trigger": elem, "rows": rows, "ts": time.time()}
+        log(f"[inspect] popup menu opened — cached geometry of {len(rows)} items "
+            "(the selecting click closes the menu before it can be inspected)")
+
+    def _menu_item_from_cache(self, x, y):
+        """Resolve (x, y) against the geometry cached while the menu was open."""
+        c = self._menu_cache
+        if not c:
+            return None
+        if time.time() - c["ts"] > self.DROPDOWN_CACHE_TTL:
+            self._menu_cache = None
+            return None
+        for i, ((left, top, right, bottom), nm) in enumerate(c["rows"]):
+            if left <= x <= right and top <= y <= bottom:
+                total = len(c["rows"])
+                self._menu_cache = None      # consumed; the menu is closed
+                log(f"[inspect] live menu already closed — ({x},{y}) matched the "
+                    f"geometry cached while it was open: item {i + 1}/{total} "
+                    f"(name={nm!r})")
+                return c["trigger"], i, total, nm
+        return None
+
+    def open_menu_item_at(self, elem, x, y):
+        """A click at (x, y) that fell outside `elem`'s rect while `elem` is a
+        menu trigger: if an open popup item covers the point, return
+        (trigger, index, total, item_name). Otherwise None."""
+        scanned = []
+        for root in self._search_roots_for_menu(elem):
+            try:
+                menus = root.FindAll(7, self._uia.CreatePropertyCondition(
+                    30003, self.CT_MENU))
+            except Exception:
+                continue
+            if not menus or menus.Length != 1:
+                scanned.append(0)
+                continue
+            try:
+                items = menus.GetElement(0).FindAll(7, self._uia.CreatePropertyCondition(
+                    30003, self.CT_MENU_ITEM))
+            except Exception:
+                continue
+            if not items or not items.Length:
+                scanned.append(0)
+                continue
+            rows = []
+            for i in range(items.Length):
+                it = items.GetElement(i)
+                try:
+                    r = it.CurrentBoundingRectangle
+                    rows.append((it, r))
+                except Exception:
+                    continue
+            scanned.append(len(rows))
+            hit_idx = None
+            for i, (it, r) in enumerate(rows):
+                if r.left <= x <= r.right and r.top <= y <= r.bottom:
+                    hit_idx = i
+                    break
+            if hit_idx is None:
+                continue
+            try:
+                item_name = rows[hit_idx][0].CurrentName or ""
+            except Exception:
+                item_name = ""
+            self._menu_cache = {
+                "trigger": elem,
+                "rows": self._rows_to_cache(rows),
+                "ts": time.time(),
+            }
+            return elem, hit_idx, len(rows), item_name
+        cached = self._menu_item_from_cache(x, y)
+        if cached is not None:
+            return cached
+        log(f"[inspect] open menu scan found no item under ({x},{y}) — "
+            f"MenuItem counts per search root: {scanned or 'no root resolved'}"
+            f"; cached geometry: "
+            f"{len(self._menu_cache['rows']) if self._menu_cache else 'none'}")
+        return None
+
     def resolve_root_hwnd(self, elem, max_up=15):
         """Walk ControlView ancestors from `elem` until one with its own
         NativeWindowHandle is found, and return that hwnd (0 if none).
@@ -560,6 +1521,38 @@ class UIAInspector:
                     info["windowTitle"] = win32gui.GetWindowText(fg)
             except Exception:
                 pass
+
+        try:
+            # 2026-08-04 (TeamViewer WebView2 재생 무반응 원인): WebView2가
+            # 그리는 요소는 전부 hwnd=0인 UIA-가상 하위요소다. GetAncestor(0,
+            # GA_ROOT)는 0을 반환하므로 위 표현식이 통째로 0이 되고,
+            # is_web_host(0)은 150행의 hwnd 가드에 걸려 무조건 False —
+            # "hwnd가 없는 요소"를 감지하려는 기능이 hwnd가 없다는 바로 그
+            # 이유로 항상 실패했다. windowTitle 폴백(위 1476-1482행)과 같은
+            # 패턴으로 foreground window로 폴백한다.
+            web_check_hwnd = (
+                ctypes.windll.user32.GetAncestor(info.get("hwnd", 0) or 0, GA_ROOT)
+                or info.get("hwnd", 0) or 0)
+            if not web_check_hwnd:
+                web_check_hwnd = ctypes.windll.user32.GetForegroundWindow() or 0
+            info["isWebContent"] = is_web_host(web_check_hwnd)
+        except Exception:
+            info["isWebContent"] = False
+
+        # NOTE: a popup MenuItem's AutomationId can be a volatile per-session
+        # control-creation counter (measured 2026-08-04, HeidiSQL "더 보기"
+        # overflow menu — see is_volatile_menuitem_id's history in git log for
+        # the full measurement). That rejection intentionally does NOT happen
+        # here: server.js's merge passes (mergeCrossWindowTriggerClicks) use
+        # "does this event have ANY automationId/name at all" as the signal
+        # for "this looks like a real interactive element worth pairing with
+        # its trigger" — clearing it at capture time silently starved that
+        # pairing and dropped the trigger click entirely (regression found
+        # 2026-08-04 replaying the very fix meant to help this flow). The
+        # volatility check now lives where the OTHER two id diseases
+        # (isWindowHandleId, isRenderCounterId) already live — server.js's
+        # selector builders — so structural "is there something here" and
+        # "is this value trustworthy in a final selector" stay separate.
 
         # Locator strategy — explicit, so SYSTEM_PROMPT never guesses
         if info["automationId"]:
@@ -802,6 +1795,15 @@ class Recorder:
         self.proc = None
         self.target_hwnds = set()    # top-level window handles owned by the target
         self._popup_hwnds = set()    # windows discovered by watcher (always treated as popups)
+        # hwnd -> 그 창을 처음 관측했을 때의 제목. 앱이 녹화 도중 창 이름을
+        # 바꾸면(HeidiSQL 세션 관리자는 '신규'를 누르는 순간 ": Unnamed-N"이
+        # 붙는다) 이후 모든 이벤트의 windowTitle이 재생 때 재현 불가능한
+        # 값이 된다. session_meta 한 번만 찍는 것으로는 부족했다 — 실측
+        # 2026-08-03: 앱이 뜨기 전에 녹화가 시작되면 창 탐색이 포그라운드
+        # (도구 자신의 브라우저 창)로 폴백해서, 정작 진짜 앱 창은 그 뒤에
+        # 워처가 찾는다. 그래서 창을 처음 볼 때마다 여기에 적어 두고
+        # 이벤트마다 실어 보낸다.
+        self._first_titles = {}
         self._pre_hwnds = set()      # visible top-levels snapshotted before launch
         # Wall-clock time _discover_target_windows() finished resolving
         # target_hwnds (real match or fallback). Mouse/keyboard hooks are live
@@ -848,6 +1850,7 @@ class Recorder:
         self.event_count = 0
         self.target_hwnds = set()
         self._popup_hwnds = set()
+        self._first_titles = {}
         self._probed_skip = False
         self._last_emitted_hwnd_hex = ""
         self._app_install_dir_cache = None
@@ -1047,7 +2050,27 @@ class Recorder:
         img = image_path_of_pid(pid)
         return bool(img) and os.path.dirname(img).lower().rstrip("\\/") == app_dir
 
-    def _discover_target_windows(self):
+    def _settle_web_hosts(self, ins):
+        """An embedded-Chromium app is not ready to be recorded the moment its
+        window appears: its accessibility tree is still filling in, and a
+        hit-test during that gap returns a container instead of the control
+        under the cursor. Measured 2026-08-03 — TeamViewer's opening click
+        captured as Group/AutomationId="root" covering 94% of the window,
+        which made the whole replay unusable. Non-web apps skip this
+        entirely, so nothing already-verified gets slower."""
+        if ins is None:
+            return
+        for h in sorted(self.target_hwnds):
+            if not is_web_host(h):
+                continue
+            root = ins.from_handle_safe(h)
+            if not root:
+                continue
+            n = ins.settled_subtree_count(root)
+            log(f"[target] web host hwnd={h} — accessibility tree settled "
+                f"at {n} elements")
+
+    def _discover_target_windows(self, ins=None):
         """Poll up to DISCOVER_TIMEOUT for the window(s) the launched app opens.
         Primary signal: top-level windows that appeared AFTER launch (diff vs
         the pre-launch snapshot). Also accept windows owned by the launch pid
@@ -1151,6 +2174,7 @@ class Recorder:
                 log(f"[target] hwnds={self.target_hwnds} titles={titles}")
                 for h in found:
                     probe_window("appwin", h)
+                self._settle_web_hosts(ins)
                 self._discovery_done_ts = time.time()
                 return
             time.sleep(0.2)
@@ -1167,16 +2191,50 @@ class Recorder:
                 f"(zero-size fallback — no sized window appeared in time)")
             for h in best_found:
                 probe_window("appwin", h)
+            self._settle_web_hosts(ins)
             self._discovery_done_ts = time.time()
             return
 
         fg = foreground_top_window()
         if fg:
-            self.target_hwnds.add(fg)
-            log(f"[target] fallback foreground hwnd={fg} "
-                f"title='{win32gui.GetWindowText(fg)}'")
+            # Verify the foreground window is plausibly the launched app
+            # before trusting it — same path_keys/app_key signals the main
+            # polling loop above already uses for every other candidate.
+            # Measured 2026-08-04 (TeamViewer, already running so no new
+            # window ever appeared within DISCOVER_TIMEOUT): this fallback
+            # used to accept whatever was foreground UNCONDITIONALLY, and at
+            # the exact moment discovery gave up, the user's OWN
+            # control-panel Chrome tab was foreground (they'd just clicked
+            # Launch in the browser) — so this tool's own UI got adopted as
+            # a legitimate recording target. Chrome then satisfied every
+            # later "is this hwnd tracked" check for the rest of the
+            # session, a live instance of the exact self-capture class fixed
+            # earlier today for PuTTY/HeidiSQL, just via a different entry
+            # point. Rejecting an unmatched foreground window costs nothing
+            # real: _watch_windows()'s background poll self-heals the actual
+            # target via the same PID/install-dir signal within ~0.5s once
+            # its window finally appears (WebView2 apps can take several
+            # seconds to render — CLAUDE.md §4).
+            fg_path = image_path_of_pid(pid_of_hwnd(fg))
+            fg_path_key = re.sub(r'[^a-z0-9]', '', fg_path.lower())
+            fg_title = win32gui.GetWindowText(fg)
+            fg_title_key = re.sub(r'[^a-z0-9]', '', fg_title.lower())
+            fg_matches = (
+                (launch_pid and pid_of_hwnd(fg) == launch_pid)
+                or (path_keys and fg_path_key and any(k in fg_path_key for k in path_keys))
+                or (app_key and fg_title_key and (app_key in fg_title_key or fg_title_key in app_key))
+            )
+            if fg_matches:
+                self.target_hwnds.add(fg)
+                log(f"[target] fallback foreground hwnd={fg} title='{fg_title}'")
+            else:
+                log(f"[target] foreground hwnd={fg} title={fg_title!r} img={fg_path!r} "
+                    f"does not match launched app (path_keys={path_keys}, "
+                    f"app_key={app_key!r}) — NOT adopting as fallback target; "
+                    "relying on watcher self-heal once the real window appears")
         else:
             log("[target] discovery failed — filtering disabled (accept all)")
+        self._settle_web_hosts(ins)
         self._discovery_done_ts = time.time()
 
     def _watch_windows(self):
@@ -1196,6 +2254,7 @@ class Recorder:
                         self._popup_hwnds.add(hwnd)
                         try:
                             title = win32gui.GetWindowText(hwnd)
+                            self._remember_title(hwnd, title)
                             log(f"[watcher] added hwnd={hwnd} title='{title}'")
                         except Exception:
                             log(f"[watcher] added hwnd={hwnd}")
@@ -1212,7 +2271,7 @@ class Recorder:
             traceback.print_exc()
             return
 
-        self._discover_target_windows()
+        self._discover_target_windows(inspector)
         self._emit_session_meta()
 
         while True:
@@ -1413,7 +2472,58 @@ class Recorder:
         try:
             elem = ins.element_at(x, y)
             info = ins.describe(elem)
+            # DIAGNOSTIC: element_at()'s full decision path in one line, plus
+            # both window-identity signals (top_window_at: Win32 hit test at
+            # this point; foreground_top_window: GetForegroundWindow) and the
+            # current tracked-window sets. [diag-click] below only shows the
+            # FINAL adopted element, which looks identical whether it came
+            # from a correct hit-test or a wrong-window fallback — this line
+            # is what actually distinguishes them.
+            try:
+                tr = ins._last_trace
+                log(f"[trace] pt=({x},{y}) picked_by={tr.get('picked_by')} "
+                    f"raw=[{tr.get('raw')}] root_hwnd={tr.get('root_hwnd')} "
+                    f"root_ok={tr.get('root_ok')} top_win={top_window_at(x, y)} "
+                    f"fg={foreground_top_window()} "
+                    f"targets={sorted(self.target_hwnds)} "
+                    f"popups={sorted(self._popup_hwnds)}")
+            except Exception as e:
+                log(f"[trace] failed: {e}")
             light_dismiss = info.get("automationId") == "Light Dismiss"
+            # An item-PICKING click (as opposed to the click that opens the
+            # list) closes the list before this runs, so its own hit test is
+            # never going to succeed live — the entire reason
+            # _dropdown_item_from_cache()/_menu_item_from_cache() exist.
+            # Check the cache FIRST, before the tracked-window/light-dismiss
+            # machinery below: an item click is typically hwnd==0 (UIA-only
+            # sub-element) like its trigger, so it would otherwise get
+            # light_dismiss=True immediately and never reach the
+            # open_dropdown_item_at()/open_menu_item_at() branches later in
+            # this function (those require not light_dismiss too) — measured
+            # 2026-08-04 (HeidiSQL): items landed on a cached-but-unreachable
+            # path and fell through to whatever the closed list had been
+            # covering. Position resolved from a snapshot taken while the
+            # list was genuinely open and confirmed to belong to this app is
+            # trustworthy independent of this click's own hwnd.
+            cache_hit = ins._dropdown_item_from_cache(x, y)
+            cache_kind = "combo"
+            if cache_hit is None:
+                cache_hit = ins._menu_item_from_cache(x, y)
+                cache_kind = "menu"
+            if cache_hit is not None:
+                trigger, idx, total, item_name = cache_hit
+                info = ins.describe(trigger)
+                elem = trigger
+                if cache_kind == "combo":
+                    info["comboItemIndex"] = idx
+                    info["comboItemCount"] = total
+                    info["comboItemName"] = item_name
+                else:
+                    info["menuItemIndex"] = idx
+                    info["menuItemCount"] = total
+                    info["menuItemName"] = item_name
+                info["expandCollapse"] = True
+                return info
             # Resolved element belongs to a window this recording isn't
             # tracking at all (confirmed 2026-07-13: a PuTTY capture's very
             # first click — right after window discovery — resolved to an
@@ -1431,8 +2541,60 @@ class Recorder:
             # emit a selector for a control the recording was never tracking.
             if not light_dismiss and elem is not None:
                 elem_hwnd = ins.resolve_root_hwnd(elem)
-                if (elem_hwnd and elem_hwnd not in self.target_hwnds
+                # 2026-08-05 (TeamViewer 체크박스/라벨 실측): resolve_root_hwnd()는
+                # elem 자신의 hwnd=0인 WebView2 콘텐츠에서 항상 0을 반환하므로,
+                # 이 요소가 진짜 추적 중인 창에 속해도 매번 "추적 안 됨"으로
+                # 떨어져 light_dismiss 복구(element_under_overlay, 아래)로
+                # 넘어간다 — element_at()이 이미 성공적으로 찾아낸(스몰리스트,
+                # 2026-08-05 수정 참고) 결과를 버리고 다른 방식으로 다시
+                # 검색하는 셈인데, 이 재검색이 실패하는 경우가 있다(실측:
+                # "이 장치에 Easy Access 권한 부여" 체크박스). element_at()이
+                # 이 요소를 찾기 위해 실제로 검색한 창(trace의 root_hwnd)은
+                # 이미 그 시점에 resolve_root_hwnd() 또는 GetForegroundWindow()
+                # 폴백을 거쳐 검증된 값이므로, elem_hwnd가 0일 때 그 값을
+                # 대신 쓴다 — 이 도구 자신의 Chrome 창이 오염원이었다면 그
+                # root_hwnd도 마찬가지로 그 창을 가리켰을 것이므로(같은 신뢰
+                # 경계), 자기 오염 방지 효과는 그대로 유지된다.
+                if not elem_hwnd:
+                    elem_hwnd = ins._last_trace.get("root_hwnd") or 0
+                if (elem_hwnd not in self.target_hwnds
                         and elem_hwnd not in self._popup_hwnds):
+                    # elem_hwnd == 0 means resolve_root_hwnd() gave up after
+                    # 15 ancestor hops without finding a native window handle
+                    # — routine for an element deep in a Chromium/React DOM
+                    # tree, not a rare edge case. The ORIGINAL `elem_hwnd and
+                    # ...` guard here short-circuited on 0 and skipped this
+                    # whole tracked-window check — "couldn't determine the
+                    # owner" was silently treated as "trust it". Measured
+                    # 2026-08-04 (PuTTY): this tool's own control-panel tab
+                    # got captured as PuTTY clicks — the "Captured Events (N)"
+                    # counter label (ui/EventTable.jsx) and the React root div
+                    # (id="root", ui/index.html) both got adopted verbatim.
+                    #
+                    # A first attempt fell back to top_window_at(x, y) for
+                    # the CHECK only when elem_hwnd was 0 — but that only
+                    # answers "what window is at this point right now", not
+                    # "does elem actually belong to it". Re-verified
+                    # 2026-08-04: a further recording still captured the
+                    # SAME 'root'/'Captured Events' elements with no
+                    # "not a tracked window" log line at all — the worker
+                    # thread's delayed (0.2-0.5s) inspection let
+                    # top_window_at() land back on the tracked app's window
+                    # while `elem` was STILL the wrong (Chrome) element from
+                    # the earlier ElementFromPoint() call, so the proxy check
+                    # passed while the element it was standing in for did
+                    # not. Checking the point and trusting `elem` are two
+                    # different questions; a coordinate-based stand-in can't
+                    # answer the second one.
+                    #
+                    # Distrust unconditionally instead (elem_hwnd == 0 is
+                    # never "in" target_hwnds/popup_hwnds, so the branch
+                    # above already routes it here) and let the EXISTING
+                    # recovery below (element_under_overlay) re-derive the
+                    # real element by walking foreground_top_window()'s own
+                    # tree — anchored to a known window, not a raw
+                    # coordinate hit test that can straddle two windows.
+                    #
                     # _watch_windows() only registers new popup hwnds on its
                     # ~0.5s poll — a dialog can appear and get hit-tested here
                     # before that poll catches up (confirmed 2026-07-15: 7-Zip
@@ -1443,8 +2605,10 @@ class Recorder:
                     # instead of only trusting the watcher's snapshot — a real
                     # unrelated window (different PID, e.g. the Calculator
                     # cross-contamination bug fixed 2026-07-13) still gets
-                    # rejected below.
-                    if self._owned_by_app(pid_of_hwnd(elem_hwnd)):
+                    # rejected below. Guard on elem_hwnd itself first: pid 0
+                    # never legitimately owns an app window, and adding hwnd
+                    # 0 to target_hwnds would be a bug in its own right.
+                    if elem_hwnd and self._owned_by_app(pid_of_hwnd(elem_hwnd)):
                         self.target_hwnds.add(elem_hwnd)
                         self._popup_hwnds.add(elem_hwnd)
                         log(f"[inspect] self-heal hwnd={elem_hwnd} "
@@ -1468,12 +2632,54 @@ class Recorder:
             # just re-target the same wrong node through a different XPath.
             if (not light_dismiss and elem is not None
                     and isinstance(info.get("rect"), tuple)):
-                left, top, right, bottom = info["rect"]
-                if not (left <= x <= right and top <= y <= bottom):
-                    log(f"[inspect] pt=({x},{y}) outside adopted rect={info['rect']} "
-                        f"(id={info.get('automationId')!r} name={info.get('name')!r}) "
-                        "— dropping selector")
-                    light_dismiss = True
+                if not point_in_rect(info["rect"], x, y):
+                    # Before discarding: an OPEN combo dropdown always looks
+                    # like this — the hit test returns the combo (rect = the
+                    # collapsed box) while the click is on a list item below
+                    # it. See UIAInspector.open_dropdown_item_at.
+                    combo_hit = None
+                    if ins._is_combo_like(info):
+                        combo_hit = ins.open_dropdown_item_at(elem, x, y)
+                    menu_hit = None
+                    if combo_hit is None and ins._is_menu_like(info):
+                        menu_hit = ins.open_menu_item_at(elem, x, y)
+                    if combo_hit is not None:
+                        inner, idx, total, item_name = combo_hit
+                        info = ins.describe(inner)
+                        elem = inner
+                        info["comboItemIndex"] = idx
+                        info["comboItemCount"] = total
+                        info["comboItemName"] = item_name
+                        info["expandCollapse"] = True
+                        log(f"[inspect] pt=({x},{y}) is item {idx + 1}/{total} of an "
+                            f"open dropdown (name={item_name!r}) — recorded as "
+                            f"'expand this combo, then pick item #{idx}' instead of "
+                            "dropping the selector")
+                    elif menu_hit is not None:
+                        trigger, idx, total, item_name = menu_hit
+                        info = ins.describe(trigger)
+                        elem = trigger
+                        info["menuItemIndex"] = idx
+                        info["menuItemCount"] = total
+                        info["menuItemName"] = item_name
+                        info["expandCollapse"] = True
+                        log(f"[inspect] pt=({x},{y}) is item {idx + 1}/{total} of an "
+                            f"open menu (name={item_name!r}) — recorded as "
+                            f"'expand this menu, then pick item #{idx}' instead of "
+                            "dropping the selector")
+                    else:
+                        log(f"[inspect] pt=({x},{y}) outside adopted rect={info['rect']} "
+                            f"(id={info.get('automationId')!r} name={info.get('name')!r}) "
+                            "— dropping selector")
+                        light_dismiss = True
+                else:
+                    # The click landed ON the control. For a combo/menu that
+                    # means it just OPENED the list, and this is the only
+                    # moment the list can be measured — the click that picks
+                    # an item closes it first. See snapshot_open_dropdown()/
+                    # snapshot_open_menu().
+                    ins.snapshot_open_dropdown(elem, info)
+                    ins.snapshot_open_menu(elem, info)
             if light_dismiss:
                 # The click raced a menu/flyout opening: by the time this hit
                 # test ran, the XAML light-dismiss overlay (a full-window,
@@ -1487,16 +2693,78 @@ class Recorder:
                 # The real control is still in the window's ControlView tree
                 # underneath the scrim — re-hit-test from the foreground
                 # window subtree, skipping the overlay (2026-07-12 fix).
-                under = ins.element_under_overlay(x, y)
+                #
+                # element_under_overlay() walks foreground_top_window()'s OWN
+                # tree via _deepen(), so whatever it finds is a genuine
+                # descendant of THAT window by construction — but it never
+                # checks that THAT window is one we're recording. Its
+                # premise (docstring: "the real control is still in the
+                # window we are recording") holds for the XAML light-dismiss
+                # case this was built for (2026-07-12, a menu closing within
+                # the SAME app) but not for the "wrong window entirely" case
+                # the tracked-window check above now also routes here as of
+                # today's fix. Measured 2026-08-04 (PuTTY): with that check
+                # now catching more cases, several of them hit this path
+                # while foreground_top_window() was this tool's OWN Chrome
+                # tab (not PuTTY) — silently returning "Captured Events (N)"
+                # / the React root div (id="root") with NO "not a tracked
+                # window" log at all, because nothing here ever asked whether
+                # the foreground window was PuTTY's. Ask first — searching an
+                # untracked window's tree can only reproduce the same
+                # wrong-window mistake through a second code path.
+                fg = foreground_top_window()
+                fg_is_target = fg and (fg in self.target_hwnds or fg in self._popup_hwnds)
+                if fg and not fg_is_target and self._owned_by_app(pid_of_hwnd(fg)):
+                    # Same self-heal as the direct-hit check above: a fresh
+                    # popup of the SAME app can become foreground before the
+                    # ~0.5s watcher poll registers it.
+                    self.target_hwnds.add(fg)
+                    self._popup_hwnds.add(fg)
+                    log(f"[inspect] self-heal hwnd={fg} — accepted as light-dismiss "
+                        "recovery root (pre-empts 0.5s watcher poll; PID or same install dir)")
+                    fg_is_target = True
+                under = ins.element_under_overlay(x, y) if fg_is_target else None
+                if fg and not fg_is_target:
+                    log(f"[inspect] foreground window hwnd={fg} is not tracked — "
+                        "skipping light-dismiss recovery (would search the "
+                        "wrong app's tree)")
                 if under is not None:
                     resolved = ins.describe(under)
-                    if resolved.get("automationId") or resolved.get("name"):
+                    # The re-hit-test must land on something that actually
+                    # contains the point, or we would re-adopt the very kind
+                    # of near-miss the guard above just rejected — only
+                    # through a second code path (see point_in_rect).
+                    if (isinstance(resolved.get("rect"), tuple)
+                            and not point_in_rect(resolved["rect"], x, y)):
+                        log(f"[inspect] under-overlay candidate "
+                            f"{resolved.get('name')!r} rect={resolved.get('rect')!r} "
+                            f"does not contain ({x},{y}) — not adopting")
+                    elif resolved.get("automationId") or resolved.get("name"):
                         info = resolved
                         elem = under   # keep anchor/row logic consistent below
                         light_dismiss = False
                         log(f"[inspect] resolved under light-dismiss at ({x},{y}): "
                             f"id={info.get('automationId')!r} name={info.get('name')!r} "
                             f"type={info.get('controlType')!r}")
+                        # A hwnd-less trigger (DropDown arrow, "더 보기" —
+                        # any UIA-virtual sub-element always resolves
+                        # elem_hwnd==0) reaches THIS recovery path instead of
+                        # the point_in_rect/snapshot branch above, because
+                        # elem_hwnd==0 sets light_dismiss=True before that
+                        # branch ever runs — measured 2026-08-04 (HeidiSQL):
+                        # the opening click on the network-type combo's
+                        # DropDown arrow never called snapshot_open_dropdown()
+                        # at all, so the very next click (an item) found no
+                        # cache and no live list (already closed), and fell
+                        # through to whatever control sat behind the list —
+                        # a '자격 증명 프롬프트' CheckBox the user never
+                        # touched. Recovering identity here is not enough;
+                        # a combo/menu that "just opened" needs its snapshot
+                        # taken NOW, at the only moment the list exists.
+                        if (isinstance(info.get("rect"), tuple)
+                                and point_in_rect(info["rect"], x, y)):
+                            ins.snapshot_open_dropdown(elem, info)
+                            ins.snapshot_open_menu(elem, info)
                 if light_dismiss:
                     # Still nothing usable — coordinate replay is forbidden
                     # (2026-07-10), so codegen will surface this event as an
@@ -1522,6 +2790,41 @@ class Recorder:
                         treeitem_glyph_fallback = True
                         log(f"[inspect] Tree-center fallback narrowed to row "
                             f"TreeItem name={info.get('name')!r}")
+            # 이름/ID 없는 ListItem이 사실은 "열린 콤보 드롭다운의 항목"인 경우
+            # (2026-07-31, HeidiSQL ComboBoxEx): anchor XPath로 넘기기 전에
+            # 먼저 잡는다. anchor는 트리 구조 기반이라 매 실행 위치가 같아야
+            # 하는데, 드롭다운 목록은 열려 있을 때만 존재하므로 anchor의 전제가
+            # 성립하지 않는다. 대신 "이 콤보를 펼친 뒤 N번째 항목"으로 기록한다.
+            if (not light_dismiss and elem is not None
+                    and not info.get("automationId") and not info.get("name")):
+                self_hit = ins.combo_item_self(elem, info)
+                if self_hit is not None:
+                    inner, idx, total = self_hit
+                    info = ins.describe(inner)
+                    elem = inner
+                    info["comboItemIndex"] = idx
+                    info["comboItemCount"] = total
+                    info["comboItemName"] = ""
+                    info["expandCollapse"] = True
+                    log(f"[inspect] nameless dropdown item at ({x},{y}) is #{idx} of "
+                        f"{total} — recorded as 'expand this combo, then pick "
+                        f"item #{idx}'")
+            # 이름/ID 없는 MenuItem이 사실은 "열린 팝업 메뉴의 항목"인 경우
+            # (2026-08-04, HeidiSQL "더 보기" — 아이콘 전용, 콤보와 같은 문제).
+            if (not light_dismiss and elem is not None
+                    and not info.get("automationId") and not info.get("name")):
+                menu_self_hit = ins.menu_item_self(elem, info)
+                if menu_self_hit is not None:
+                    trigger, idx, total = menu_self_hit
+                    info = ins.describe(trigger)
+                    elem = trigger
+                    info["menuItemIndex"] = idx
+                    info["menuItemCount"] = total
+                    info["menuItemName"] = ""
+                    info["expandCollapse"] = True
+                    log(f"[inspect] nameless menu item at ({x},{y}) is #{idx} of "
+                        f"{total} — recorded as 'expand this menu, then pick "
+                        f"item #{idx}'")
             # 유니크 id/name이 없는 요소 → anchor 기반 relative XPath 캡처
             # (2026-07-10: 좌표 재생 금지 — anchor XPath가 유일한 재생 수단).
             # light-dismiss 오버레이는 전체 창을 덮는 요소라 anchor가 무의미.
@@ -1704,6 +3007,11 @@ class Recorder:
             pass
         return found[0]
 
+    def _remember_title(self, hwnd, title):
+        """First title ever seen for `hwnd` wins — see self._first_titles."""
+        if hwnd and title and hwnd not in self._first_titles:
+            self._first_titles[hwnd] = title
+
     def _emit_session_meta(self):
         """Emit a session_meta event with initial window geometry."""
         hwnd = self._pick_frame_hwnd()
@@ -1722,6 +3030,25 @@ class Recorder:
                 "left": win_left, "top": win_top,
                 "width": win_w, "height": win_h,
             }
+        # 창 발견 시점의 제목 — 사용자 조작으로 이름이 바뀌기 전의 "안정된"
+        # 제목이다. HeidiSQL 세션 관리자는 '신규'를 누르는 순간 제목 뒤에
+        # ": Unnamed-N"(실행마다 새로 매겨지는 일련번호)이 붙는데, 그 클릭이
+        # 첫 이벤트면 녹화된 모든 이벤트가 바뀐 제목만 갖게 되어 codegen이
+        # 되돌릴 근거를 잃는다. 실측 2026-08-03: 그렇게 만들어진 테스트는
+        # 재생 때 launchApp이 창을 영영 못 찾아(matched=[]) 스텝이 단 하나도
+        # 실행되지 않았다. server.js canonicalizeWindowTitles()가 이 값을
+        # 병합 대상으로만 쓴다(별도 창 세그먼트를 만들지는 않는다).
+        titles = []
+        for h in sorted(self.target_hwnds):
+            try:
+                t = win32gui.GetWindowText(h)
+            except Exception:
+                continue
+            self._remember_title(h, t)
+            if t and t not in titles:
+                titles.append(t)
+        if titles:
+            meta["discoveredTitles"] = titles
         try:
             requests.post(EXPRESS_EVENTS_URL, json=meta, timeout=3)
             log(f"[meta] session_meta emitted window={meta.get('initialWindow')}")
@@ -1911,6 +3238,36 @@ class Recorder:
                 # (2026-07-13, UIAInspector.has_expand_collapse) — codegen이
                 # 일반 클릭 대신 osExpandCollapse.ps1 경로를 taken다.
                 "expandCollapse": bool(elem.get("expandCollapse", False)),
+                # 열린 드롭다운의 이름 없는 항목 위치 (2026-07-31,
+                # UIAInspector.combo_item_self/open_dropdown_item_at) —
+                # 여기 화이트리스트에 빠지면 위 주석 그대로 재현된다: 실측
+                # 확인됨(HeidiSQL 재생 로그, comboItemIndex가 캡처 시점에는
+                # 잡혔는데 서버에 도착한 이벤트에는 없어 '4:expandCollapse'로
+                # itemIndex 없이 생성됨).
+                "comboItemIndex": elem.get("comboItemIndex"),
+                "comboItemCount": elem.get("comboItemCount"),
+                "comboItemName": elem.get("comboItemName", ""),
+                # 열린 팝업 메뉴의 이름 없는 항목 위치 (2026-08-04,
+                # UIAInspector.menu_item_self/open_menu_item_at) — comboItem*
+                # 바로 위 주석의 함정과 완전히 같은 화이트리스트라 여기 빠뜨리면
+                # 캡처 로그엔 찍히는데 서버엔 조용히 전달 안 됨.
+                "menuItemIndex": elem.get("menuItemIndex"),
+                "menuItemCount": elem.get("menuItemCount"),
+                "menuItemName": elem.get("menuItemName", ""),
+                # 이 창을 처음 봤을 때의 제목 (2026-08-03, self._first_titles).
+                # windowTitle은 앱이 실행 중 창 이름을 바꾸면 재생 때 재현
+                # 불가능한 값이 된다("...: Unnamed-14"). server.js
+                # canonicalizeWindowTitles()가 이 값을 병합 대상으로 쓴다.
+                # 위 주석대로 화이트리스트라 여기 빠뜨리면 조용히 전달 안 됨.
+                "stableWindowTitle": self._first_titles.get(root_hwnd, ""),
+                # True when this element lives inside an embedded-Chromium
+                # view. server.js uses it to reject render-counter
+                # AutomationIds WITHOUT touching WinForms designer ids of the
+                # same shape (isRenderCounterId). Whitelist field — leaving it
+                # out here means it never reaches the server, the trap this
+                # dict has already sprung twice (expandCollapse 2026-07-13,
+                # comboItemIndex 2026-07-31).
+                "isWebContent": bool(elem.get("isWebContent", False)),
             },
             "timestamp": time.time(),
             "app": self.session.get("appName", ""),
@@ -2059,10 +3416,30 @@ def _enable_per_monitor_dpi_awareness():
         log(f"[diag-dpi] failed to set per-monitor DPI awareness: {e}")
 
 
+def _build_marker():
+    """mtime + short hash of this file, printed at startup.
+
+    agent.py has no hot reload (CLAUDE.md §5) — a running process keeps
+    executing the code it loaded at start even after the file on disk
+    changes. Without this, a log pasted after an edit is silent about
+    whether the edit was actually running, and debugging a fix's effect
+    degrades into re-litigating logs that never exercised the fix at all.
+    """
+    try:
+        path = os.path.abspath(__file__)
+        mtime = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(os.path.getmtime(path)))
+        with open(path, "rb") as f:
+            sha = hashlib.sha256(f.read()).hexdigest()[:8]
+        return f"mtime={mtime} sha256={sha}"
+    except Exception as e:
+        return f"unavailable ({e})"
+
+
 def main():
     _enable_per_monitor_dpi_awareness()
     is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
     log(f"Capture agent listening on http://localhost:{AGENT_PORT}")
+    log(f"build: agent.py {_build_marker()}")
     log(f"Administrator rights: {'YES' if is_admin else 'NO  <-- element properties will be EMPTY!'}")
     if not is_admin:
         log("Re-run from an Administrator PowerShell for full element inspection.")

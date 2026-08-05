@@ -30,11 +30,21 @@ required** (see §3 below for why this matters):
 | PuTTY | native Win32 dialog | category tree nav, ComboBox dropdowns (same-window and cross-window popup), tree +/- toggle, proxy radio buttons |
 | FileZilla | native Win32, multi-window | folder tree nav, menu bar navigation via ExpandCollapsePattern, Site Manager dialog (separate HWND session) |
 | 7-Zip | native Win32 | file list navigation, double-click into folders |
+| HeidiSQL | Delphi/VCL, multi-window | owner-drawn ComboBoxEx item selection by position (network-type combo), cross-window session-manager ↔ preferences flow. The session-list tree (`TVirtualStringTree`) exposes zero UIA children and cannot be automated — see **Known Limitations**. The "더 보기" (More) overflow menu's items are captured by position but replay doesn't select them yet (parked, see below) |
+| TeamViewer | WebView2 (Chromium), single window | first confirmed Electron/Chromium-class target — ID/password copy buttons, session-code input, "Join session", the two settings checkboxes ("Windows와 함께 TeamViewer 시작" / "이 장치에 Easy Access 권한 부여" — click the **text label**, not the checkbox glyph itself, which sits in an unnamed wrapper), and the native "빠른 연결 허용" dialog (email/password/cancel) all replay end to end (`[PASS] all steps completed`). **Requires the agent, Express bridge's spawned processes, and the generated test itself to all run from an elevated (Administrator) terminal** — TeamViewer runs elevated, and Windows' UIPI blocks a non-elevated automation client from seeing anything past the window shell (see **WebView2 / Electron apps** below). Running the generated test from a non-elevated terminal is the single most common cause of every step failing at once. |
 
 Other presets in the UI (Paint, Registry Editor, IDM, VSCode, GitHub Desktop,
 Free Download Manager, Claude Desktop) are wired up but not currently
-GUI-verified end to end — see **Known Limitations** below for the specific
-app classes (Electron/Chromium, QML) that are out of scope for now.
+GUI-verified end to end. VSCode/GitHub Desktop/Claude Desktop are the same
+WebView2/Electron class as TeamViewer and are expected to work the same way,
+but **only TeamViewer has actually been validated** — see **WebView2 /
+Electron apps** below before assuming another Electron host "just works".
+
+Two more presets (`PowerShell ISE`, `Everything`) were added 2026-08-05 to check
+framework coverage this project hadn't tested before — WPF and WinForms,
+respectively (the other two named target frameworks besides Win32/MFC).
+`poc/probe_app_automatability.py` reports Tier 1 (supported) for both; neither
+has a full record→replay GUI verification yet.
 
 ## Architecture
 
@@ -173,7 +183,7 @@ safe to delete.
 | Helper | Purpose |
 |---|---|
 | `osScroll.py` | UIA ScrollPattern scroll (PostMessage wheel fallback) |
-| `osScopedInvoke.py` | click an item that opened in a SEPARATE top-level window (native ComboBox dropdown / menu popup) — the WinAppDriver session can't see it, so this goes straight through COM UIA instead |
+| `osScopedInvoke.py` | click an item that opened in a SEPARATE top-level window (native ComboBox dropdown / menu popup) — the WinAppDriver session can't see it, so this goes straight through COM UIA instead. Also the click path for **CheckBox controls** (verifies `ToggleState` actually changed, not just that the click didn't error — see below) and for **any `isWebContent` element** (WebView2/Chromium-hosted controls WinAppDriver's managed UIA client cannot see at all, regardless of session state) |
 | `osExpandCollapse.py` | ExpandCollapsePattern replay (ComboBox dropdowns, menu bar items, tree +/- toggles) — plain click()/InvokePattern doesn't open these |
 | `osType.ps1` | OS-level SendKeys fallback for stubborn edit controls |
 | `osActivate.ps1` | bring the app window to the foreground |
@@ -274,6 +284,61 @@ Recording captures the click(s) that open + select from these controls as
 separate events; `server/server.js` merges them at codegen time into a single
 call so the open→search happens without a step boundary in between.
 
+### Checkbox clicks are value-verified, not just error-checked
+
+A plain WinAppDriver `element/click()` reports success the moment the click
+call returns without throwing — it never checks whether the checkbox's
+`ToggleState` actually flipped. That is a real false-PASS risk (measured on
+TeamViewer's WebView2 toggles): `Legacy.Select()`/`Invoke()` fallbacks can
+"succeed" while leaving the box untouched. Every `CheckBox` click (same-window
+or cross-window) routes through `osScopedInvoke` instead, which reads
+`ToggleState` before and after the click and only reports success if it
+actually changed — falling back to a direct `TogglePattern.Toggle()` call if
+the visual click alone didn't register.
+
+### WebView2 / Electron apps
+
+A WebView2/Electron host window attaching a WinAppDriver session successfully
+does **not** mean its content is reachable — the embedded Chromium renderer
+is invisible to WinAppDriver's managed UIA client no matter what. Confirmed
+end-to-end on TeamViewer 15 (WebView2), three separate fixes were needed to
+make this class of app replay correctly, all keyed off `element.isWebContent`
+(set by `agent/agent.py` when the element's owning window hosts an embedded
+Chromium child):
+
+1. **Clicks** on `isWebContent` elements route through `osScopedInvoke` (COM
+   UIA) instead of the normal WinAppDriver `element/click` — the same
+   mechanism `agent.py`'s own capture uses to see these elements at all.
+2. **Selectors** for `isWebContent` elements drop `className` entirely. A web
+   framework's `className` is the raw DOM `class` attribute — dozens of
+   Tailwind-style utility tokens including hover/active/disabled state
+   classes — and an exact-match AND condition against that string breaks the
+   moment a single token differs between capture and replay. Only `name` is
+   used (present and stable for almost every interactive web element in
+   practice).
+3. **Typing** into `isWebContent` fields skips WinAppDriver's
+   `element/value` (`ValuePattern.SetValue`) entirely and always falls back
+   to real OS-level key injection (`osType`, `SendInput`-based). `SetValue`
+   can report success with no error while a React-style app never sees a
+   real keyboard event and the field stays empty — measured directly on
+   TeamViewer's session-code field.
+4. **Elevation must match.** Chromium enables its accessibility tree lazily
+   and Windows' UIPI (User Interface Privilege Isolation) blocks a
+   *lower*-privilege automation client from seeing *any* content inside a
+   *higher*-privilege window — not a timing issue, no amount of waiting or
+   warm-up clicks gets around it (both were tried and measured; see
+   `poc/diag_teamviewer_a11y_wakeup.py` / `poc/diag_teamviewer_real_click_wakeup.py`).
+   TeamViewer runs elevated, so **the agent, the Express bridge's spawned
+   Appium/WinAppDriver processes, and the generated test script must all run
+   from an Administrator terminal** when the target app is elevated — an
+   ordinary terminal sees only the window shell (1-2 elements) no matter how
+   long it waits or how many clicks it sends.
+
+This has only been validated against one Chromium host (TeamViewer). Other
+Electron/WebView2 apps are expected to behave the same way but have not been
+tested — try `poc/probe_app_automatability.py --exe ...` against a new one
+before assuming it "just works".
+
 ---
 
 ## 4. Regression Testing (no agent, no admin, no GUI)
@@ -324,10 +389,28 @@ to delete; re-running the gate recreates them.
 
 ## Known Limitations
 
-- **Electron/Chromium apps (VSCode-class) are out of scope.** The Chromium
-  renderer exposes no usable UIA tree, so content clicks have no selector and
-  generate as explicit FAIL steps. Native OS dialogs opened by such apps
-  (e.g. "Open Folder") replay fine.
+- **Electron/Chromium apps are supported (validated: TeamViewer/WebView2),
+  not out of scope** — see **WebView2 / Electron apps** above for the three
+  fixes this needed and the elevation requirement. This reverses an earlier
+  (2026-07-31) verdict that called this app class categorically unautomatable
+  based on a single stale measurement; re-measuring is what overturned it —
+  see `CLAUDE.md` §4 for the full history if you're tempted to re-declare an
+  app class "impossible" from one bad reading.
+- **Single-instance apps break `launchApp()`.** It only recognizes a window
+  that is *not* present in the pre-launch baseline, so starting a recording
+  against an app that's already running (TeamViewer, Win11 Notepad) times out
+  waiting for a "new" window that will never appear. Fully close the app
+  first.
+- **HeidiSQL's "더 보기" (More) overflow menu items are captured but not yet
+  replayed.** The trigger is a VCL `SplitButton` whose `ExpandCollapsePattern`
+  is never queryable at replay time (COM `GetCurrentPattern` always raises) —
+  replay's exception handler for that case assumes "no ExpandCollapsePattern
+  = this was actually a plain command button, not a menu", and invokes the
+  trigger a second time instead of consulting the captured item index. The
+  capture side works (position-based, same pattern as owner-drawn combos,
+  ~90% success rate after a retry-budget fix) — only the replay-side
+  `osExpandCollapse.py` needs a fix to check for a captured `itemIndex`
+  before falling back to "just re-click the trigger".
 - **Qt/QML apps** can accept a UIA Invoke without error while the real
   `MouseArea` never fires, and their AutomationIds are often non-unique —
   currently out of scope.
@@ -355,6 +438,54 @@ to delete; re-running the gate recreates them.
   controls** (list rows, toolbar buttons, `SysTreeView32` tree items) — every
   replay helper that needs to reach those controls uses COM `IUIAutomation`
   (comtypes) instead, matching the stack `agent/agent.py` already uses.
+- **Delphi/VCL apps** (confirmed with HeidiSQL) expose controls without a
+  real declared `AutomationId` — the default Win32 UIA provider fills that
+  property in with the control's own window handle instead, which is
+  reassigned every launch. This id is automatically rejected in favor of a
+  stable `ClassName`/`Name` selector, so most buttons/tabs/input fields work
+  fine.
+- **Custom-drawn (owner-drawn) controls** — HeidiSQL's session-list
+  `TVirtualStringTree` is the confirmed case — expose *zero* items to UI
+  Automation even though the control itself is visible and populated
+  (verified directly against the live UIA tree: `FindAll`/tree-walk all
+  agree on the same node count with no rows present). No selector, anchor,
+  or COM-based search can reach an individual row — **recording a click on
+  such a list is not currently possible**. Record a flow that avoids the
+  list instead (e.g. HeidiSQL's "New" button creates and auto-selects a
+  session, so the tabs beneath it become directly clickable without ever
+  touching the list).
+- **Dropdowns: the hard part is naming them, not opening them.** Measured
+  2026-07-31 with `poc/diag_dropdowns.py` — this corrects an earlier claim
+  that HeidiSQL's combos expose no items:
+  - *PuTTY* — combo has a unique `AutomationId`; expanding it exposes its 5
+    items (in the app window and in a separate `ComboLBox` top-level window).
+    **Fully automatable.**
+  - *HeidiSQL* — expanding **does** expose the items (5 and 18 respectively).
+    What fails is identifying *which* combo to open. On the new-session panel
+    the two combos offer no stable, unique handle: one carries an
+    `AutomationId` that is really its window handle (`920954`, different every
+    launch), the other has **no AutomationId and no Name at all**; both
+    dropdown arrows share `AutomationId="DropDown"`, whose `Name` flips
+    between `열기`/`닫기` with the open state. The network-type combo is a
+    `TComboBoxEx` surfaced as a `Pane` whose `Name` **is the currently
+    selected value** (`MariaDB or MySQL (TCP/IP)`, `MySQL on RDS`, …), so a
+    Name-based selector only matches while that value is already chosen.
+  - Mitigation in place: when several candidates share `AutomationId="DropDown"`
+    in one window, resolution falls back to the recorded **relative Y position
+    within the window** to pick among the structurally identical matches. This
+    selects *which* matched element to act on — it never clicks a coordinate,
+    so §3 still holds.
+  - *Owner-drawn dropdown items* — HeidiSQL's network-type combo is a Win32
+    `ComboBoxEx`: two controls share one rect, and only the inner `ComboBox`
+    (empty Name **and** empty AutomationId) can be expanded. Its 18 items are
+    all individually invokable but **all nameless**, so they can only be
+    addressed by position. Handled since 2026-07-31: capture records
+    `comboItemIndex`/`comboItemCount`, replay expands the combo and invokes the
+    Nth item, and refuses to pick anything if the live list length differs from
+    the recorded one. Verified end to end (value changed
+    `MariaDB or MySQL (TCP/IP)` → `MySQL on RDS`). Before this, the click was
+    discarded at capture time and degraded into a click on the panel behind the
+    open list.
 
 ## Project Layout
 

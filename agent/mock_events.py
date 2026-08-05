@@ -481,6 +481,265 @@ VCL_SESSION_META = {
     "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
 }
 
+# Embedded-Chromium (WebView2) selector policy scenario (2026-08-03,
+# TeamViewer 15.79). Web frameworks emit AutomationIds that are render
+# counters — "TextField56", "button-461", "connectButton-498" — which change
+# between builds of the app, so a selector built from one silently stops
+# matching after an update. They must be rejected, but ONLY inside web
+# content: WinForms designer ids ("button1", "textBox1") have exactly the
+# same shape and are perfectly stable, and WinForms is a required framework.
+# The discriminator is element.isWebContent, set by agent.py when the
+# element's owning window has an embedded-Chromium child.
+WEB_APP = "MockWebContent"
+WEB_EVENTS = [
+    make_event("click", name="세션 참가", automation_id="connectButton-498",
+               class_name="", control_type="Button",
+               window_title="TeamViewer", app_name=WEB_APP, x=300, y=300, index=1),
+    make_event("click", name="", automation_id="TextField56",
+               class_name="", control_type="Edit",
+               window_title="TeamViewer", app_name=WEB_APP, x=320, y=340, index=2),
+    make_event("click", name="Save", automation_id="button1",
+               class_name="Button", control_type="Button",
+               window_title="TeamViewer", app_name=WEB_APP, x=360, y=380, index=3),
+]
+WEB_EVENTS[0]["element"]["isWebContent"] = True
+WEB_EVENTS[1]["element"]["isWebContent"] = True
+WEB_EVENTS[2]["element"]["isWebContent"] = False   # native control in the same app
+WEB_SESSION_META = {
+    "action": "session_meta",
+    "app": WEB_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 1000, "height": 800},
+}
+
+
+def step_wdio_generate_web_content():
+    print("\n[14] Embedded-Chromium render-counter AutomationId rejection")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", WEB_SESSION_META)
+    for ev in WEB_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": WEB_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (web content) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped web-content checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname, content = f.get("filename", ""), f.get("content", "")
+        check(
+            f"  {fname} rejects a render-counter id inside web content",
+            "connectButton-498" not in content,
+            "web-framework ids are render counters and change between builds "
+            "of the app, so a selector built from one stops matching after an "
+            "update (TeamViewer 15.79, 2026-08-03)",
+        )
+        check(
+            f"  {fname} falls back to the Name for that element",
+            "세션 참가" in content,
+            "Name is the only durable field left once the counter id is "
+            "rejected — dropping both leaves no selector at all",
+        )
+        # wdioSelectorByClass prefers a ClassName+Name combo over a bare
+        # automationId whenever the ClassName is stable ("Button" qualifies),
+        # so the id itself ("button1") only ever shows up in the ById file.
+        # Either form proves the same thing: a WinForms-shaped id was NOT
+        # treated as a render counter and rejected.
+        not_rejected = (
+            "button1" in content
+            or '@ClassName="Button" and @Name="Save"' in content
+        )
+        check(
+            f"  {fname} keeps a WinForms-shaped id when NOT web content",
+            not_rejected,
+            "button1/textBox1 are WinForms designer names — same shape as a "
+            "render counter but perfectly stable. Rejecting them would break "
+            "a required framework, which is why the rule is scoped to "
+            "element.isWebContent",
+        )
+        # 2026-08-04 (TeamViewer WebView2 replay routing fix): a live replay
+        # of TeamViewer showed every single click on a web-content button
+        # ("비밀번호를 복사하세요", "세션 참가", ...) silently no-op through
+        # WAD's element/click — `[getCenter-diag] UIA-exposed rows (0 total)`
+        # on every step, because WAD attaching to the HOST window (it does)
+        # does not mean its managed UIA client can see DOM-hosted elements
+        # (it can't). isWebContent elements must route through the same COM
+        # stack (osScopedInvoke) agent.py's capture already uses to see them.
+        check(
+            f"  {fname} routes a web-content click through osScopedInvoke (COM), not WAD element/click",
+            'osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"세션 참가"})' in content,
+            "WAD successfully creates a scoped session for the WebView2 host "
+            "window, but its managed UIA client reports zero exposed rows for "
+            "everything inside it — every click through element/click is a "
+            "silent no-op (measured live, TeamViewer 2026-08-04: 비밀번호를 "
+            "복사하세요/세션 참가 등 핵심 동작이 전부 무반응)",
+        )
+        check(
+            f"  {fname} does NOT route a native (non-web-content) click through osScopedInvoke",
+            "_clickBySid(_appSid, null, '~button1')" in content
+            or '_clickBySid(_appSid, null, \'//Button[@ClassName="Button" and @Name="Save"]\')' in content,
+            "native controls in the same app window (e.g. TeamViewer's "
+            "native '빠른 연결 허용' dialog) are reachable via WAD just fine — "
+            "forcing them through COM too would be an unnecessary, unproven "
+            "widening of the WAD-primary/COM-narrow-exception boundary",
+        )
+
+
+# doubleClick-on-a-native-list-row scenario (2026-08-04, 7-Zip 재생 실패 2회
+# 연속 동일 재현). server.js의 ListItem 분기는 "doubleClick도 Invoke() 1회면
+# 폴더 진입까지 완료"라는 2026-07-15 실측을 근거로 더블클릭을 단일 호출로
+# 내보낸다. 그런데 2026-07-24에 osScopedInvoke.py의 invoke_item() 맨 앞에
+# send_input_click()이 삽입되면서 `if send_input_click(...): return True`가
+# 되어 **Invoke()는 도달 불가능한 죽은 코드**가 됐고, send_input_click()은
+# down/up을 한 번만 보낸다. 네이티브 리스트에서 단일 클릭은 선택일 뿐 열기가
+# 아니므로, 폴더가 열리지 않고 이후 스텝이 전부 무너진다(실측: 3:doubleClick
+# 컴퓨터가 "invoked" 성공 보고 → 4:doubleClick C:가 target not found).
+#
+# 이 게이트는 수정 방식을 특정하지 않는다 — doubleClick 스텝이 만들어내는
+# 호출이 동일 조건의 click 스텝과 **구별되기만** 하면 된다. 라벨 문자열만
+# 다르고 실제 호출이 같으면(현재 상태) 실패한다.
+DBLROW_APP = "MockDoubleClickRow"
+DBLROW_EVENTS = [
+    make_event("click", name="RowA", control_type="ListItem",
+               window_title="Rows", app_name=DBLROW_APP, x=100, y=100, index=1),
+    # 좌표를 200px 떨어뜨려 dedupeDoubleClicks()가 앞의 click을 더블클릭
+    # 구성요소로 병합하지 않게 한다(DEDUPE_RADIUS=6px).
+    make_event("doubleClick", name="RowB", control_type="ListItem",
+               window_title="Rows", app_name=DBLROW_APP, x=100, y=300, index=2),
+]
+DBLROW_SESSION_META = {
+    "action": "session_meta",
+    "app": DBLROW_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 0, "top": 0, "width": 900, "height": 700},
+}
+
+_METHOD_RE = re.compile(r"async (click\d+)\(\)\s*\{(.*?)\n    \}", re.S)
+_STEP_RE = re.compile(r"await _step\('(\d+):(\w+) ([^']*)'.*?page\.(click\d+)\(\)\)")
+
+
+def step_wdio_generate_doubleclick_row():
+    print("\n[16] doubleClick on a native list row must not replay as a single click")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", DBLROW_SESSION_META)
+    for ev in DBLROW_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": DBLROW_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (doubleClick row) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped doubleClick-row checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname, content = f.get("filename", ""), f.get("content", "")
+        bodies = dict(_METHOD_RE.findall(content))
+        click_fn = dbl_fn = None
+        for _num, action, label, fn in _STEP_RE.findall(content):
+            if action == "click" and "RowA" in label:
+                click_fn = fn
+            elif action == "doubleClick" and "RowB" in label:
+                dbl_fn = fn
+        if not click_fn or not dbl_fn:
+            check(f"  {fname} emits both the click and the doubleClick step",
+                  False, f"click={click_fn} doubleClick={dbl_fn}")
+            continue
+        norm_click = bodies.get(click_fn, "").replace("RowA", "ROW").strip()
+        norm_dbl = bodies.get(dbl_fn, "").replace("RowB", "ROW").strip()
+        check(
+            f"  {fname} replays a doubleClick row differently from a click row",
+            norm_click != norm_dbl,
+            "the two generated calls are byte-identical — 'doubleClick' survives "
+            "only in the log label, so a recorded double-click reaches the app as "
+            "a single click. On a native list that selects the row instead of "
+            "opening it, and every later step that depended on the navigation "
+            "fails (7-Zip 컴퓨터→C:, reproduced identically twice on 2026-08-04)",
+        )
+        check(
+            f"  {fname} embeds an osScopedInvoke.py that accepts a double-click flag",
+            "--double" in content,
+            "the helper has no way to express a double click — send_input_click() "
+            "sends exactly one down/up pair and returns True, which also makes the "
+            "InvokePattern fallback beneath it unreachable (osScopedInvoke.py "
+            "invoke_item, 2026-07-24)",
+        )
+
+
+# Window-filling-container scenario (2026-08-04, 7-Zip regression run).
+# stripWindowFillingContainers() correctly turns a click that resolved to a
+# real container (Pane/Group/...) covering >=80% of the window into an
+# explicit FAIL — no usable target, don't fabricate a coordinate click. But a
+# click that resolved to controlType='Window' itself (the top-level window)
+# is different: it's an activation/focus click, and replay already
+# activates/normalizes the window on launch and on every window switch, so
+# there is nothing left to replay. Turning THAT into a FAIL step meant an
+# otherwise-perfect run could never report PASS (measured: 7-Zip's first
+# captured click was exactly this — the window body before any menu
+# interaction — and it alone kept the whole run at [FAIL]).
+WINCLICK_APP = "MockWindowClick"
+WINCLICK_EVENTS = [
+    make_event("click", name="MyApp", automation_id="", class_name="",
+               control_type="Window", window_title="MyApp",
+               app_name=WINCLICK_APP, x=40, y=20, index=1),
+    make_event("click", name="root", automation_id="", class_name="",
+               control_type="Pane", window_title="MyApp",
+               app_name=WINCLICK_APP, x=50, y=40, index=2),
+    make_event("click", name="OK", automation_id="ok1", class_name="Button",
+               control_type="Button", window_title="MyApp",
+               app_name=WINCLICK_APP, x=60, y=60, index=3),
+]
+WINCLICK_EVENTS[0]["element"]["rect"] = [0, 0, 1000, 800]
+WINCLICK_EVENTS[1]["element"]["rect"] = [0, 0, 1000, 800]
+WINCLICK_EVENTS[2]["element"]["rect"] = [10, 10, 90, 40]
+WINCLICK_SESSION_META = {
+    "action": "session_meta",
+    "app": WINCLICK_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 0, "top": 0, "width": 1000, "height": 800},
+}
+
+
+def step_wdio_generate_window_click():
+    print("\n[17] a click on the top-level window itself is dropped, not FAILed")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", WINCLICK_SESSION_META)
+    for ev in WINCLICK_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": WINCLICK_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (window click) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped window-click checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname, content = f.get("filename", ""), f.get("content", "")
+        fails = re.findall(r"_failures\.push\('(\d+):(\w+):no-selector'\)", content)
+        check(
+            f"  {fname} has exactly one no-selector FAIL (the Pane, not the Window)",
+            len(fails) == 1,
+            f"expected 1 (the real container), got {len(fails)}: {fails} — a click "
+            "resolved to the top-level Window itself is an activation click "
+            "replay already performs on launch/switch, so it must be dropped "
+            "rather than turned into a FAIL step",
+        )
+        check(
+            f"  {fname} still runs the real OK click after the dropped Window step",
+            '"name":"OK"' in content or "'OK'" in content or "OK" in content,
+            "the real click after the container clicks must still be generated",
+        )
+
+
 # Trigger-click-vanishes-behind-a-standalone-expandCollapse scenario
 # (2026-07-29, HeidiSQL "더보기" SplitButton -> native popup menu ->
 # "환경설정" MenuItem follow-up). mergeExpandCollapseClicks() runs first and
@@ -555,6 +814,46 @@ NAMELESS_ITEM_SESSION_META = {
     "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
 }
 
+# Owner-drawn dropdown scenario (2026-07-31, HeidiSQL 네트워크 유형 combo =
+# Win32 ComboBoxEx). Two stacked controls share one rect: the outer TComboBoxEx
+# (UIA Pane, Name = the CURRENTLY SELECTED value, automationId = its own hwnd)
+# and the inner ComboBox (Name and automationId both empty) which is the only
+# one supporting ExpandCollapse. The open list publishes its 18 items, but every
+# item Name is EMPTY, so an item can only be addressed by its position.
+#
+# Two failures this scenario pins down, both measured live:
+#   - capture: the click lands below the combo's collapsed rect, so agent.py's
+#     "point outside the adopted rect" guard used to discard the selector and
+#     the event degraded into a click on the panel underneath.
+#   - replay: a selector built from the outer control's Name
+#     (`Pane[@ClassName="TComboBoxEx" and @Name="Microsoft SQL Server (TCP/IP)"]`)
+#     can never match, because that Name only equals the value AFTER it has
+#     been selected.
+# agent.py now records comboItemIndex/comboItemCount and codegen must forward
+# both to osExpandCollapse() so the helper expands and picks by position.
+COMBO_INDEX_APP = "MockComboIndex"
+COMBO_INDEX_EVENTS = [
+    make_event("click", name="", automation_id="", class_name="ComboBox",
+               control_type="ComboBox", app_name=COMBO_INDEX_APP,
+               expand_collapse=True, index=1),
+    # An ordinary click right after it. This must survive as its own step: the
+    # combo event is already a complete action, so it must not be treated as a
+    # bare trigger and paired with whatever the user did next.
+    make_event("click", name="Save", automation_id="btnSave", class_name="Button",
+               control_type="Button", app_name=COMBO_INDEX_APP, index=2),
+]
+COMBO_INDEX_EVENTS[0]["element"]["comboItemIndex"] = 4
+COMBO_INDEX_EVENTS[0]["element"]["comboItemCount"] = 18
+COMBO_INDEX_EVENTS[0]["element"]["comboItemName"] = ""
+COMBO_INDEX_SESSION_META = {
+    "action": "session_meta",
+    "app": COMBO_INDEX_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
 # hwnd-id trigger scenario (2026-07-29, HeidiSQL "더보기" SplitButton, 3차):
 # the target/triggerTarget object builders for the COM helpers
 # (osScopedInvoke/osExpandCollapse) read el.automationId directly — a
@@ -584,6 +883,76 @@ HWND_TRIGGER_SESSION_META = {
     "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
 }
 
+# Volatile popup-MenuItem-id scenario (2026-08-04, HeidiSQL "더 보기" overflow
+# menu, follow-up to HWND_TRIGGER_APP above). The item's AutomationId here is
+# a per-session control-creation counter (numeric, hwnd=0) — same shape as
+# the HWND_TRIGGER item's hwnd-id disease, but the item ALSO has no Name
+# (icon-only overflow menu item), which is what makes this scenario
+# necessary: it proves the id gets rejected WITHOUT starving
+# mergeCrossWindowTriggerClicks() of the "something is here, pair it with
+# its trigger" signal that a real (if untrustworthy) id/name still provides.
+# A first attempt at this fix (2026-08-04) cleared the id at CAPTURE time in
+# agent.py, which made the item look like it had nothing at all — the merge
+# never fired, the trigger click vanished, and the item was left standalone
+# with a totally empty selector. Rejecting it here (selector-build time)
+# instead keeps the merge intact.
+VOLATILE_MENUITEM_APP = "MockVolatileMenuItem"
+VOLATILE_MENUITEM_EVENTS = [
+    make_event("click", name="More", automation_id="", class_name="SplitButton",
+               control_type="SplitButton", app_name=VOLATILE_MENUITEM_APP,
+               winLeft=100, winTop=100, winWidth=600, winHeight=400, index=1),
+    make_event("click", name="", automation_id="477", class_name="",
+               control_type="MenuItem", app_name=VOLATILE_MENUITEM_APP,
+               expand_collapse=True, index=2,
+               winLeft=999, winTop=999, winWidth=50, winHeight=50),
+]
+VOLATILE_MENUITEM_EVENTS[1]["element"]["hwnd"] = 0
+VOLATILE_MENUITEM_SESSION_META = {
+    "action": "session_meta",
+    "app": VOLATILE_MENUITEM_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
+
+def step_wdio_generate_volatile_menuitem_id():
+    print("\n[16] a volatile popup-MenuItem id is rejected without dropping the trigger pairing (HeidiSQL 더보기, 2026-08-04)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", VOLATILE_MENUITEM_SESSION_META)
+    for ev in VOLATILE_MENUITEM_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": VOLATILE_MENUITEM_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (volatile menuitem) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped volatile-menuitem checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname, content = f.get("filename", ""), f.get("content", "")
+        check(
+            f"  {fname} never embeds the item's volatile counter id as its automationId",
+            '"automationId":"477"' not in content,
+            "a popup MenuItem's numeric AutomationId with hwnd=0 is a "
+            "per-session control-creation counter, not a stable id — "
+            "measured 2026-08-04: the same menu opened 3 times in one "
+            "recording session yielded 474, 475, 477 for the SAME item",
+        )
+        check(
+            f"  {fname} still pairs the item with its opening trigger",
+            '"name":"More"' in content,
+            "the trigger click ('더 보기'/More) must survive in the "
+            "generated triggerTarget — a first attempt at rejecting the "
+            "volatile id cleared it at capture time instead of selector-"
+            "build time, which starved mergeCrossWindowTriggerClicks() of "
+            "the signal it needs to pair trigger+item, and the trigger "
+            "click silently vanished from the generated test entirely",
+        )
+
+
 # Reused-DropDown-in-the-same-window scenario (2026-07-29, HeidiSQL "새 세션"
 # dialog: the network-type combo and the encoding combo sit one above the
 # other, both exposing a dropdown arrow with automationId="DropDown" — WAD's
@@ -604,6 +973,35 @@ DUP_DROPDOWN_EVENTS = [
 DUP_DROPDOWN_SESSION_META = {
     "action": "session_meta",
     "app": DUP_DROPDOWN_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
+# TComboBoxEx re-click scenario (2026-07-31, HeidiSQL 네트워크 유형 콤보):
+# a click that lands on the combo's own body (not the arrow, not an open
+# list item) hit-tests to the TComboBoxEx Pane itself, whose Name is
+# whatever value is CURRENTLY selected and whose automationId is its own
+# window handle (unstable). A selector built from that Name can only ever
+# match after the value has already been chosen — never at replay start.
+# Real failure reproduced live: 'click-not-found://Pane[@ClassName=
+# "TComboBoxEx" and @Name="MariaDB or MySQL (SSH tunnel)"]'.
+COMBOBOXEX_RECLICK_APP = "MockComboBoxExReclick"
+COMBOBOXEX_RECLICK_EVENTS = [
+    make_event("click", name="MariaDB or MySQL (SSH tunnel)", automation_id="",
+               class_name="TComboBoxEx", control_type="Pane",
+               app_name=COMBOBOXEX_RECLICK_APP, index=1, relX=663, relY=84),
+]
+COMBOBOXEX_RECLICK_EVENTS[0]["element"]["hwnd"] = 2690052  # equals nothing here,
+# but mirrors the live capture where automationId WOULD equal the element's
+# own hwnd if one were assigned — isWindowHandleId only fires when
+# automationId is set, so this scenario leaves automationId empty (the more
+# common capture shape) and relies on forceDropName to prove Name is dropped
+# regardless of automationId state.
+COMBOBOXEX_RECLICK_SESSION_META = {
+    "action": "session_meta",
+    "app": COMBOBOXEX_RECLICK_APP,
     "platform": PLATFORM,
     "timestamp": time.time(),
     "isElectron": False,
@@ -1556,7 +1954,7 @@ def step_wdio_generate_session():
         )
         check(
             f"  {fname} actually DEFINES osExpandCollapse() (not just calls it)",
-            "function osExpandCollapse(hwnd, target, itemName)" in content,
+            "function osExpandCollapse(hwnd, target, itemName, itemIndex, itemCount)" in content,
             "SESSION_HEADER never defined this helper — calling it threw "
             "'osExpandCollapse is not defined' at replay time even after the "
             "call-site gate was fixed (2026-07-16, caught on real FileZilla "
@@ -1685,7 +2083,7 @@ def step_wdio_generate_expand_redundant_trigger():
             continue
         check(
             f"  {fname} merges the 3 redundant trigger re-clicks with the REAL item (not itself)",
-            'osExpandCollapse(_appHwnd, {"automationId":"5999","className":"ComboBox","name":"Combo"}, "Red")' in content,
+            'osExpandCollapse(_appHwnd, {"automationId":"5999","className":"ComboBox","name":"Combo"}, "Red", null, null)' in content,
             "expected the 3 consecutive re-clicks of the same ComboBox trigger "
             "to collapse into ONE osExpandCollapse call whose itemName is the "
             "real item ('Red') that came after them — real FileZilla capture "
@@ -1695,7 +2093,7 @@ def step_wdio_generate_expand_redundant_trigger():
         )
         check(
             f"  {fname} never merges the trigger with itself (self-referencing itemName)",
-            'osExpandCollapse(_appHwnd, {"automationId":"5999","className":"ComboBox","name":"Combo"}, "Combo")' not in content,
+            'osExpandCollapse(_appHwnd, {"automationId":"5999","className":"ComboBox","name":"Combo"}, "Combo", null, null)' not in content,
             "found a self-referencing merge — itemName equals the trigger's "
             "own name, which is exactly the STEP6 bug seen in the real "
             "FileZilla run ('배경색(B): -> 배경색(B):')",
@@ -1711,7 +2109,7 @@ def step_wdio_generate_expand_redundant_trigger():
         )
         check(
             f"  {fname} still correctly merges an ordinary MenuItem trigger+item pair (regression)",
-            'osExpandCollapse(_appHwnd, {"automationId":"","className":"MenuItem","name":"File"}, "Open")' in content,
+            'osExpandCollapse(_appHwnd, {"automationId":"","className":"MenuItem","name":"File"}, "Open", null, null)' in content,
             "the fix must not disturb the existing non-redundant merge path",
         )
 
@@ -1737,12 +2135,29 @@ def step_wdio_generate_native():
         content = f.get("content", "")
         if "ById" not in fname:
             continue
+        # 2026-08-04: a CheckBox click now routes through osScopedInvoke's
+        # verified_toggle_click (checkbox value-verification gap fix) instead
+        # of a bare '~1049' accessibility-id click() — the numeric id itself
+        # must still survive (not be rejected as a volatile slot index), just
+        # embedded in the JSON selector this call carries instead of a
+        # standalone '~id' string.
         check(
             f"  {fname} trusts a numeric AutomationId on a Button/CheckBox",
-            "'~1049'" in content,
+            '"automationId":"1049"' in content and 'osScopedInvoke(' in content,
             "stable Win32 resource ID (1049) was rejected as if it were a "
             "ListView slot index — breaks AutomationId-based XPath on "
             "native dialogs (PuTTY 2026-07-13)",
+        )
+        check(
+            f"  {fname} routes the CheckBox click through verified_toggle_click (value-verification gap fix)",
+            'osScopedInvoke(_appHwnd, {"automationId":"1049","className":"Button",'
+            '"name":"System menu appears on ALT-Space"}, null, null, null, '
+            '"Native Dialog", false, true);' in content,
+            "a plain WAD element/click() reports success whenever the click "
+            "itself doesn't error, without checking whether the checkbox's "
+            "ToggleState actually changed — the same false-PASS risk measured "
+            "on TeamViewer's WebView2 toggles (2026-07-31) is structurally "
+            "present on every native CheckBox too (2026-08-04)",
         )
         check(
             f"  {fname} still rejects a numeric AutomationId on a TreeItem",
@@ -1772,11 +2187,16 @@ def step_wdio_generate_native():
             "if the bare accessibility-id selector survives anywhere, that "
             "step still resolves to the wrong field at replay time",
         )
+        # 2026-08-04: this id (1049) is a CheckBox, which no longer emits a
+        # bare '~id' selector at all (see the verified_toggle_click checks
+        # above) — the still-relevant regression to guard is that the reused-id
+        # AND-condition machinery (Host:/Port: 5999 above) doesn't ALSO fire on
+        # this unrelated, non-reused id and mangle its selector.
         check(
-            f"  {fname} still emits the bare '~1049' for a NON-reused numeric id (regression)",
-            "'~1049'" in content,
+            f"  {fname} does not AND a Name onto the NON-reused id 1049 (regression)",
+            '"automationId":"1049","className":"Button","name":"System menu appears on ALT-Space"' in content,
             "the reuse-detection must not over-trigger on a numeric id that "
-            "only appears once — that would needlessly lengthen a selector "
+            "only appears once — that would needlessly complicate a selector "
             "that was already unambiguous",
         )
         # ExpandCollapsePattern replay (2026-07-13, poc/diag_expandcollapse.py):
@@ -1793,7 +2213,7 @@ def step_wdio_generate_native():
         )
         check(
             f"  {fname} replays a standalone TreeItem toggle with itemName=null",
-            'osExpandCollapse(_appHwnd, {"automationId":"","className":"TreeItem","name":"Window"}, null)' in content,
+            'osExpandCollapse(_appHwnd, {"automationId":"","className":"TreeItem","name":"Window"}, null, null, null)' in content,
             "TreeItem +/- toggle must call osExpandCollapse() with no item "
             "name (pure expand/collapse, not an item-selection gesture)",
         )
@@ -1816,7 +2236,7 @@ def step_wdio_generate_native():
         check(
             f"  {fname} merges a same-window trigger + cross-window item into one osScopedInvoke() call",
             'osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"Some Encoding"}, '
-            '{"automationId":"DropDown","className":"","name":""}, null, null);' in content,
+            '{"automationId":"DropDown","className":"","name":""}, null, null, "Native Dialog");' in content,
             "trigger click (DropDown button) and the cross-window item click "
             "must merge into one osScopedInvoke(item, trigger) call instead "
             "of two separate steps — splitting them races the popup "
@@ -1851,7 +2271,7 @@ def step_wdio_generate_native():
         check(
             f"  {fname} merges trigger+scroll+item into one osScopedInvoke() and drops the scroll",
             'osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"UTF-8 Item"}, '
-            '{"automationId":"DropDown","className":"","name":""}, null, null);' in content
+            '{"automationId":"DropDown","className":"","name":""}, null, null, "Native Dialog");' in content
             and "osScrollEl(_appHwnd," not in content,  # call site, not the header's function def
             "trigger click + intervening scroll + cross-window item must merge "
             "into one osScopedInvoke(item, trigger); the scroll must be dropped "
@@ -1978,7 +2398,13 @@ def step_wdio_generate_trigger_expand_merge_order():
         # the item search fails every time (measured live against HeidiSQL).
         check(
             f"  {fname} merges the trigger and the cross-window expandCollapse item into one osScopedInvoke call",
-            'osScopedInvoke(_appHwnd, {"automationId":"473","className":"","name":""}, {"automationId":"btnMore","className":"Button","name":""}, null, null);' in content,
+            # automationId "" not "473" (2026-08-04): a popup MenuItem's numeric
+            # id with hwnd=0 is a volatile per-session counter (isVolatileMenuItemId)
+            # — rejected here same as the item's own Name (empty, icon-only item).
+            # The merge itself (trigger+item, one osScopedInvoke call) is the
+            # thing this check actually guards; see MockVolatileMenuItem for the
+            # id-rejection assertion in isolation.
+            'osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":""}, {"automationId":"btnMore","className":"Button","name":""}, null, null, "Calculator");' in content,
             "trigger (More) and item (the cross-window standalone toggle) "
             "must run in the SAME process so the popup the trigger opens is "
             "visible to the item search's new-window baseline",
@@ -1992,7 +2418,7 @@ def step_wdio_generate_trigger_expand_merge_order():
         )
         check(
             f"  {fname} still replays the later, genuinely separate cross-window click on its own",
-            'osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"Log"}, null, null, null);' in content,
+            'osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"Log"}, null, null, null, "Calculator");' in content,
             "the fix must not disturb a real, unrelated cross-window click "
             "that just happens to follow a merged trigger+item pair",
         )
@@ -2028,7 +2454,7 @@ def step_wdio_generate_nameless_item_no_fake_itemname():
         )
         check(
             f"  {fname} keeps the trigger as a standalone toggle instead of a bogus merge",
-            'osExpandCollapse(_appHwnd, {"automationId":"fakeTrigger","className":"ComboBox","name":"Combo2"}, null)' in content,
+            'osExpandCollapse(_appHwnd, {"automationId":"fakeTrigger","className":"ComboBox","name":"Combo2"}, null, null, null)' in content,
             "with no real item name to merge, the trigger must fall back to "
             "the plain expand/collapse toggle it always had as a valid "
             "standalone behavior",
@@ -2043,6 +2469,67 @@ def step_wdio_generate_nameless_item_no_fake_itemname():
             "(automationId, via COM property search, NOT the Name-only "
             "search that made the old itemName fallback pointless) instead "
             "of either a bogus text search or giving up outright",
+        )
+
+
+def step_wdio_generate_owner_drawn_dropdown_by_index():
+    print("\n[16] Owner-drawn dropdown item selected by position (HeidiSQL ComboBoxEx)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", COMBO_INDEX_SESSION_META)
+    for ev in COMBO_INDEX_EVENTS:
+        request("POST", "/api/events", ev)
+
+    status, body = request("POST", "/api/generate", {
+        "appName": COMBO_INDEX_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (combo index) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped combo-index checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname = f.get("filename", "")
+        content = f.get("content", "")
+        check(
+            f"  {fname} forwards the recorded list position to osExpandCollapse()",
+            ", 4, 18)" in content and "osExpandCollapse(" in content,
+            "an owner-drawn dropdown exposes no item Names at all, so the only "
+            "way to pick a value is the item's position in the open list — "
+            "codegen must pass comboItemIndex/comboItemCount through or the "
+            "step silently degrades to 'just open the dropdown' (HeidiSQL "
+            "network-type combo, 2026-07-31)",
+        )
+        check(
+            f"  {fname} never builds a selector from the combo's state-dependent Name",
+            "TComboBoxEx" not in content,
+            "the outer ComboBoxEx wrapper's Name IS the currently selected "
+            "value, so a selector using it can only match AFTER the value has "
+            "been chosen — the exact chicken-and-egg failure measured on "
+            "replay ('click-not-found://Pane[@ClassName=\"TComboBoxEx\" and "
+            "@Name=\"Microsoft SQL Server (TCP/IP)\"]')",
+        )
+        check(
+            f"  {fname} does not swallow the following click as this dropdown's item",
+            # ById resolves it as '~btnSave', ByClass as a ClassName+Name XPath —
+            # assert on the step label, which both variants share.
+            "2:click Save" in content,
+            "the event already encodes a complete 'expand then pick #N' "
+            "action; letting mergeExpandCollapseClicks pair it with the next "
+            "click would consume an unrelated user action ('Save') as if it "
+            "were this dropdown's item, deleting it from the test",
+        )
+        check(
+            f"  {fname} emits exactly one expand step (the combo) plus the Save click",
+            content.count("osExpandCollapse(_appHwnd") == 1,
+            "a second osExpandCollapse call site would mean the trailing click "
+            "was also routed through the dropdown path",
+        )
+        check(
+            f"  {fname} passes the item count so a changed list is refused",
+            ", 18)" in content,
+            "the helper compares the recorded item count against the live one "
+            "and refuses to pick by position when they differ — without it a "
+            "reordered/filtered list silently selects the wrong value",
         )
 
 
@@ -2075,7 +2562,7 @@ def step_wdio_generate_hwnd_trigger_keeps_name():
         )
         check(
             f"  {fname} keeps the trigger's Name once its hwnd-id is rejected",
-            'osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"Prefs"}, {"automationId":"","className":"SplitButton","name":"More"}, null, null);' in content,
+            'osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"Prefs"}, {"automationId":"","className":"SplitButton","name":"More"}, null, null, "Calculator");' in content,
             "dropping the Name too (the old 'automationId present -> drop "
             "Name' rule, applied even to a rejected hwnd-id) leaves the "
             "trigger with NO usable field at all — Name must survive when "
@@ -2117,6 +2604,43 @@ def step_wdio_generate_dup_dropdown_position_disambiguation():
             "each DropDown click must carry ITS OWN captured relY — reusing "
             "the same target/hint for both would defeat the whole point of "
             "distinguishing them",
+        )
+
+
+def step_wdio_generate_combobox_ex_reclick_drops_name():
+    print("\n[17] TComboBoxEx re-click never uses its state-dependent Name (HeidiSQL 네트워크 유형, 2026-07-31)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", COMBOBOXEX_RECLICK_SESSION_META)
+    for ev in COMBOBOXEX_RECLICK_EVENTS:
+        request("POST", "/api/events", ev)
+
+    status, body = request("POST", "/api/generate", {
+        "appName": COMBOBOXEX_RECLICK_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (ComboBoxEx re-click) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped ComboBoxEx re-click checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname = f.get("filename", "")
+        content = f.get("content", "")
+        check(
+            f"  {fname} never builds a selector from the combo's currently-selected-value Name",
+            '"MariaDB or MySQL (SSH tunnel)"' not in content,
+            "TComboBoxEx's own Name IS whatever value is currently selected — "
+            "a selector using it can only match AFTER that value has already "
+            "been chosen, never at replay start. Real failure measured live: "
+            "click-not-found://Pane[@ClassName=\"TComboBoxEx\" and "
+            "@Name=\"MariaDB or MySQL (SSH tunnel)\"]",
+        )
+        check(
+            f"  {fname} routes the click through COM with className-only + position hint",
+            'osScopedInvoke(_appHwnd, {"automationId":"","className":"TComboBoxEx","name":""}, null, 84);' in content,
+            "with Name force-dropped and automationId absent, className is "
+            "the only remaining field — must still reach a valid, complete "
+            "osScopedInvoke() call carrying the recorded relY, not an empty "
+            "or malformed target",
         )
 
 
@@ -2233,6 +2757,24 @@ def step_com_sendinput_helpers():
             "the clicked element is often destroyed by its own click (menu "
             "item, dialog button) — reading its Name afterwards logs '?' and "
             "destroys the traceability the exception path exists to provide",
+        )
+
+    ec_path = os.path.join(out_dir, "osExpandCollapse.py")
+    if os.path.exists(ec_path):
+        with open(ec_path, encoding="utf-8") as fh:
+            ec_src = fh.read()
+        check(
+            "  osExpandCollapse.py retries resolve_target() for a slow post-navigation render",
+            "for attempt in range(10):" in ec_src
+            and "target = resolve_target(uia, root, sel)" in ec_src,
+            "measured 2026-08-04 (HeidiSQL '환경 설정' -> '파일 및 탭' tab switch): "
+            "the tab-switch click reports success in a separate process before "
+            "this process's search runs, but the new tab's controls (e.g. "
+            "TComboBox) had not reached the UIA tree yet — a single-shot "
+            "resolve_target() failed every time with 'target element not "
+            "found'. osScopedInvoke.py already carries this exact retry budget "
+            "for the same class of render race (2026-07-17/24); this helper "
+            "never got it",
         )
 
     path = os.path.join(out_dir, "osScopedInvoke.py")
@@ -2395,6 +2937,7 @@ def step_output_folders_isolated():
         EXPAND_REDUNDANT_APP, NATIVE_APP, VCL_APP, TRIGGER_EXPAND_APP,
         NAMELESS_ITEM_APP, HWND_TRIGGER_APP, DUP_DROPDOWN_APP, ANIM_APP,
         NESTED_DROPDOWN_APP, SIMPLE_ROOTHWND_APP, TITLE_COLLISION_DIALOGRECT_APP,
+        WEB_APP, DBLROW_APP, WINCLICK_APP, VOLATILE_MENUITEM_APP,
         "SevenZipStateReset",
     })
     for name in targets:
@@ -2437,9 +2980,15 @@ def main():
     step_wdio_generate_expand_redundant_trigger()
     step_wdio_generate_native()
     step_wdio_generate_vcl_hwnd_id()
+    step_wdio_generate_web_content()
+    step_wdio_generate_doubleclick_row()
+    step_wdio_generate_window_click()
     step_wdio_generate_trigger_expand_merge_order()
     step_wdio_generate_nameless_item_no_fake_itemname()
+    step_wdio_generate_owner_drawn_dropdown_by_index()
+    step_wdio_generate_combobox_ex_reclick_drops_name()
     step_wdio_generate_hwnd_trigger_keeps_name()
+    step_wdio_generate_volatile_menuitem_id()
     step_wdio_generate_dup_dropdown_position_disambiguation()
     step_com_sendinput_helpers()
     step_esc_recovery_guards()

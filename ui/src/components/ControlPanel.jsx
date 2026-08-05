@@ -14,6 +14,13 @@ const PRESETS = [
   { label: 'FileZilla',        appName: 'FileZilla',        exePath: 'C:\\Program Files\\FileZilla FTP Client\\filezilla.exe' },
   { label: 'IDM',              appName: 'IDM',              exePath: 'C:\\Program Files (x86)\\Internet Download Manager\\IDMan.exe' },
   { label: '7-Zip',            appName: 'SevenZip',         exePath: 'C:\\Program Files\\7-Zip\\7zFM.exe' },
+  { label: 'HeidiSQL',         appName: 'HeidiSQL',         exePath: 'C:\\Program Files\\HeidiSQL\\heidisql.exe' },
+  { label: 'TeamViewer',       appName: 'TeamViewer',       exePath: 'C:\\Program Files\\TeamViewer\\TeamViewer.exe' },
+  // 2026-08-05: WPF 프레임워크 커버리지 확인용 — probe_app_automatability.py로
+  // Tier 1(지원) 확인됨. Windows에 기본 내장, 별도 설치 불필요.
+  { label: 'PowerShell ISE',   appName: 'PowerShellISE',    exePath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell_ise.exe' },
+  // 2026-08-05: WinForms 프레임워크 커버리지 확인용 (voidtools Everything).
+  { label: 'Everything',       appName: 'Everything',       exePath: 'C:\\Program Files (x86)\\Everything\\Everything.exe' },
   // NOTE: LOCALAPPDATA is not available in CRA bundles; path uses "user" as default username.
   // If your Windows profile is not "user", select "Custom..." and enter the correct path.
   { label: 'VSCode',           appName: 'VSCode',           exePath: 'C:\\Users\\user\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe' },
