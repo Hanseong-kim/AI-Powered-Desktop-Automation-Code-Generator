@@ -2470,6 +2470,44 @@ class Recorder:
 
     def _inspect(self, ins, x, y):
         try:
+            # An item-PICKING click (as opposed to the click that opens the
+            # list) closes the list before this runs, so its own hit test is
+            # never going to succeed live — the entire reason
+            # _dropdown_item_from_cache()/_menu_item_from_cache() exist.
+            # Position resolved from a snapshot taken while the list was
+            # genuinely open and confirmed to belong to this app is
+            # trustworthy independent of this click's own hwnd, so this
+            # answers the question outright: on a hit, every value below is
+            # overwritten by the trigger's own describe() and returned
+            # immediately.
+            #
+            # 2026-08-05 (사용자 보고 "클릭 인지가 느리다", FileZilla 실측):
+            # 이 블록은 원래 element_at()+describe() 뒤에 있었다 — 그 결과
+            # **버려질 것이 확실한** 전체 트리 탐색(ElementFromPoint →
+            # smallest_element_at → _deepen)을 매번 먼저 지불했다. 측정된
+            # [diag-click] gap: 일반 클릭 0.04~0.09s인데 캐시로 풀리는 메뉴
+            # 항목 클릭이 0.94s / 0.99s — 20배 차이가 전부 이 낭비다.
+            # 캐시 조회는 순수 기하 비교라 비용이 사실상 0이므로, 맞으면
+            # 트리 탐색 자체를 건너뛴다. 캐시가 빗나가면 종전 경로 그대로
+            # 진행하므로 판정 로직은 하나도 바뀌지 않는다.
+            cache_hit = ins._dropdown_item_from_cache(x, y)
+            cache_kind = "combo"
+            if cache_hit is None:
+                cache_hit = ins._menu_item_from_cache(x, y)
+                cache_kind = "menu"
+            if cache_hit is not None:
+                trigger, idx, total, item_name = cache_hit
+                info = ins.describe(trigger)
+                if cache_kind == "combo":
+                    info["comboItemIndex"] = idx
+                    info["comboItemCount"] = total
+                    info["comboItemName"] = item_name
+                else:
+                    info["menuItemIndex"] = idx
+                    info["menuItemCount"] = total
+                    info["menuItemName"] = item_name
+                info["expandCollapse"] = True
+                return info
             elem = ins.element_at(x, y)
             info = ins.describe(elem)
             # DIAGNOSTIC: element_at()'s full decision path in one line, plus
@@ -2490,40 +2528,15 @@ class Recorder:
             except Exception as e:
                 log(f"[trace] failed: {e}")
             light_dismiss = info.get("automationId") == "Light Dismiss"
-            # An item-PICKING click (as opposed to the click that opens the
-            # list) closes the list before this runs, so its own hit test is
-            # never going to succeed live — the entire reason
-            # _dropdown_item_from_cache()/_menu_item_from_cache() exist.
-            # Check the cache FIRST, before the tracked-window/light-dismiss
-            # machinery below: an item click is typically hwnd==0 (UIA-only
-            # sub-element) like its trigger, so it would otherwise get
-            # light_dismiss=True immediately and never reach the
-            # open_dropdown_item_at()/open_menu_item_at() branches later in
-            # this function (those require not light_dismiss too) — measured
-            # 2026-08-04 (HeidiSQL): items landed on a cached-but-unreachable
-            # path and fell through to whatever the closed list had been
-            # covering. Position resolved from a snapshot taken while the
-            # list was genuinely open and confirmed to belong to this app is
-            # trustworthy independent of this click's own hwnd.
-            cache_hit = ins._dropdown_item_from_cache(x, y)
-            cache_kind = "combo"
-            if cache_hit is None:
-                cache_hit = ins._menu_item_from_cache(x, y)
-                cache_kind = "menu"
-            if cache_hit is not None:
-                trigger, idx, total, item_name = cache_hit
-                info = ins.describe(trigger)
-                elem = trigger
-                if cache_kind == "combo":
-                    info["comboItemIndex"] = idx
-                    info["comboItemCount"] = total
-                    info["comboItemName"] = item_name
-                else:
-                    info["menuItemIndex"] = idx
-                    info["menuItemCount"] = total
-                    info["menuItemName"] = item_name
-                info["expandCollapse"] = True
-                return info
+            # NOTE: the dropdown/menu item cache is consulted at the TOP of
+            # this function now (see the comment there) — an item click is
+            # typically hwnd==0 (UIA-only sub-element) like its trigger, so
+            # it would otherwise get light_dismiss=True immediately and never
+            # reach the open_dropdown_item_at()/open_menu_item_at() branches
+            # later in this function (those require not light_dismiss too) —
+            # measured 2026-08-04 (HeidiSQL): items landed on a
+            # cached-but-unreachable path and fell through to whatever the
+            # closed list had been covering.
             # Resolved element belongs to a window this recording isn't
             # tracking at all (confirmed 2026-07-13: a PuTTY capture's very
             # first click — right after window discovery — resolved to an
@@ -2680,6 +2693,69 @@ class Recorder:
                     # snapshot_open_menu().
                     ins.snapshot_open_dropdown(elem, info)
                     ins.snapshot_open_menu(elem, info)
+            # The adopted element was DEAD by the time describe() read it —
+            # its BoundingRectangle either raised (describe stores the reason
+            # as an "ERR:..." string) or came back all-zero. Measured
+            # 2026-08-05 on two separate FileZilla recordings:
+            #
+            #   raw=[id='5101' name='취소' rect="ERR:COMError:(-2147220991,
+            #        '이벤트에서 가입자를 불러낼 수 없습니다.')" hwnd=0]
+            #   raw=[id='' name='닫기' rect=(1702,217,1746,254) hwnd=0]
+            #        -> describe() re-read it as rect=(0,0,0,0)
+            #
+            # (-2147220991 == 0x80040201 EVENT_E_ALL_SUBSCRIBERS_FAILED — the
+            # UIA provider went away.) Both were real buttons whose own click
+            # destroyed them: 취소 closes the Site Manager dialog, 닫기 closes
+            # a dialog. The worker thread inspects 0.2-0.5s later, by which
+            # time the provider is gone.
+            #
+            # The bug is what happened NEXT. A dead element falls into the
+            # light-dismiss recovery below, which re-hit-tests the foreground
+            # window's tree and adopts whatever STATIC BACKDROP happens to sit
+            # under the point — measured: FileZilla's log pane
+            # ('RichEdit Control', a Document) and its status bar
+            # ('연결되지 않았음.', a Text). Those are genuine, named, and
+            # really do contain the point, so every downstream guard accepts
+            # them; server.js's stripWindowFillingContainers can't help either
+            # (Document/Text are deliberately excluded, and neither is close
+            # to the 80% window-fill ratio). The result is a step that replays
+            # cleanly and does absolutely nothing — the exact silent false
+            # PASS §3 forbids — while the user's real 취소/닫기 click is lost.
+            #
+            # A dead element's identity cannot be recovered from a point,
+            # because the point now belongs to something else. Drop the
+            # selector so codegen emits an explicit FAIL step (§3), which is
+            # what "we could not determine what was clicked" honestly means.
+            # This is narrow by construction: every genuine recovery case has
+            # a VALID rect and is untouched — the XAML Light Dismiss overlay
+            # (2026-07-12 Notepad, rect = the whole window), the untracked
+            # WebView2 subtree (2026-08-05 TeamViewer), and the wrong-window
+            # contamination guard (2026-08-04 PuTTY/Chrome, rect=(219,367,
+            # 294,405)) all read their rects fine and are rejected for
+            # semantic reasons, not read failures.
+            if light_dismiss and elem is not None:
+                _r = info.get("rect")
+                _dead = (not isinstance(_r, tuple)) or _r == (0, 0, 0, 0)
+                if _dead:
+                    log(f"[inspect] adopted element at ({x},{y}) is dead "
+                        f"(rect={_r!r}) — its provider went away before it could "
+                        "be read, so the point no longer identifies it. Skipping "
+                        "light-dismiss recovery, which would adopt whatever "
+                        "static backdrop sits underneath (§3: an honest FAIL "
+                        "step beats a silent no-op)")
+                    # Exactly the shape the existing "no resolvable element"
+                    # drop below produces — codegen already turns that into an
+                    # explicit FAIL step; do not invent a second variant.
+                    for k in ("name", "automationId", "className", "controlType"):
+                        info[k] = ""
+                    info["locatorStrategy"] = "coordinate"
+                    info["locatorValue"] = ""
+                    # The existing drop path reaches the tail of this function
+                    # and picks this up there; an early return has to set it
+                    # itself or the event ships with a stale/absent fallback.
+                    info["locatorFallback"] = "coordinate"
+                    return info
+
             if light_dismiss:
                 # The click raced a menu/flyout opening: by the time this hit
                 # test ran, the XAML light-dismiss overlay (a full-window,

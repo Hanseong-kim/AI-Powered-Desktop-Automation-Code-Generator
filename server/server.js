@@ -2476,7 +2476,31 @@ function mergeExpandCollapseClicks(events) {
           && sameRect(pick.element?.rect, e.element.rect)) {
         console.log(`[expand-merge] dropped ${k - i} redundant open-click(s) before `
           + `'select item #${itemIdxOf(pick.element)}' @index ${i}..${k - 1}`);
-        i = k - 1;     // 루프의 i++가 항목 이벤트를 가리키게 한다
+        // 항목 클릭의 windowTitle은 post-navigation으로 오염될 수 있다 — 그
+        // 클릭이 여는 창이 워커 스레드의 hit-test보다 먼저 뜨면, 트리거가
+        // 살던 창이 아니라 **새로 뜬 창의 제목**이 찍힌다(dedupeDoubleClicks가
+        // "가장 이른 구성 click만 pre-navigation이라 신뢰 가능"으로 이미
+        // 막아둔 것과 같은 레이스). 실측 2026-08-05 FileZilla
+        // 파일(F)→사이트 관리자(S)...: 파일 메뉴는 메인 "FileZilla" 창에 있는데
+        // 항목 이벤트의 windowTitle이 "사이트 관리자"로 캡처됐고, 이 이벤트가
+        // filtered[0]이라 그 제목이 그대로 launchFrag/_mainTitleFrag가 됐다 —
+        // 생성된 스크립트가 아직 존재하지도 않는 "사이트 관리자" 창을 기다리며
+        // launchApp에서 타임아웃나고(`window not detected within timeout`),
+        // _hwndCache['사이트 관리자']가 비어 이후 모든 스텝이
+        // 'no window hwnd'/'window not found'로 무너졌다.
+        // 병합된 이벤트가 실제로 일어나는 창은 언제나 트리거 쪽 창이다.
+        const correctedPick = (pick.element?.windowTitle !== e.element?.windowTitle)
+          ? { ...pick, element: { ...pick.element, windowTitle: e.element.windowTitle } }
+          : pick;
+        if (correctedPick !== pick) {
+          console.log(`[expand-merge] item event windowTitle ${JSON.stringify(pick.element?.windowTitle || '')} `
+            + `-> ${JSON.stringify(e.element.windowTitle || '')} (트리거가 살던 창으로 교정 — 항목 클릭이 연 새 창 제목이 찍혀 있었음)`);
+        }
+        // hasItemIdx가 참인 이벤트는 아래 expandCollapse 블록이
+        // `!hasItemIdx`를 요구해 통째로 건너뛰므로, 여기서 직접 push해도
+        // 종전 `i = k - 1` 경로와 동치다.
+        out.push(correctedPick);
+        i = k;
         continue;
       }
     }
@@ -5190,9 +5214,21 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
         // 셀렉터도 anchor도 없는 이벤트(예: light-dismiss 오버레이 레이스)는
         // 재생 수단이 없다 — 조용히 건너뛰면 이후 플로우가 어긋난 채 PASSED로
         // 남을 수 있으므로(거짓 통과), 명시적 실패로 기록한다.
+        // 2026-08-05 (TeamViewer "세션 참가" 직후 뜨는 팝업 실측): 이 이벤트가
+        // 새 창 세그먼트의 첫 이벤트인데 셀렉터가 없으면, 위 switchWindowStep은
+        // 이 반환문 뒤(5247행)에서만 붙으므로 여기선 전혀 삽입되지 않는다 —
+        // 그 결과 콘솔에 "STEP N"도 "switch to window"도 한 줄도 안 찍히고
+        // 재생이 그 창을 통째로 건드린 적 없다는 흔적조차 없이 다음 스텝으로
+        // 넘어가, 사용자가 "팝업을 못 다루고 그냥 넘어갔다"를 로그만으로는
+        // 확인할 방법이 없었다. 진짜 _switchWindow()는 부르지 않는다 — 그건
+        // getWindowSession()의 Root 세션 EnumWindows/XPath 스캔(최대 10~20초)을
+        // 태우는데, 이 스텝은 어차피 클릭할 셀렉터가 없어 그 결과를 쓸 데가
+        // 없다(바로 위 4783-4793행 주석과 같은 낭비 패턴). 실행 비용 없는
+        // console.log 한 줄로 "여기서 새 창 세그먼트에 진입했는데 셀렉터가
+        // 없어 건너뛴다"는 사실만 남긴다.
         pushStep(
 `            // [STEP ${stepNum}] ${e.action}: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
-            _failures.push('${stepNum}:${e.action}:no-selector');`
+${segBoundary && useSession ? `            console.log('[STEP] switch to window: ${escapeStr(relTitle)} (skipped — no selector for this step)');\n` : ''}            _failures.push('${stepNum}:${e.action}:no-selector');`
         );
         return;
       }
@@ -5402,19 +5438,6 @@ function buildAppStateResetCall(exePath) {
             console.warn('[state-reset] app-state reset failed (non-fatal):', String(e.message || e).substring(0, 150));
         }
 `;
-}
-
-// ── 유틸: 이벤트 element name → 안전한 Java/JS 식별자 ───────────────────────
-
-function safeName(str) {
-  if (!str) return 'element';
-  // 한글/특수문자를 제거, camelCase 정리
-  const ascii = str.replace(/[^A-Za-z0-9 _-]/g, '').trim();
-  if (!ascii) return 'element';
-  return ascii
-    .split(/[\s_-]+/)
-    .map((w, i) => i === 0 ? w.charAt(0).toLowerCase() + w.slice(1) : w.charAt(0).toUpperCase() + w.slice(1))
-    .join('');
 }
 
 // ── 파일 저장 ────────────────────────────────────────────────────────────────
