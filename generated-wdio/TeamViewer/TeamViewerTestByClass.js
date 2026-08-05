@@ -273,6 +273,18 @@ async function _typeScoped(sid, rootElId, selector, text) {
         const elId = el.ELEMENT || el['element-6066-11e4-a52e-4f735466cecf'];
         await _appiumPost(`/session/${sid}/element/${elId}/clear`, {});
         await _appiumPost(`/session/${sid}/element/${elId}/value`, { text });
+        // 2026-08-05 (TeamViewer "빠른 연결 허용" 이메일/비밀번호 실측): 이
+        // 함수는 성공 시 지금까지 아무것도 안 찍었다 — 실패만 찍는 catch와
+        // 합쳐서 보면 "성공해서 조용했다"와 "그 어떤 호출도 실제로 안
+        // 일어났다"를 로그만으로 구분할 방법이 없었다(simple 모드로 생성된
+        // 파일에서 이 함수가 실제로 도는 코드인 걸 확인하는 데만 세 번의
+        // 재녹화가 들었다 — session-mode 전용 코드만 계속 고치고 있었음).
+        // WinAppDriver의 element/value가 예외 없이 성공을 보고해도 앱에
+        // 실제로 반영 안 되는 사례가 이미 WebView2에서 확인됐다(§ isWebContent
+        // 타이핑 분기 주석) — 여기서 element/value가 "성공"을 보고했다는
+        // 사실 자체를 남겨야, 다음에도 같은 증상(로그는 성공, 화면은 빈칸)이
+        // 나면 "WAD REST가 거짓 성공을 보고하는 컨트롤"로 확정할 수 있다.
+        console.log(`[type] scoped sendKeys ok (sid=${sid} elId=${elId} sel=${selector})`);
         return true;
     } catch (e) { console.warn('[type] scoped sendKeys failed:', String(e.message || e).substring(0, 100)); return false; }
 }
@@ -483,15 +495,39 @@ async function initAppHwnd() {
 // never run launchApp's foreground/normalize step, so a freshly launched app
 // can be spawned behind other windows or off-position — bring it forward
 // before the first click so OS-level input actually reaches it.
-function osActivate(titleLike) {
+function osActivate(titleLike, hwnd) {
     try {
-        const args = _appHwnd ? `-hwnd ${_appHwnd}` : `-titleLike "${titleLike}"`;
+        // 2026-08-05 (TeamViewer "빠른 연결 허용" 이메일/비밀번호 실측): 원래
+        // hwnd 인자가 없어서 항상 _appHwnd(메인 창)만 활성화할 수 있었다 —
+        // 크로스윈도우 대화상자를 지정할 방법이 아예 없었다. session 헤더의
+        // osActivate 시그니처와 맞춘다. 기존 호출부(인자 1개, 예: 빈 문자열 또는
+        // title만 넘기는 호출)는 hwnd가 undefined이므로 _appHwnd 폴백으로
+        // 그대로 동작해 변화 없음.
+        const h = hwnd || _appHwnd;
+        const args = h ? `-hwnd ${h}` : `-titleLike "${titleLike}"`;
         execSync(
             `powershell -NoProfile -File "${_helperFile('osActivate.ps1')}" ${args}`,
             { stdio: 'pipe', timeout: 15000 }
         );
     } catch (e) {
         console.warn('[osActivate] failed:', String(e.message || e).substring(0, 100));
+    }
+}
+
+// 2026-08-05: session 헤더의 _listWindowHwnds()와 동일 — 크로스윈도우 타이핑
+// 스텝이 simple 모드에서도 대화상자의 진짜 hwnd를 라이브로 찾을 수 있어야
+// 해서 여기에도 둔다(원래 session 전용이었음).
+function _listWindowHwnds(frag) {
+    if (!frag) return [];
+    try {
+        const out = execSync(
+            `powershell -NoProfile -File "${_helperFile('osWindowRect.ps1')}" -titleLike "${frag}" -listOnly`,
+            { stdio: 'pipe', timeout: 15000 }
+        ).toString().trim();
+        if (!out) return [];
+        return out.split(/\r?\n/).map(s => s.trim()).filter(Boolean).map(Number);
+    } catch {
+        return [];
     }
 }
 
@@ -644,26 +680,19 @@ class TeamViewerPageByClass {
     // [W1] TeamViewer (main window)
     // ════════════════════════════════════════════════════════════
     async click1() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"Windows와 함께 TeamViewer 시작"});
+        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"세션 코드"});
     }
 
-    async click2() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"Windows와 함께 TeamViewer 시작"});
-    }
-
-    async click3() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"ID를 복사하세요"});
+    async type2(value) {
+        osActivate('');
+        osType(value);
     }
 
     async click4() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"비밀번호를 복사하세요"});
+        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"Windows와 함께 TeamViewer 시작"}, null, null, null, null, true);
     }
 
     async click5() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"비밀번호를 새로고침하세요"});
-    }
-
-    async click8() {
         osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"이 장치에 Easy Access 권한 부여"});
     }
 
@@ -671,50 +700,42 @@ class TeamViewerPageByClass {
     // ════════════════════════════════════════════════════════════
     // [W2] 빠른 연결 허용 (new window)
     // ════════════════════════════════════════════════════════════
+    async click6() {
+        osScopedInvoke(_appHwnd, {"automationId":"1125","className":"Edit","name":""}, null, 116, null, "빠른 연결 허용");
+    }
+
+    async type7(value) {
+        const hs = _listWindowHwnds('빠른 연결 허용');
+        if (!hs.length) {
+            console.warn('[type7] window "빠른 연결 허용" not found by EnumWindows — activation/typing may miss');
+        }
+        osActivate('빠른 연결 허용', hs[0]);
+        osType(value);
+    }
+
+    async click8() {
+        osScopedInvoke(_appHwnd, {"automationId":"","className":"#32770","name":"빠른 연결 허용"}, null, 76, null, "빠른 연결 허용");
+    }
+
     async click9() {
-        osScopedInvoke(_appHwnd, {"automationId":"1125","className":"Edit","name":""}, null, 110, null, "빠른 연결 허용");
+        osScopedInvoke(_appHwnd, {"automationId":"1126","className":"Edit","name":""}, null, 142, null, "빠른 연결 허용");
     }
 
     async type10(value) {
-        const ok = await _typeScoped(_appSid, null, '//Edit[@ClassName="Edit" and @Name="이메일"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type10] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
+        const hs = _listWindowHwnds('빠른 연결 허용');
+        if (!hs.length) {
+            console.warn('[type10] window "빠른 연결 허용" not found by EnumWindows — activation/typing may miss');
         }
+        osActivate('빠른 연결 허용', hs[0]);
+        osType(value);
     }
 
     async click11() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"#32770","name":"빠른 연결 허용"}, null, 133, null, "빠른 연결 허용");
+        osScopedInvoke(_appHwnd, {"automationId":"","className":"#32770","name":"빠른 연결 허용"}, null, 143, null, "빠른 연결 허용");
     }
 
     async click12() {
-        osScopedInvoke(_appHwnd, {"automationId":"1126","className":"Edit","name":""}, null, 140, null, "빠른 연결 허용");
-    }
-
-    async type13(value) {
-        const ok = await _typeScoped(_appSid, null, '//Edit[@ClassName="Edit" and @Name="비밀번호"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type13] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
-    }
-
-    async click14() {
-        osScopedInvoke(_appHwnd, {"automationId":"2","className":"Button","name":""}, null, 223, null, "빠른 연결 허용");
+        osScopedInvoke(_appHwnd, {"automationId":"2","className":"Button","name":""}, null, 217, null, "빠른 연결 허용");
     }
 }
 
@@ -743,26 +764,23 @@ async function run() {
     // ════════════════════════════════════════════════════════════
     // [W1] TeamViewer (main window)
     // ════════════════════════════════════════════════════════════
-            await _step('1:click Windows와 함께 TeamViewer 시작', () => page.click1());
-            await _step('2:click Windows와 함께 TeamViewer 시작', () => page.click2());
-            await _step('3:click ID를 복사하세요', () => page.click3());
-            await _step('4:click 비밀번호를 복사하세요', () => page.click4());
-            await _step('5:click 비밀번호를 새로고침하세요', () => page.click5());
-            // [STEP 6] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
-            _failures.push('6:click:no-selector');
-            // [STEP 7] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
-            _failures.push('7:click:no-selector');
-            await _step('8:click 이 장치에 Easy Access 권한 부여', () => page.click8());
+            await _step('1:click 세션 코드', () => page.click1());
+            await _step('2:type 123654789', () => page.type2('123654789'));
+            // [STEP 3] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
+            _failures.push('3:click:no-selector');
+            await _step('4:doubleClick Windows와 함께 TeamViewer 시작', () => page.click4());
+            await _step('5:click 이 장치에 Easy Access 권한 부여', () => page.click5());
 
     // ════════════════════════════════════════════════════════════
     // [W2] 빠른 연결 허용 (new window)
     // ════════════════════════════════════════════════════════════
-            await _step('9:click 이메일 (cross-window)', () => page.click9());
+            await _step('6:click 이메일 (cross-window)', () => page.click6());
+            await _step('7:type asdf', () => page.type7('asdf'));
+            await _step('8:click 빠른 연결 허용 (cross-window)', () => page.click8());
+            await _step('9:click 비밀번호 (cross-window)', () => page.click9());
             await _step('10:type asdf', () => page.type10('asdf'));
             await _step('11:click 빠른 연결 허용 (cross-window)', () => page.click11());
-            await _step('12:click 비밀번호 (cross-window)', () => page.click12());
-            await _step('13:type asdf', () => page.type13('asdf'));
-            await _step('14:click 취소 (cross-window)', () => page.click14());
+            await _step('12:click 취소 (cross-window)', () => page.click12());
     } finally {
 
         if (_appSid) { try { await _appiumFetch(`/session/${_appSid}`, { method: 'DELETE' }, 5000); } catch {} }

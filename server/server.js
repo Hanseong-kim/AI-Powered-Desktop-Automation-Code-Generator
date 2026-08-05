@@ -3347,6 +3347,18 @@ async function _typeScoped(sid, rootElId, selector, text) {
         const elId = el.ELEMENT || el['element-6066-11e4-a52e-4f735466cecf'];
         await _appiumPost(\`/session/\${sid}/element/\${elId}/clear\`, {});
         await _appiumPost(\`/session/\${sid}/element/\${elId}/value\`, { text });
+        // 2026-08-05 (TeamViewer "빠른 연결 허용" 이메일/비밀번호 실측): 이
+        // 함수는 성공 시 지금까지 아무것도 안 찍었다 — 실패만 찍는 catch와
+        // 합쳐서 보면 "성공해서 조용했다"와 "그 어떤 호출도 실제로 안
+        // 일어났다"를 로그만으로 구분할 방법이 없었다(simple 모드로 생성된
+        // 파일에서 이 함수가 실제로 도는 코드인 걸 확인하는 데만 세 번의
+        // 재녹화가 들었다 — session-mode 전용 코드만 계속 고치고 있었음).
+        // WinAppDriver의 element/value가 예외 없이 성공을 보고해도 앱에
+        // 실제로 반영 안 되는 사례가 이미 WebView2에서 확인됐다(§ isWebContent
+        // 타이핑 분기 주석) — 여기서 element/value가 "성공"을 보고했다는
+        // 사실 자체를 남겨야, 다음에도 같은 증상(로그는 성공, 화면은 빈칸)이
+        // 나면 "WAD REST가 거짓 성공을 보고하는 컨트롤"로 확정할 수 있다.
+        console.log(\`[type] scoped sendKeys ok (sid=\${sid} elId=\${elId} sel=\${selector})\`);
         return true;
     } catch (e) { console.warn('[type] scoped sendKeys failed:', String(e.message || e).substring(0, 100)); return false; }
 }
@@ -3559,15 +3571,39 @@ async function initAppHwnd() {
 // never run launchApp's foreground/normalize step, so a freshly launched app
 // can be spawned behind other windows or off-position — bring it forward
 // before the first click so OS-level input actually reaches it.
-function osActivate(titleLike) {
+function osActivate(titleLike, hwnd) {
     try {
-        const args = _appHwnd ? \`-hwnd \${_appHwnd}\` : \`-titleLike "\${titleLike}"\`;
+        // 2026-08-05 (TeamViewer "빠른 연결 허용" 이메일/비밀번호 실측): 원래
+        // hwnd 인자가 없어서 항상 _appHwnd(메인 창)만 활성화할 수 있었다 —
+        // 크로스윈도우 대화상자를 지정할 방법이 아예 없었다. session 헤더의
+        // osActivate 시그니처와 맞춘다. 기존 호출부(인자 1개, 예: 빈 문자열 또는
+        // title만 넘기는 호출)는 hwnd가 undefined이므로 _appHwnd 폴백으로
+        // 그대로 동작해 변화 없음.
+        const h = hwnd || _appHwnd;
+        const args = h ? \`-hwnd \${h}\` : \`-titleLike "\${titleLike}"\`;
         execSync(
             \`powershell -NoProfile -File "\${_helperFile('osActivate.ps1')}" \${args}\`,
             { stdio: 'pipe', timeout: 15000 }
         );
     } catch (e) {
         console.warn('[osActivate] failed:', String(e.message || e).substring(0, 100));
+    }
+}
+
+// 2026-08-05: session 헤더의 _listWindowHwnds()와 동일 — 크로스윈도우 타이핑
+// 스텝이 simple 모드에서도 대화상자의 진짜 hwnd를 라이브로 찾을 수 있어야
+// 해서 여기에도 둔다(원래 session 전용이었음).
+function _listWindowHwnds(frag) {
+    if (!frag) return [];
+    try {
+        const out = execSync(
+            \`powershell -NoProfile -File "\${_helperFile('osWindowRect.ps1')}" -titleLike "\${frag}" -listOnly\`,
+            { stdio: 'pipe', timeout: 15000 }
+        ).toString().trim();
+        if (!out) return [];
+        return out.split(/\\r?\\n/).map(s => s.trim()).filter(Boolean).map(Number);
+    } catch {
+        return [];
     }
 }
 
@@ -3850,7 +3886,12 @@ function osScopedType(hwnd, target, text) {
             \`python "\${_helperFile('osScopedInvoke.py')}" --hwnd \${hwnd} --sel-b64 "\${selB64}" --text-b64 "\${textB64}"\`,
             { stdio: 'pipe', timeout: 20000 }
         ).toString().trim();
-        if (out) console.log(out);
+        // 2026-08-05: 이전엔 out이 빈 문자열일 때 아무것도 안 찍혔다 —
+        // osScopedInvoke.py의 성공 경로는 항상 print()를 거치므로(§ main()의
+        // 모든 sys.exit(0) 직전), 종료 코드 0인데 out이 비어 있다는 건 그
+        // 자체로 이상 신호(예: 표준출력이 다른 경로로 삼켜짐)다 — 이제 항상
+        // 뭔가 찍어 "성공했는데 조용했다"와 "실패해서 조용했다"를 구분한다.
+        console.log(out ? out : '[osScopedType] exited 0 with empty stdout (unexpected — see hwnd/target above)');
     } catch (e) {
         _failures.push('osScopedType');
         const stdoutMsg = (e.stdout && e.stdout.toString().trim()) || '';
@@ -4205,14 +4246,26 @@ async function _clickScoped(title, selector, dbl = false) {
 // 못 옮기는 형태면 기존 REST 기반 _typeScoped(공유 preamble)로 폴백한다.
 async function _typeScopedOrCom(title, selector, text) {
     const s = await getWindowSession(title);
+    // 2026-08-05 (TeamViewer "빠른 연결 허용" 이메일/비밀번호 실측): 클릭 쪽
+    // cross-window 분기(osScopedInvoke를 --owner-title-b64로 직접 호출)와
+    // 달리 타이핑은 이 함수 하나만 거치는데, 성공/실패 어느 쪽이든 로그가
+    // 한 줄도 안 남는 게 재현됐다 — owned 판정이 false로 나와 REST
+    // 폴백(_typeScoped)이 조용히 성공한 것인지, COM 경로(osScopedType)가
+    // 조용히 실패한 것인지 로그만으로 구분이 안 됐다. 여기서 분기 판정
+    // 자체를 찍어 다음 재생에서 바로 구분되게 한다.
+    console.log(\`[typeScopedOrCom] title=\${JSON.stringify(title)} owned=\${!!s.owned} hwnd=\${s.hwnd || 0} sid=\${s.sid || 'none'}\`);
     if (s.owned && s.hwnd) {
         const target = _parseSelectorToTarget(selector);
-        if (target) {
+        if (!target) {
+            console.warn(\`[typeScopedOrCom] selector could not be converted to a COM target (sel=\${selector}) — falling back to REST\`);
+        } else {
             osScopedType(s.hwnd, target, text);
             return true;
         }
     }
-    return await _typeScoped(s.sid, s.rootElId, selector, text);
+    const ok = await _typeScoped(s.sid, s.rootElId, selector, text);
+    console.log(\`[typeScopedOrCom] REST fallback _typeScoped returned \${ok}\`);
+    return ok;
 }
 
 // wdioSelectorById/wdioSelectorByClass가 만드는 단순 셀렉터 형태를
@@ -4864,7 +4917,48 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       // session, so inserting the switch step ahead of them would be dead
       // weight (see the segBoundary comment above).
       let usesGetWindowSession = false;
-      if (e.element?.isWebContent) {
+      if (isCrossWindowEvent(e, recordedRect)) {
+        // 2026-08-05 (TeamViewer "빠른 연결 허용" 이메일/비밀번호 실측, 3차
+        // 재조사 끝에 확정): 클릭은 이 이벤트가 cross-window일 때 전용 분기
+        // (아래 5170행 근방)를 타서 osScopedInvoke.py 자신의 owner-window
+        // 탐색(--owner-title-b64, PID 스코프)으로 대상 창을 매번 라이브로
+        // 다시 찾기 때문에 견고하게 동작한다. 그런데 타이핑에는 이 전용
+        // 분기가 아예 없었다 — isWebContent/session/simple 세 갈래 전부
+        // `_typeScoped`(WinAppDriver REST `element/value`) 아니면
+        // `_hwndCache[relTitle]`(크로스윈도우 대화상자에서는 결코 채워지지
+        // 않음, 클릭도 이 캐시를 안 씀)에 의존했다.
+        //
+        // 실측으로 두 가지를 확정했다:
+        // 1) 이 대화상자는 native Win32(#32770)인데도 `_typeScoped`가
+        //    `element/value` 호출에 예외 없이 성공("[type] scoped sendKeys
+        //    ok ...")을 보고했지만, 실제 화면의 이메일/비밀번호 칸은
+        //    비어 있었다(사용자 직접 확인) — WebView2 세션 코드 필드에서
+        //    이미 확인한 것과 같은 "WAD REST 거짓 성공"이 native로 분류된
+        //    컨트롤에서도 재현됨.
+        // 2) 이 재생은 simple 모드로 생성됐는데, simple 헤더의 옛
+        //    osActivate(titleLike)는 hwnd 인자 자체를 안 받아 항상
+        //    _appHwnd(메인 창)만 활성화할 수 있었다 — 크로스윈도우
+        //    대화상자를 지정할 방법이 없었다(위 osActivate 정의를
+        //    osActivate(titleLike, hwnd)로 확장, _listWindowHwnds도
+        //    simple 헤더에 추가해 해결).
+        //
+        // 고침: WAD REST(`_typeScoped`)를 아예 안 거친다. `_listWindowHwnds`로
+        // 대화상자의 진짜 hwnd를 라이브로 찾아 그 hwnd로 정확히 활성화한
+        // 뒤, TeamViewer에서 이미 검증된 진짜 키 입력(osType, SendKeys
+        // 기반)으로만 타이핑한다 — isWebContent 여부와 무관하게 모든
+        // cross-window 타이핑에 동일하게 적용(네이티브도 거짓 성공을 내는
+        // 게 확인됐으므로 WebView2에만 좁힐 이유가 없다).
+        pushMethod(
+`    async type${stepNum}(value) {
+        const hs = _listWindowHwnds('${escapeStr(relTitle)}');
+        if (!hs.length) {
+            console.warn('[type${stepNum}] window "${escapeStr(relTitle)}" not found by EnumWindows — activation/typing may miss');
+        }
+        osActivate('${escapeStr(relTitle)}', hs[0]);
+        osType(value);
+    }`
+        );
+      } else if (e.element?.isWebContent) {
         // 2026-08-04 (TeamViewer "세션 코드" 입력란 실측): 클릭 3개는
         // COM SendInput으로 실제 동작했는데, 이 타이핑 스텝은 _typeScoped()가
         // 에러 없이 ok=true를 보고했음에도 입력란이 완전히 비어 있었다 —
@@ -4874,6 +4968,10 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
         // "성공"이 실제 앱 상태 변화를 보장하지 않음)과 같은 문제라, 웹 콘텐츠는
         // UIA 값 설정 시도 자체를 건너뛰고 처음부터 진짜 키보드 입력
         // (osType, SendInput 기반)으로만 타이핑한다.
+        // 이 이벤트가 cross-window이면 위 분기가 먼저 걸리므로, 여기 남는
+        // 것은 항상 메인 창과 같은 창(relTitle === _mainTitleFrag) 안의
+        // WebView2 콘텐츠뿐 — _hwndCache[relTitle]는 launchApp()이 이미
+        // 채워뒀으므로 그대로 써도 안전하다.
         const activateArgs = (useSession && relTitle)
           ? `'${escapeStr(relTitle)}', _hwndCache['${escapeStr(relTitle)}']`
           : `''`;
