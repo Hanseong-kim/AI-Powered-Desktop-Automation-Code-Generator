@@ -75,7 +75,6 @@ PoC2/
 .claude/commands/
 .claude/hooks/
 .claude/skills/
-start-dev.ps1
 AI_Powered_Desktop_Automation_Code_Generator_Assignment.docx
 
 ui/dist/
