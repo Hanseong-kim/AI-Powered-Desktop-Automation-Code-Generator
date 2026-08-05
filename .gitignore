@@ -101,5 +101,10 @@ server/_*
 
 # ensureAppium()이 각 앱 폴더에서 standalone 실행할 때 남기는 Appium 서버 로그
 generated-wdio/**/appium.log
+# 2026-08-05: 재생 로그를 파일로 남겨서 진단하는 워크플로 도입
+# (cmd /c "node ...js > replay.log 2>&1") — 스크래치, 커밋 대상 아님
+generated-wdio/**/replay.log
+# 같은 워크플로의 agent 쪽 콘솔 로그
+agent/*.log
 # subagent-driven-development scratch (ledger, briefs, review packages)
 .superpowers/

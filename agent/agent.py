@@ -1291,26 +1291,67 @@ class UIAInspector:
         # 스캔을 5번 반복하는 게 아니다(2026-08-04 HeidiSQL SplitButton 케이스는
         # 팝업 창은 있는데 그 **항목**이 아직 안 채워진 상황이라, 빠른 경로로
         # Menu 루트를 찾은 뒤 items가 빌 때 재시도하는 지금 구조로 그대로 커버된다).
+        # 2026-08-05 (2차, 재녹화 3회 중 1회만 성공): 위 빠른 경로만으로는
+        # 부족했다. 실측 gap — 성공 0.70s / 실패 1.36s·1.61s·1.87s·2.62s.
+        # 실패 케이스의 공통점은 스냅샷이 도는 동안 **메뉴가 이미 파괴됐다**는
+        # 것이고(watcher가 팝업과 마법사 창을 연달아 등록한 뒤에야 스냅샷이
+        # 돌았다), 그 상태에서는 몇 번을 재시도해도 되살릴 수 없다. 그런데
+        # 기존 예산(5회 × 최대 1회 deep scan)은 그 못 찾는 상황에서 1.4~2.6초를
+        # 통째로 태웠고, 그 지연이 다음 이벤트로 전파돼(#8 1.87s -> #9 2.62s)
+        # 워커가 점점 더 뒤처지는 악순환을 만들었다. 못 찾을 때의 비용에
+        # 벽시계 상한을 둬서 그 전파를 끊는다 — 성공 케이스는 attempt 0의
+        # 빠른 경로에서 즉시 끝나므로 이 상한에 영향받지 않는다.
+        # 2026-08-05 (3차, 여전히 편집(E) 성공/파일(F) 실패로 갈림): 위
+        # "루트별로 즉시 폴백" 순서 자체가 문제였다. 후보 순회가 한 루트씩
+        # 순차 처리되는데, 그 루트에서 빠른 경로가 실패하면 **다음 루트의
+        # 빠른 경로를 확인하기도 전에** 그 자리에서 바로 비싼 전체 스캔을
+        # 돌렸다. 메인 창(hwnd=11406050)은 매번 첫 후보로 나오고, 거기엔
+        # 실제 열린 메뉴가 아닌데도 "1 Menu container(s), 0 items"로 잡히는
+        # 유령 Menu 서술자가 있다(메뉴바 자체의 정적 구조로 추정) — 이
+        # 가짜 양성 하나를 스캔하는 데만 예산 대부분(gap=1.86s의 대부분)을
+        # 썼고, 그 사이 진짜 살아있는 TrackPopupMenu 창은 다음 순번을
+        # 기다리다 파괴됐다. 이 문제는 "파일(F)"(8개 항목, 메인 메뉴바)에서만
+        # 나고 "편집(E)"(3개 항목)에서는 안 났는데 — 후보 순서상 편집 메뉴의
+        # 진짜 팝업이 이 가짜 양성보다 먼저 열거됐을 뿐, 우연이다.
+        #
+        # 고침: 모든 후보 루트에 대해 **싼 빠른 경로만** 먼저 한 바�퀴 돈다
+        # (속성 하나 읽기, 마이크로초 단위 — 전부 돌아도 총 비용이 무시할
+        # 만하다). 그래도 못 찾았을 때만 비싼 전체 스캔을 후보별로 시도한다.
+        # 이러면 살아있는 진짜 팝업이 후보 목록 어디에 있든, 죽은 지 오래인
+        # 유령 서술자의 전체 트리 스캔보다 항상 먼저 확인된다.
+        deadline = time.time() + 0.6
         for attempt in range(5):
             if attempt > 0:
+                if time.time() > deadline:
+                    tried.append(f"gave up after {attempt} attempt(s) — 0.6s budget spent")
+                    break
                 time.sleep(0.1)
             tried = []
-            deep_scan = (attempt == 0)
-            for root in self._search_roots_for_menu(elem):
+            roots = list(self._search_roots_for_menu(elem))
+            menu = None
+            # 1단계: 모든 후보의 빠른 경로만 확인 (전체 트리 스캔 없음).
+            for root in roots:
                 try:
                     root_hwnd = root.CurrentNativeWindowHandle
                 except Exception:
                     root_hwnd = None
-                menu = None
                 try:
                     if root.CurrentControlType == self.CT_MENU:
                         menu = root
                         tried.append(f"hwnd={root_hwnd}: root IS a Menu (fast path)")
+                        break
                 except Exception:
                     pass
-                if menu is None:
-                    if not deep_scan:
-                        continue
+                tried.append(f"hwnd={root_hwnd}: not a Menu root (fast path)")
+            # 2단계: 첫 시도에서만, 그리고 1단계가 전부 실패했을 때만 전체
+            # 트리 스캔으로 폴백한다(재시도는 "아직 안 올라왔다"를 기다리는
+            # 것이지 같은 값비싼 스캔을 반복하는 게 아니다 — 위 주석 참고).
+            if menu is None and attempt == 0:
+                for root in roots:
+                    try:
+                        root_hwnd = root.CurrentNativeWindowHandle
+                    except Exception:
+                        root_hwnd = None
                     try:
                         menus = root.FindAll(7, self._uia.CreatePropertyCondition(
                             30003, self.CT_MENU))
@@ -1318,17 +1359,26 @@ class UIAInspector:
                         tried.append(f"hwnd={root_hwnd}: FindAll raised {e!r}")
                         continue
                     menu_count = menus.Length if menus else 0
-                    tried.append(f"hwnd={root_hwnd}: {menu_count} Menu container(s)")
+                    tried.append(f"hwnd={root_hwnd}: {menu_count} Menu container(s) (deep scan)")
                     if not menus or menus.Length != 1:
                         continue
-                    menu = menus.GetElement(0)
-                try:
-                    items = menu.FindAll(7, self._uia.CreatePropertyCondition(
-                        30003, self.CT_MENU_ITEM))
-                except Exception:
-                    continue
-                if not items or not items.Length:
-                    continue
+                    cand = menus.GetElement(0)
+                    try:
+                        cand_items = cand.FindAll(7, self._uia.CreatePropertyCondition(
+                            30003, self.CT_MENU_ITEM))
+                    except Exception:
+                        continue
+                    if cand_items and cand_items.Length:
+                        menu = cand
+                        break
+            if menu is None:
+                continue
+            try:
+                items = menu.FindAll(7, self._uia.CreatePropertyCondition(
+                    30003, self.CT_MENU_ITEM))
+            except Exception:
+                continue
+            if items and items.Length:
                 for i in range(items.Length):
                     it = items.GetElement(i)
                     try:
@@ -1729,11 +1779,24 @@ def probe_window(tag, hwnd):
         log(f"[probe:{tag}] hwnd={hwnd} FAILED: {e}")
         return
 
+    # 2026-08-05: 자식 창을 한 줄씩 전부 찍으면 FileZilla 기준 녹화 1회당 78줄이
+    # 나오는데, 그 78줄의 pid/img가 전부 동일하고 진단에 쓰인 적이 없다. 실제로
+    # 사람이 로그를 복사해 붙여 넣는 워크플로에서는 이 덩어리가 전체의 절반
+    # 가까이를 차지해 정작 봐야 할 [trace]/[inspect]/[diag-click] 줄을 파묻는다.
+    # 클래스별 개수 요약(1줄)로 바꾸고, 전체 덤프는 AGENT_PROBE_VERBOSE=1일 때만
+    # 낸다 — 클래스 구성(SysListView32/SysTreeView32/ComboBox 유무)이 이 덤프에서
+    # 실제로 얻던 정보의 전부이고, 그건 요약으로 그대로 보존된다.
+    verbose = os.environ.get("AGENT_PROBE_VERBOSE") == "1"
+    counts = {}
+
     def _e(child, _):
         try:
-            p = pid_of_hwnd(child)
-            log(f"[probe:{tag}]   child={child} cls='{win32gui.GetClassName(child)}' "
-                f"pid={p} img='{image_path_of_pid(p)}'")
+            cls = win32gui.GetClassName(child)
+            counts[cls] = counts.get(cls, 0) + 1
+            if verbose:
+                p = pid_of_hwnd(child)
+                log(f"[probe:{tag}]   child={child} cls='{cls}' "
+                    f"pid={p} img='{image_path_of_pid(p)}'")
         except Exception:
             pass
         return True
@@ -1742,6 +1805,12 @@ def probe_window(tag, hwnd):
         win32gui.EnumChildWindows(hwnd, _e, None)
     except Exception:
         pass
+    if counts and not verbose:
+        total = sum(counts.values())
+        summary = " ".join(f"{c}x{n}" for c, n in
+                           sorted(counts.items(), key=lambda kv: -kv[1]))
+        log(f"[probe:{tag}]   {total} child windows: {summary}"
+            "   (set AGENT_PROBE_VERBOSE=1 for the per-child dump)")
 
 
 def top_window_at(x, y):
