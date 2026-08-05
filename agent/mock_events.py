@@ -3007,6 +3007,137 @@ def step_wad_boundary_intact():
         )
 
 
+GOLDEN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden")
+
+
+def _normalize_generated(text):
+    return text.replace("\r\n", "\n")
+
+
+def _print_diff_head(expected_text, actual_text, label, max_lines=30):
+    import difflib
+    diff = difflib.unified_diff(
+        expected_text.splitlines(keepends=True),
+        actual_text.splitlines(keepends=True),
+        fromfile=f"expected/{label}", tofile=f"actual/{label}", n=2,
+    )
+    lines = list(diff)[:max_lines]
+    print(f"    --- diff ({label}, first {max_lines} lines) ---")
+    for line in lines:
+        print("    " + line.rstrip("\n"))
+    print("    ---")
+
+
+def step_golden_recordings():
+    """골든 레코딩 회귀 게이트 (2026-08-05).
+
+    지금까지의 회귀(예: FileZilla 도움말/HeidiSQL 더보기의 osExpandCollapse
+    인덱스 무시 버그)는 전부 "특정 앱 실측에서 나온 좁은 규칙이 대리 조건으로
+    인해 다른 앱까지 잘못 포획"하는 패턴이었다. mock_events.py의 나머지
+    시나리오는 합성 이벤트만 다뤄서 이런 교차-앱 영향을 못 잡는다 —
+    server.js를 고칠 때마다 실제 검증된 6개 앱 녹화(agent/golden/recordings/)
+    전부를 /api/generate에 통과시켜, 생성된 JS가 골든 파일(agent/golden/
+    expected/)과 바이트 단위로 일치하는지 비교한다. 의도한 변경이면
+    `UPDATE_GOLDEN=1 python agent/mock_events.py`로 재축복(re-bless)한다.
+
+    appName은 실제 프리셋 이름(FileZilla 등)을 절대 쓰지 않는다 — 이 게이트가
+    쓰는 exePath는 골든 녹화 시점의 것이라 최신 실제 결과와 다를 수 있고,
+    같은 appName을 쓰면 generated-wdio/<실제앱>/을 이 스크립트가 덮어써서
+    사용자가 방금 검증한 진짜 결과물을 파괴한다(APP_NAME 위 주석, 2026-07-24
+    Calculator 사고와 동일 클래스의 문제) — 그래서 MockGolden<App> 접두사를
+    쓰고, .gitignore/step_output_folders_isolated()에도 그 이름으로 등록한다.
+    """
+    print("\n[14] Golden recordings — generated JS matches known-good output")
+    manifest_path = os.path.join(GOLDEN_DIR, "manifest.json")
+    if not os.path.exists(manifest_path):
+        check("  golden manifest present", False, f"missing: {manifest_path}")
+        return
+    with open(manifest_path, encoding="utf-8") as fh:
+        manifest = json.load(fh)
+
+    bless = os.environ.get("UPDATE_GOLDEN") == "1"
+    first_response_text = None
+    for entry in manifest:
+        app = entry["app"]
+        rec_path = os.path.join(GOLDEN_DIR, "recordings", entry["recording"])
+        if not os.path.exists(rec_path):
+            check(f"  golden[{app}] recording present", False, f"missing: {rec_path}")
+            continue
+        with open(rec_path, encoding="utf-8") as fh:
+            events = json.load(fh)
+
+        request("DELETE", "/api/events")
+        for ev in events:  # events[0] is the session_meta object, posted like any other
+            request("POST", "/api/events", ev)
+        status, body = request(
+            "POST", "/api/generate",
+            {"appName": entry["appName"], "exePath": entry["exePath"],
+             "platform": entry["platform"]},
+            timeout=60,
+        )
+        if status != 200 or not body.get("ok"):
+            check(f"  golden[{app}] /api/generate ok", False,
+                  f"status={status} body={str(body)[:200]}")
+            continue
+        check(f"  golden[{app}] /api/generate ok", True)
+
+        files = body.get("files", [])
+        exp_dir = os.path.join(GOLDEN_DIR, "expected", app)
+        os.makedirs(exp_dir, exist_ok=True)
+        for f in files:
+            actual = _normalize_generated(f["content"])
+            exp_path = os.path.join(exp_dir, f["filename"])
+            if bless:
+                with open(exp_path, "w", encoding="utf-8", newline="\n") as fh:
+                    fh.write(actual)
+                check(f"  golden[{app}] {f['filename']} blessed", True)
+                continue
+            if not os.path.exists(exp_path):
+                check(f"  golden[{app}] {f['filename']} matches golden", False,
+                      f"no golden file yet — run with UPDATE_GOLDEN=1 first: {exp_path}")
+                continue
+            with open(exp_path, encoding="utf-8") as fh:
+                expected = _normalize_generated(fh.read())
+            ok = actual == expected
+            if not ok:
+                _print_diff_head(expected, actual, f"{app}/{f['filename']}")
+            check(f"  golden[{app}] {f['filename']} matches golden", ok)
+
+        if first_response_text is None and files:
+            first_response_text = (entry, events)
+
+    # 결정성 사전 체크: 같은 픽스처를 두 번 generate 했을 때 응답이 같아야
+    # 한다 — 여기서 안 잡히면 골든 비교 자체가 타임스탬프/난수 오염으로
+    # 상시 깨지는 시나리오가 된다.
+    if first_response_text:
+        entry, events = first_response_text
+        request("DELETE", "/api/events")
+        for ev in events:
+            request("POST", "/api/events", ev)
+        status2, body2 = request(
+            "POST", "/api/generate",
+            {"appName": entry["appName"], "exePath": entry["exePath"],
+             "platform": entry["platform"]},
+            timeout=60,
+        )
+        files2 = {f["filename"]: _normalize_generated(f["content"])
+                  for f in body2.get("files", [])} if status2 == 200 else {}
+        status3, body3 = request(
+            "POST", "/api/generate",
+            {"appName": entry["appName"], "exePath": entry["exePath"],
+             "platform": entry["platform"]},
+            timeout=60,
+        )
+        files3 = {f["filename"]: _normalize_generated(f["content"])
+                  for f in body3.get("files", [])} if status3 == 200 else {}
+        check(
+            "  golden generate is deterministic (same fixture -> byte-identical output twice)",
+            files2 and files2 == files3,
+            "if this fails, the golden comparison above is unreliable regardless "
+            "of whether individual files matched",
+        )
+
+
 def step_output_folders_isolated():
     """Every folder this gate generates into must be gitignored.
 
@@ -3034,6 +3165,8 @@ def step_output_folders_isolated():
         NESTED_DROPDOWN_APP, SIMPLE_ROOTHWND_APP, TITLE_COLLISION_DIALOGRECT_APP,
         WEB_APP, DBLROW_APP, WINCLICK_APP, VOLATILE_MENUITEM_APP,
         "SevenZipStateReset",
+        "MockGoldenCalculator", "MockGoldenFileZilla", "MockGoldenHeidiSQL",
+        "MockGoldenPuTTY", "MockGoldenSevenZip", "MockGoldenTeamViewer",
     })
     for name in targets:
         check(
@@ -3089,6 +3222,7 @@ def main():
     step_com_sendinput_helpers()
     step_esc_recovery_guards()
     step_wad_boundary_intact()
+    step_golden_recordings()
 
     passed = sum(_results)
     total = len(_results)

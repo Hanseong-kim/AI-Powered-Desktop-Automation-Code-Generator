@@ -39,6 +39,12 @@ generated-wdio/MockDoubleClickRow/
 generated-wdio/MockWindowClick/
 generated-wdio/MockVolatileMenuItem/
 generated-wdio/MockPostNavTitle/
+generated-wdio/MockGoldenCalculator/
+generated-wdio/MockGoldenFileZilla/
+generated-wdio/MockGoldenHeidiSQL/
+generated-wdio/MockGoldenPuTTY/
+generated-wdio/MockGoldenSevenZip/
+generated-wdio/MockGoldenTeamViewer/
 
 # 위와 동일한 산출물의 _debug-helpers 사본(2026-07-27 saveFiles 분리 이후 생성)
 generated-wdio/_debug-helpers/MockCalculator/
@@ -64,6 +70,12 @@ generated-wdio/_debug-helpers/MockDoubleClickRow/
 generated-wdio/_debug-helpers/MockWindowClick/
 generated-wdio/_debug-helpers/MockVolatileMenuItem/
 generated-wdio/_debug-helpers/MockPostNavTitle/
+generated-wdio/_debug-helpers/MockGoldenCalculator/
+generated-wdio/_debug-helpers/MockGoldenFileZilla/
+generated-wdio/_debug-helpers/MockGoldenHeidiSQL/
+generated-wdio/_debug-helpers/MockGoldenPuTTY/
+generated-wdio/_debug-helpers/MockGoldenSevenZip/
+generated-wdio/_debug-helpers/MockGoldenTeamViewer/
 
 Claude code task server token opt.md
 Claude code task v2.md

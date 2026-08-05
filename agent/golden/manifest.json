@@ -1,0 +1,44 @@
+[
+  {
+    "app": "Calculator",
+    "recording": "Calculator.json",
+    "appName": "MockGoldenCalculator",
+    "exePath": "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+    "platform": "Windows"
+  },
+  {
+    "app": "FileZilla",
+    "recording": "FileZilla.json",
+    "appName": "MockGoldenFileZilla",
+    "exePath": "C:\\Program Files\\FileZilla FTP Client\\filezilla.exe",
+    "platform": "Windows"
+  },
+  {
+    "app": "HeidiSQL",
+    "recording": "HeidiSQL.json",
+    "appName": "MockGoldenHeidiSQL",
+    "exePath": "C:\\Program Files\\HeidiSQL\\heidisql.exe",
+    "platform": "Windows"
+  },
+  {
+    "app": "PuTTY",
+    "recording": "PuTTY.json",
+    "appName": "MockGoldenPuTTY",
+    "exePath": "C:\\Program Files\\PuTTY\\putty.exe",
+    "platform": "Windows"
+  },
+  {
+    "app": "SevenZip",
+    "recording": "SevenZip.json",
+    "appName": "MockGoldenSevenZip",
+    "exePath": "C:\\Program Files\\7-Zip\\7zFM.exe",
+    "platform": "Windows"
+  },
+  {
+    "app": "TeamViewer",
+    "recording": "TeamViewer.json",
+    "appName": "MockGoldenTeamViewer",
+    "exePath": "C:\\Program Files\\TeamViewer\\TeamViewer.exe",
+    "platform": "Windows"
+  }
+]

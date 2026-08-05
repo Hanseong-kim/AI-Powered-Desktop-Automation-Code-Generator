@@ -53,13 +53,31 @@ node CalculatorTestById.js       # folder name = PascalCase app name
 Regression gate (server must be running, agent not needed):
 
 ```powershell
-python agent\mock_events.py      # 323/323 checks as of 2026-07-31
+python agent\mock_events.py      # 403/403 checks as of 2026-08-05
 ```
 
 > `mock_events.py` POSTs synthetic events to the live server. If you called
 > `/api/events/restore` first, the mock events **overwrite that backup file** in
 > `recorded-events/` (the server keeps writing to `sessionBackupFile`). Restart
 > the server before running the gate, or you will destroy a real recording.
+
+> **Golden recording gate** (2026-08-05): `agent/golden/` holds a verified real
+> recording per app (Calculator/FileZilla/HeidiSQL/PuTTY/SevenZip/TeamViewer)
+> plus the exact generated JS each one must still produce
+> (`agent/golden/expected/`). `step_golden_recordings()` regenerates all six on
+> every gate run and byte-compares — this is what catches "fixed app A, broke
+> app B" server.js regressions that synthetic mock events can't (they only
+> exercise one narrow case each). After any *intentional* template change,
+> re-bless before committing:
+> ```powershell
+> $env:UPDATE_GOLDEN = "1"; python agent\mock_events.py; Remove-Item Env:\UPDATE_GOLDEN
+> ```
+> then `git diff agent/golden/expected/` to review exactly what changed before
+> committing the new golden files alongside the server.js change. This gate
+> only catches codegen (server.js) drift — it cannot see agent.py capture
+> regressions or verify real replay, both of which still need live GUI testing
+> (see `poc/probe_click_replay.py` for a pre-recording sanity check on one
+> control).
 
 ---
 
