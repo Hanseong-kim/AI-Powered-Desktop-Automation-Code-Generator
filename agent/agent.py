@@ -1267,27 +1267,63 @@ class UIAInspector:
         # content isn't always populated yet at this worker thread's first
         # look. 5 attempts / 100ms (~0.5s budget) mirrors the scale of that
         # existing fix rather than inventing a new number.
+        # 2026-08-05 (FileZilla 편집(E) -> 네트워크 구성 마법사 실측): 이 루프의
+        # 비용 자체가 자신이 막으려던 레이스를 **일으키고** 있었다.
+        # `FindAll(7=TreeScope_Descendants, ...)`는 그 창의 UIA 트리 전체를
+        # 훑는다 — FileZilla 메인 창(자식 창만 80여 개)에서는 한 번에 ~240ms다.
+        # 5회 재시도 × 창 2개 = 전체 트리 워크 10번 = **2.4초**. 실측 로그의
+        # `[diag-click] ... gap=2.4103s`가 정확히 그 값이고, 그 2.4초 동안
+        # 사용자는 이미 메뉴 항목을 골라버려서 팝업 창이 파괴됐다. 그래서
+        # 검색 대상 목록에 팝업 hwnd가 아예 없었고("searched: ['hwnd=724316',
+        # 'hwnd=1510346']" — 팝업 658780이 빠져 있음), 스냅샷이 실패했다.
+        # 그 결과 항목 선택 클릭은 캐시도 라이브 메뉴도 못 찾아 그 아래
+        # ToolBar로 잡혔고(id='5999' name=''), 재생 때 메뉴만 열리고 항목이
+        # 선택되지 않아 "방화벽 및 라우터 설정 마법사" 창이 아예 안 떠서
+        # 이후 모든 스텝이 window-not-found로 무너졌다.
+        #
+        # 해결: Win32 팝업 메뉴(TrackPopupMenu, 클래스 #32768)는 **자기 자신이
+        # 최상위 창이고 그 창의 UIA 루트 요소가 곧 Menu**다. 따라서 트리를
+        # 훑을 필요 없이 루트의 ControlType 속성 하나만 읽으면 된다(마이크로초
+        # 단위). 이 프로젝트 범위의 앱은 전부 이 경로에 해당한다(FileZilla,
+        # 7-Zip, HeidiSQL). 전체 트리 워크는 그 빠른 경로가 아무것도 못 찾았을
+        # 때의 폴백으로만 남기고, 그마저도 첫 시도에서 한 번만 한다 — 재시도의
+        # 목적은 "팝업이 아직 UIA에 안 올라왔다"를 기다리는 것이지 같은 값비싼
+        # 스캔을 5번 반복하는 게 아니다(2026-08-04 HeidiSQL SplitButton 케이스는
+        # 팝업 창은 있는데 그 **항목**이 아직 안 채워진 상황이라, 빠른 경로로
+        # Menu 루트를 찾은 뒤 items가 빌 때 재시도하는 지금 구조로 그대로 커버된다).
         for attempt in range(5):
             if attempt > 0:
                 time.sleep(0.1)
             tried = []
+            deep_scan = (attempt == 0)
             for root in self._search_roots_for_menu(elem):
                 try:
                     root_hwnd = root.CurrentNativeWindowHandle
                 except Exception:
                     root_hwnd = None
+                menu = None
                 try:
-                    menus = root.FindAll(7, self._uia.CreatePropertyCondition(
-                        30003, self.CT_MENU))
-                except Exception as e:
-                    tried.append(f"hwnd={root_hwnd}: FindAll raised {e!r}")
-                    continue
-                menu_count = menus.Length if menus else 0
-                tried.append(f"hwnd={root_hwnd}: {menu_count} Menu container(s)")
-                if not menus or menus.Length != 1:
-                    continue
+                    if root.CurrentControlType == self.CT_MENU:
+                        menu = root
+                        tried.append(f"hwnd={root_hwnd}: root IS a Menu (fast path)")
+                except Exception:
+                    pass
+                if menu is None:
+                    if not deep_scan:
+                        continue
+                    try:
+                        menus = root.FindAll(7, self._uia.CreatePropertyCondition(
+                            30003, self.CT_MENU))
+                    except Exception as e:
+                        tried.append(f"hwnd={root_hwnd}: FindAll raised {e!r}")
+                        continue
+                    menu_count = menus.Length if menus else 0
+                    tried.append(f"hwnd={root_hwnd}: {menu_count} Menu container(s)")
+                    if not menus or menus.Length != 1:
+                        continue
+                    menu = menus.GetElement(0)
                 try:
-                    items = menus.GetElement(0).FindAll(7, self._uia.CreatePropertyCondition(
+                    items = menu.FindAll(7, self._uia.CreatePropertyCondition(
                         30003, self.CT_MENU_ITEM))
                 except Exception:
                     continue
