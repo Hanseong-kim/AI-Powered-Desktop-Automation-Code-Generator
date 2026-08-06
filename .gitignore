@@ -46,6 +46,15 @@ generated-wdio/MockGoldenPuTTY/
 generated-wdio/MockGoldenSevenZip/
 generated-wdio/MockGoldenTeamViewer/
 
+# agent/sweep 하네스가 컨트롤마다 재생성하는 산출물 (Sweep<App>) — 위 Mock*
+# 과 같은 이유로 실제 프리셋 이름을 절대 쓰지 않는다
+generated-wdio/SweepCalculator/
+generated-wdio/SweepFileZilla/
+generated-wdio/SweepHeidiSQL/
+generated-wdio/SweepPuTTY/
+generated-wdio/SweepSevenZip/
+generated-wdio/SweepTeamViewer/
+
 # 위와 동일한 산출물의 _debug-helpers 사본(2026-07-27 saveFiles 분리 이후 생성)
 generated-wdio/_debug-helpers/MockCalculator/
 generated-wdio/_debug-helpers/MockMulti/
@@ -76,6 +85,16 @@ generated-wdio/_debug-helpers/MockGoldenHeidiSQL/
 generated-wdio/_debug-helpers/MockGoldenPuTTY/
 generated-wdio/_debug-helpers/MockGoldenSevenZip/
 generated-wdio/_debug-helpers/MockGoldenTeamViewer/
+generated-wdio/_debug-helpers/SweepCalculator/
+generated-wdio/_debug-helpers/SweepFileZilla/
+generated-wdio/_debug-helpers/SweepHeidiSQL/
+generated-wdio/_debug-helpers/SweepPuTTY/
+generated-wdio/_debug-helpers/SweepSevenZip/
+generated-wdio/_debug-helpers/SweepTeamViewer/
+
+# 스윕 하네스의 열거 캐시 / 리포트 / 학습형 차단목록 — 전부 스크래치
+agent/sweep/controls/
+agent/sweep/reports/
 
 Claude code task server token opt.md
 Claude code task v2.md

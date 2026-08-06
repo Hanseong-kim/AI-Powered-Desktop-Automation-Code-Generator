@@ -331,6 +331,52 @@ def toggle_item(mod, el, tag):
     return False
 
 
+# ── checkbox 값-변경 검증 (2026-08-04) ───────────────────────────────────────
+# 위 toggle_item()은 invoke_item()의 체인 맨 끝(Legacy 폴백보다 앞)에서만
+# 쓰인다 — invoke_item()이 맨 앞에서 시도하는 send_input_click()(실제 화면
+# 클릭)이 성공하면 그 자리에서 곧바로 True를 반환하므로(§6 "재생은 시각적으로
+# 확인 가능해야 한다"는 요구를 만족하는 기본 경로), 대다수 체크박스 클릭은
+# toggle_item()까지 내려가지도 않는다. 그 결과 "클릭 자체는 에러 없이 끝났다"만
+# 보고 실제로 체크 상태가 바뀌었는지는 아무도 확인하지 않는다 — TeamViewer
+# WebView2 토글에서 실측된 것과 같은 종류의 거짓 PASS 위험이 CheckBox
+# controlType 전반에 구조적으로 남아 있다(HeidiSQL/PuTTY의 TCheckBox·Button
+# 스타일 체크박스도 이 경로를 그대로 탄다 — 2026-08-04 점검 시점엔 아직 실제
+# 재생 실패로 드러난 적은 없지만, 다음에 체크박스가 있는 녹화를 재생하면 언제든
+# 조용히 터질 수 있는 잠재적 구멍). 시각적 클릭은 그대로 유지하면서(§6), 클릭
+# 전후 ToggleState를 비교해 실제로 바뀌었는지만 추가로 검증한다 — 안 바뀌었으면
+# toggle_item()의 직접 Toggle() 호출로 한 번 더 보정 시도하고, 그래도 안 바뀌면
+# 정직하게 실패로 보고한다(호출부가 exit code로 판단해 _failures에 기록).
+def verified_toggle_click(uia, mod, el, tag="osScopedInvoke", double=False):
+    try:
+        tp = el.GetCurrentPattern(UIA_TogglePatternId).QueryInterface(
+            mod.IUIAutomationTogglePattern)
+    except Exception:
+        # TogglePattern이 없다 = 이 컨트롤은 애초에 체크박스가 아니다(예:
+        # CheckBox로 잘못 태깅됐거나 캡처 시점 이후 컨트롤이 바뀐 경우) —
+        # 검증할 상태 자체가 없으므로 평범한 클릭으로 폴백한다. 없는 걸
+        # 있다고 우기며 거짓 실패를 만들지 않는다.
+        return invoke_item(uia, mod, el, double)
+    try:
+        before = tp.CurrentToggleState
+    except Exception:
+        return invoke_item(uia, mod, el, double)
+    if not invoke_item(uia, mod, el, double):
+        return False
+    time.sleep(0.05)
+    try:
+        after = tp.CurrentToggleState
+    except Exception as e:
+        print(f"[{tag}] click succeeded but ToggleState could not be "
+              f"re-read afterward ({e}) — cannot verify, trusting the click", file=sys.stderr)
+        return True
+    if after != before:
+        print(f"[{tag}] checkbox toggled {before} -> {after} (verified)")
+        return True
+    print(f"[{tag}] click reported success but ToggleState stayed {before} "
+          "unchanged — retrying via TogglePattern.Toggle() directly", file=sys.stderr)
+    return toggle_item(mod, el, tag)
+
+
 def top_windows():
     found = []
 
@@ -654,6 +700,10 @@ def main():
     # 녹화된 동작이 더블클릭이었는가. 네이티브 리스트 행에서 단일 클릭은
     # 선택일 뿐 열기가 아니라 이 구분이 필요하다 (2026-08-04).
     ap.add_argument("--double", action="store_true")
+    # 체크박스 클릭 전후 ToggleState를 비교해 실제로 바뀌었는지 검증한다
+    # (2026-08-04, verified_toggle_click 참고 — CheckBox controlType 전반의
+    # 잠재적 거짓 PASS 구멍을 막는다).
+    ap.add_argument("--verify-toggle", action="store_true")
     args = ap.parse_args()
 
     enable_per_monitor_dpi()
@@ -720,7 +770,10 @@ def main():
     # osScopedType() JS wrapper 전용 (2026-07-17, owned 다이얼로그 안 Edit
     # 컨트롤에 타이핑하기 위해 도입 — Root 세션 REST 폴백의 15~20초 고정
     # 비용을 피한다. 검색 로직((a)(b) 둘 다)은 클릭과 완전히 동일).
-    act = (lambda el: type_item(uia, mod, el, base64.b64decode(args.text_b64).decode("utf-8")))         if args.text_b64 else (lambda el: invoke_item(uia, mod, el, args.double))
+    act = (lambda el: type_item(uia, mod, el, base64.b64decode(args.text_b64).decode("utf-8")))         if args.text_b64 else (
+            (lambda el: verified_toggle_click(uia, mod, el, "osScopedInvoke", args.double))
+            if args.verify_toggle else (lambda el: invoke_item(uia, mod, el, args.double))
+        )
     verb = 'typed into' if args.text_b64 else 'invoked'
 
     # 최대 4회 시도(즉시 1회 + 300ms 간격 재시도 3회, 총 최대 ~0.9초) — 2026-07-17

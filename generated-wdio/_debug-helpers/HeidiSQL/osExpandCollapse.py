@@ -570,35 +570,74 @@ def main():
     # 창-경계 가드가 이제 이런 리프 커맨드를 트리거로 병합하지 않으므로
     # 여기까지 오지 않는다 — 그 경로는 기존처럼 실패로 남겨 무엇이 잘못됐는지
     # 숨기지 않는다.
+    # 2026-08-05 (FileZilla 도움말(H) 메뉴 실측 — 2026-08-04 HeidiSQL "더 보기"로
+    # 이미 기록됐던 백로그 항목이 그대로 재현): 아래 두 폴백의 조건이
+    # "not item_name"뿐이라, **인덱스로 항목을 고르는 이벤트**(item_name이 항상
+    # None — 이름이 아니라 위치로 고르는 게 그 방식의 정의다)까지 "이건 서브메뉴가
+    # 없는 리프 커맨드였다"로 오판했다. 그 결과 args.item_index가 버젓이 있는데도
+    # 그 값을 한 번도 안 보고 트리거만 다시 클릭한 뒤 exit 0으로 "성공" 보고 —
+    # 실측 로그: "3:select item #4 FileZilla 정보(A)..." 스텝이
+    # "clicked 도움말(H)" + "invoked as a plain command instead"로 끝나고,
+    # 정작 "FileZilla 정보"는 눌리지 않았다(§3 거짓 성공).
+    #
+    # item_index가 있으면 이 폴백을 타면 안 된다. 그런데 단순히 실패시키는 것도
+    # 답이 아니다 — 패턴이 없을 뿐 **트리거를 클릭하면 메뉴는 실제로 열린다**
+    # (invoke_item이 하는 일이 바로 그것이고, 위 오판 케이스에서 메뉴가 열렸다는
+    # 사실 자체가 그 증거다). 그러니 클릭으로 메뉴를 연 뒤 아래 인덱스 기반
+    # pool 검색으로 이어가면 원래 의도대로 동작한다.
+    ecp = None
     try:
         ecp = target.GetCurrentPattern(UIA_ExpandCollapsePatternId).QueryInterface(
             mod.IUIAutomationExpandCollapsePattern)
     except Exception:
-        if not item_name and invoke_item(uia, mod, target):
-            print("[osExpandCollapse] ExpandCollapsePattern unavailable — invoked as a plain command instead")
-            sys.exit(0)
-        print("osExpandCollapse: ExpandCollapsePattern not supported on target", file=sys.stderr)
-        sys.exit(2)
+        if args.item_index is None:
+            if not item_name and invoke_item(uia, mod, target):
+                print("[osExpandCollapse] ExpandCollapsePattern unavailable — invoked as a plain command instead")
+                sys.exit(0)
+            print("osExpandCollapse: ExpandCollapsePattern not supported on target", file=sys.stderr)
+            sys.exit(2)
 
     # 새 팝업 창(네이티브 TrackPopupMenu 등) 감지용 베이스라인은 Expand() 전에
     # 찍는다 — FileZilla 메뉴바처럼 하위 항목이 그 팝업 서브트리에만 생기는 경우.
     baseline = set(top_windows())
 
-    try:
-        if ecp.CurrentExpandCollapseState != ExpandCollapseState_Expanded:
-            ecp.Expand()
-        else:
-            ecp.Collapse()
-            time.sleep(0.2)
-            ecp.Expand()
-    except Exception as e:
-        if not item_name and invoke_item(uia, mod, target):
-            print("[osExpandCollapse] Expand() failed — invoked as a plain command instead")
-            sys.exit(0)
-        print(f"osExpandCollapse: Expand() failed: {e}", file=sys.stderr)
-        sys.exit(2)
-    time.sleep(0.4)
-    print(f"[osExpandCollapse] state after Expand() = {ecp.CurrentExpandCollapseState}")
+    if ecp is None:
+        # 패턴 없음 + 인덱스 있음: 트리거를 클릭해 메뉴를 열고 pool 검색으로 간다.
+        if not invoke_item(uia, mod, target):
+            print("osExpandCollapse: ExpandCollapsePattern unavailable and the "
+                  "trigger could not be clicked either — cannot open the list",
+                  file=sys.stderr)
+            sys.exit(2)
+        print("[osExpandCollapse] ExpandCollapsePattern unavailable — opened the "
+              "list by clicking the trigger instead (index-based pick follows)")
+        time.sleep(0.4)
+    else:
+        try:
+            if ecp.CurrentExpandCollapseState != ExpandCollapseState_Expanded:
+                ecp.Expand()
+            else:
+                ecp.Collapse()
+                time.sleep(0.2)
+                ecp.Expand()
+        except Exception as e:
+            if args.item_index is None and not item_name and invoke_item(uia, mod, target):
+                print("[osExpandCollapse] Expand() failed — invoked as a plain command instead")
+                sys.exit(0)
+            if args.item_index is None:
+                print(f"osExpandCollapse: Expand() failed: {e}", file=sys.stderr)
+                sys.exit(2)
+            # 인덱스 기반 선택은 위와 같은 이유로 여기서 포기하지 않는다.
+            if not invoke_item(uia, mod, target):
+                print(f"osExpandCollapse: Expand() failed ({e}) and the trigger "
+                      "could not be clicked either", file=sys.stderr)
+                sys.exit(2)
+            print(f"[osExpandCollapse] Expand() failed ({e}) — opened the list by "
+                  "clicking the trigger instead (index-based pick follows)")
+        time.sleep(0.4)
+        try:
+            print(f"[osExpandCollapse] state after Expand() = {ecp.CurrentExpandCollapseState}")
+        except Exception:
+            pass
 
     # ── 인덱스로 항목 선택 (2026-07-31, owner-drawn ComboBoxEx;
     #    2026-08-04 확장: owner-drawn 팝업 메뉴, HeidiSQL "더 보기") ────────
@@ -619,9 +658,17 @@ def main():
                 pools.append((f"main window ({kind})", root.FindAll(TreeScope_Subtree, cond)))
             except Exception:
                 pass
+        # 2026-08-05 진단(FileZilla 도움말 메뉴 실측): STEP 1에서 pool이
+        # "main window" 두 건만 잡히고 popup 항목이 하나도 안 나왔다 —
+        # 즉 Expand() 뒤에도 baseline에 없던 새 최상위 창이 발견되지 않았다.
+        # 그게 (a) 팝업이 아예 안 열려서인지 (b) 이미 baseline에 있던
+        # 창이라 걸러진 건지 로그만으로 구분이 안 돼서, 후보 수를 남긴다.
+        _seen_new, _skipped_baseline = 0, 0
         for h in top_windows():
             if h in baseline:
+                _skipped_baseline += 1
                 continue
+            _seen_new += 1
             try:
                 pr = uia.ElementFromHandle(h)
             except Exception:
@@ -633,6 +680,8 @@ def main():
                     pools.append((f"popup hwnd={h} ({kind})", pr.FindAll(TreeScope_Subtree, cond)))
                 except Exception:
                     continue
+        print(f"[osExpandCollapse] popup scan: {_seen_new} new top-level window(s) "
+              f"after opening, {_skipped_baseline} pre-existing skipped")
         for where, arr in pools:
             if not arr or not arr.Length:
                 continue

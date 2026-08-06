@@ -1,0 +1,44 @@
+[
+  {
+    "app": "Calculator",
+    "titleHint": "계산기",
+    "denyNames": ["지우기", "모두 지우기", "기록 지우기"],
+    "allowNames": [],
+    "enabled": true
+  },
+  {
+    "app": "FileZilla",
+    "titleHint": "FileZilla",
+    "denyNames": ["연결 끊기", "서버에서 연결 끊기", "대기열 비우기", "사이트 삭제"],
+    "allowNames": [],
+    "enabled": true
+  },
+  {
+    "app": "HeidiSQL",
+    "titleHint": "HeidiSQL",
+    "denyNames": ["삭제", "비우기", "실행", "테이블 삭제", "데이터베이스 삭제", "연결 끊기"],
+    "allowNames": [],
+    "enabled": true
+  },
+  {
+    "app": "PuTTY",
+    "titleHint": "PuTTY",
+    "denyNames": ["Delete", "Load", "Open"],
+    "allowNames": [],
+    "enabled": true
+  },
+  {
+    "app": "SevenZip",
+    "titleHint": "7-Zip",
+    "denyNames": ["삭제", "이동", "파일 분할", "파일 결합"],
+    "allowNames": [],
+    "enabled": true
+  },
+  {
+    "app": "TeamViewer",
+    "titleHint": "TeamViewer",
+    "denyNames": ["연결", "원격 제어", "세션 참가", "로그아웃"],
+    "allowNames": [],
+    "enabled": false
+  }
+]

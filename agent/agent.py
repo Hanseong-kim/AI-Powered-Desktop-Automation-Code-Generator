@@ -116,6 +116,38 @@ def point_in_rect(rect, x, y):
     return left <= x < right and top <= y < bottom
 
 
+def is_exclusive_edge_miss(rect, x, y):
+    """True when (x, y) sits EXACTLY on `rect`'s right or bottom edge.
+
+    That is: inside under inclusive bounds, outside under the exclusive ones
+    point_in_rect() uses. This is the genuinely ambiguous case — measured
+    twice, with opposite ground truths and identical geometry:
+
+        TeamViewer 2026-08-03  비밀번호 Edit rect=[822,517,1022,533] click y=533
+            -> physically MISSED (focus stayed on the 이메일 Edit above)
+        FileZilla  2026-08-05  파일(F) rect=(396,84,461,108)  click y=108
+            -> physically HIT (the menu opened: the watcher registered the
+               popup window and the open-menu scan counted its 8 MenuItems)
+
+    Nothing in the rect distinguishes them, so point_in_rect() keeps
+    rejecting both — replaying a click the recording never actually made is
+    the worse failure (see its docstring). What this predicate is for is the
+    COST of that rejection, not the rejection itself: an edge miss is never
+    an open dropdown/menu item sitting below its trigger (that lands tens of
+    pixels away, not on the boundary pixel) and never a light-dismiss scrim,
+    so all of those recovery searches are guaranteed to fail. Skipping them
+    keeps one dropped click from cascading into a broken recording — measured
+    2026-08-05: those searches cost 2.4s on this one click, which put the
+    worker thread permanently behind, and every later menu snapshot then ran
+    too late to see its menu, losing menuItemIndex for the whole session.
+    """
+    if not isinstance(rect, (tuple, list)) or len(rect) != 4:
+        return False
+    left, top, right, bottom = rect
+    return (left <= x <= right and top <= y <= bottom
+            and not point_in_rect(rect, x, y))
+
+
 # Window classes an embedded Chromium view publishes. Detection is by window
 # class only — never by app name or exe path — so WebView2, Electron and CEF
 # are all covered by the same rule (CLAUDE.md §6: no per-app integration).
@@ -247,7 +279,28 @@ class UIAInspector:
             cur = elem
             for _ in range(max_up):
                 try:
-                    if cur.CurrentControlType in self.ROW_CONTROL_TYPES and cur.CurrentName:
+                    ct = cur.CurrentControlType
+                    if ct in self.ROW_CONTROL_TYPES and cur.CurrentName:
+                        # 2026-08-05 (7-Zip "hansung" 폴더 진입 실측): 지금 이
+                        # 순간 직접 읽어 ROW_CONTROL_TYPES에 있다고 확인한
+                        # controlType이다. 이 함수가 반환하는 건 살아있는 COM
+                        # 포인터뿐이고, 호출부(_inspect)가 나중에 describe()로
+                        # 같은 요소를 다시 읽는다 — 그 사이 요소가 죽으면(자기
+                        # 클릭이 유발한 화면 전환 레이스) describe()의 독립된
+                        # CurrentControlType 재조회만 조용히 실패해 빈 문자열로
+                        # 남고, name은 그보다 먼저 읽혀 성공한 채로 남는다
+                        # (describe()가 각 필드를 별도 try/except로 읽으므로).
+                        # 그 결과 codegen의 `controlType === 'ListItem'` 분기가
+                        # 안 걸려 WAD REST 폴백으로 새고, WAD는 이 컨트롤에서
+                        # 에러 없이 끝나면서도 목록을 갱신하지 않는다(바로 이
+                        # 클래스의 컨트롤에 대해 이미 실측된 사실 — server.js
+                        # ListItem 분기 주석 2026-07-15 참고) — 성공 로그도
+                        # 실패 로그도 없이 그냥 아무 일도 안 일어난다. 방금
+                        # 확인한 값을 트레이스에 남겨, describe()의 재조회가
+                        # 실패해도 이미 확인된 사실을 잃지 않게 한다.
+                        if getattr(self, "_last_trace", None) is not None:
+                            self._last_trace["confirmedRowControlType"] = (
+                                UIA_CONTROL_TYPES.get(ct, str(ct)))
                         return cur
                 except Exception:
                     break
@@ -306,8 +359,14 @@ class UIAInspector:
             raw = self.describe(elem) if elem is not None else {}
             trace["raw"] = (f"id={raw.get('automationId')!r} name={raw.get('name')!r} "
                              f"rect={raw.get('rect')!r} hwnd={raw.get('hwnd')!r}")
+            # 2026-08-05: 포맷된 문자열만 남기면 이 최초 관측값을 나중에 쓸 수
+            # 없다. _inspect()의 죽은-요소 복구가 이걸 필요로 한다 — 아래
+            # 주석 참고(요소가 이 describe와 _inspect의 두 번째 describe
+            # 사이에서 죽는 경우, 살아있던 유일한 스냅샷이 바로 이것이다).
+            trace["raw_info"] = raw
         except Exception:
             trace["raw"] = "ERR"
+            trace["raw_info"] = {}
         elem_was_deepened = False
         if elem is not None:
             try:
@@ -1906,6 +1965,10 @@ class Recorder:
         # 부를 수 없다(§ "COM은 워커 스레드 하나에만") — 대신 여기 표시만 해두고
         # 워커 스레드의 _inspect()가 다음 클릭을 처리하기 전에 소비한다.
         self._pending_settle = set()
+        # settle을 이미 마친 web-host hwnd. 같은 창을 두 번 기다리면 그 대기가
+        # 첫 클릭을 2초 지연시켜, settle이 막으려던 바로 그 컨테이너-히트를
+        # 스스로 유발한다(2026-08-05 TeamViewer 실측 — _watch_windows 주석 참고).
+        self._settled_web_hosts = set()
         # hwnd -> 그 창을 처음 관측했을 때의 제목. 앱이 녹화 도중 창 이름을
         # 바꾸면(HeidiSQL 세션 관리자는 '신규'를 누르는 순간 ": Unnamed-N"이
         # 붙는다) 이후 모든 이벤트의 windowTitle이 재생 때 재현 불가능한
@@ -1962,6 +2025,7 @@ class Recorder:
         self.target_hwnds = set()
         self._popup_hwnds = set()
         self._pending_settle = set()
+        self._settled_web_hosts = set()
         self._first_titles = {}
         self._probed_skip = False
         self._last_emitted_hwnd_hex = ""
@@ -2173,12 +2237,14 @@ class Recorder:
         if ins is None:
             return
         for h in sorted(self.target_hwnds):
-            if not is_web_host(h):
+            if not is_web_host(h) or h in self._settled_web_hosts:
                 continue
             root = ins.from_handle_safe(h)
             if not root:
                 continue
             n = ins.settled_subtree_count(root)
+            self._settled_web_hosts.add(h)
+            self._pending_settle.discard(h)
             log(f"[target] web host hwnd={h} — accessibility tree settled "
                 f"at {n} elements")
 
@@ -2373,7 +2439,20 @@ class Recorder:
                         # 안 찬 상태에서 히트테스트가 통째로 Window 하나만
                         # 잡았다(원래 메인 창 버그와 동일한 증상). 워커 스레드가
                         # 소비할 수 있게 표시만 해둔다.
-                        if is_web_host(hwnd):
+                        #
+                        # 2026-08-05 (2차, TeamViewer "TeamViewer에 로그인" 실측
+                        # — 위 1차 수정이 만든 회귀): watcher는 녹화 시작 시점에
+                        # **메인 창도** 여기서 등록한다. 그런데 메인 창은 이미
+                        # _discover_target_windows()가 _settle_web_hosts()로
+                        # settle을 끝낸 상태다. 중복 판정이 없어서 _inspect()가
+                        # 첫 클릭 직전에 같은 창을 한 번 더 settle 했고, 그
+                        # 대기(settled_subtree_count의 quiet_for=1.5s 이상)가
+                        # 첫 클릭을 2.09초 지연시켰다. 그 2초 사이에 사용자가
+                        # 누른 버튼이 화면 전환을 끝내버려서, 뒤늦은 히트테스트가
+                        # 전환된 화면의 root 컨테이너(창의 94%)를 잡았다 —
+                        # 정확히 이 settle이 막으려던 그 증상을 스스로 만든 것.
+                        # 이미 settle된 창은 다시 큐에 넣지 않는다.
+                        if is_web_host(hwnd) and hwnd not in self._settled_web_hosts:
                             self._pending_settle.add(hwnd)
                         try:
                             title = win32gui.GetWindowText(hwnd)
@@ -2604,10 +2683,15 @@ class Recorder:
             if self._pending_settle:
                 pending, self._pending_settle = self._pending_settle, set()
                 for h in pending:
+                    # 이미 settle된 창은 건너뛴다 — 중복 대기가 첫 클릭을
+                    # 2초 지연시켜 캡처를 망가뜨린 회귀가 있었다(위 참고).
+                    if h in self._settled_web_hosts:
+                        continue
                     try:
                         root = ins.from_handle_safe(h)
                         if root:
                             n = ins.settled_subtree_count(root)
+                            self._settled_web_hosts.add(h)
                             log(f"[inspect] settled new web-host hwnd={h} "
                                 f"at {n} elements before hit-testing")
                     except Exception:
@@ -2652,6 +2736,23 @@ class Recorder:
                 return info
             elem = ins.element_at(x, y)
             info = ins.describe(elem)
+            # 2026-08-05 (7-Zip "hansung" 실측): describe()가 방금 위에서 이미
+            # 성공적으로 읽은 controlType을 여기서 독립적으로 재조회하는데,
+            # 그 사이 요소가 죽으면(자기 클릭이 유발한 화면 전환) 이 필드만
+            # 조용히 빈 문자열로 남는다 — name은 describe() 안에서 controlType
+            # 보다 먼저 읽혀 이미 성공한 채로 남을 수 있어(각 필드 별도
+            # try/except), "이름은 있는데 타입은 없는" 반쪽짜리 정보가 만들어
+            # 진다. _nearest_row_ancestor()가 이 요소를 골라내며 이미 확인해둔
+            # 값이 있으면 그걸로 메운다 — 새 COM 호출 없이, 이미 검증된 사실을
+            # 복원할 뿐이다.
+            if not info.get("controlType"):
+                confirmed = ins._last_trace.get("confirmedRowControlType")
+                if confirmed:
+                    info["controlType"] = confirmed
+                    log(f"[inspect] controlType re-read failed for a dying "
+                        f"element (name={info.get('name')!r}) — restored "
+                        f"'{confirmed}' from the row-ancestor climb that "
+                        "found it moments earlier, alive")
             # DIAGNOSTIC: element_at()'s full decision path in one line, plus
             # both window-identity signals (top_window_at: Win32 hit test at
             # this point; foreground_top_window: GetForegroundWindow) and the
@@ -2788,6 +2889,30 @@ class Recorder:
             if (not light_dismiss and elem is not None
                     and isinstance(info.get("rect"), tuple)):
                 if not point_in_rect(info["rect"], x, y):
+                    # 2026-08-05: 이 미스가 "정확히 경계 픽셀"이면 아래의 어떤
+                    # 복구 경로도 구조적으로 성공할 수 없다 — 열린 드롭다운/메뉴
+                    # 항목은 트리거에서 수십 픽셀 아래에 있지 경계 픽셀 위에
+                    # 있지 않고, light-dismiss 스크림도 아니다. 그런데 그
+                    # 헛수고가 실측 2.4초를 태워 워커를 영구히 뒤처지게 만들고,
+                    # 그 결과 이후 모든 메뉴 스냅샷이 늦게 돌아 menuItemIndex가
+                    # 세션 전체에서 유실됐다(클릭 하나 손실이 녹화 전체 손실로
+                    # 증폭). 즉시 셀렉터를 버리고 반환해 그 증폭을 끊는다 —
+                    # 버리는 판정 자체는 point_in_rect의 문서화된 안전 규칙
+                    # 그대로다(존재하지 않았던 클릭을 재생하는 쪽이 더 나쁘다).
+                    if is_exclusive_edge_miss(info["rect"], x, y):
+                        log(f"[inspect] pt=({x},{y}) landed exactly on the "
+                            f"right/bottom edge of rect={info['rect']} "
+                            f"(name={info.get('name')!r}) — Win32/UIA treat that "
+                            "edge as OUTSIDE the control, and a recorded click "
+                            "that may not have hit anything must not be replayed "
+                            "as a centre-click. Dropping this step; click a few "
+                            "pixels further inside the control when recording.")
+                        for k in ("name", "automationId", "className", "controlType"):
+                            info[k] = ""
+                        info["locatorStrategy"] = "coordinate"
+                        info["locatorValue"] = ""
+                        info["locatorFallback"] = "coordinate"
+                        return info
                     # Before discarding: an OPEN combo dropdown always looks
                     # like this — the hit test returns the combo (rect = the
                     # collapsed box) while the click is on a list item below
@@ -2879,6 +3004,51 @@ class Recorder:
                 _r = info.get("rect")
                 _dead = (not isinstance(_r, tuple)) or _r == (0, 0, 0, 0)
                 if _dead:
+                    # 2026-08-05 (TeamViewer "TeamViewer에 로그인" 실측): 위
+                    # 단락의 "죽은 요소의 정체는 좌표로부터 복구할 수 없다"는
+                    # 결론에는 예외가 있다 — **그 좌표를 다시 히트테스트할 때만**
+                    # 참이다. element_at()의 최초 describe(trace["raw_info"])는
+                    # 요소가 아직 살아 있던 시점의 스냅샷이고, 그게 남아 있으면
+                    # 재-히트테스트 없이 정체를 확정할 수 있다. 실측 로그:
+                    #   raw=[name='TeamViewer에 로그인' rect=(594,617,804,668)]
+                    #   두 번째 describe -> name='' rect=(0,0,0,0)
+                    # 두 호출 사이 몇 ms 만에 죽은 것이고, 클릭 지점 (725,644)는
+                    # 그 최초 rect 안에 정확히 들어간다.
+                    #
+                    # dedupeDoubleClicks의 "가장 이른 관측만 pre-navigation이라
+                    # 신뢰 가능"과 같은 원칙이다. 다만 아무 raw나 믿으면 안 되므로
+                    # 네 조건을 모두 요구한다:
+                    #  (1) element_at()이 raw를 그대로 반환했을 것(picked_by가
+                    #      raw-*) — deepen/조상-등반으로 바뀐 결과의 조상 정보를
+                    #      쓰면 컨테이너 오적용이 된다
+                    #  (2) raw rect가 유효한 tuple이고 클릭 지점을 실제로 포함
+                    #  (3) raw에 name 또는 automationId가 있을 것
+                    #  (4) element_at()이 검색한 root_hwnd가 추적 중인 창일 것 —
+                    #      이게 Chrome 'Stop' 류의 자기-오염을 막는다(그 케이스는
+                    #      root_hwnd가 target에 없다)
+                    _raw = (ins._last_trace or {}).get("raw_info") or {}
+                    _picked = str((ins._last_trace or {}).get("picked_by") or "")
+                    _rroot = (ins._last_trace or {}).get("root_hwnd") or 0
+                    _rrect = _raw.get("rect")
+                    if (_picked.startswith("raw-")
+                            and isinstance(_rrect, tuple)
+                            and point_in_rect(_rrect, x, y)
+                            and (_raw.get("name") or _raw.get("automationId"))
+                            and _rroot in self.target_hwnds):
+                        log(f"[inspect] adopted element at ({x},{y}) is dead "
+                            f"(rect={_r!r}) but element_at()'s FIRST read caught it "
+                            f"alive: name={_raw.get('name')!r} "
+                            f"id={_raw.get('automationId')!r} rect={_rrect} — the "
+                            "click point falls inside that rect and the element "
+                            "belongs to a tracked window, so the earliest "
+                            "observation identifies it. Using that instead of "
+                            "dropping the step.")
+                        # describe()는 locatorFallback을 안 채운다 — 이 함수
+                        # 말미가 채우는데 여기서 조기 반환하므로 직접 넣는다
+                        # (정상 캡처와 같은 모양을 유지).
+                        _raw["locatorFallback"] = (
+                            "coordinate" if _raw.get("locatorStrategy") == "coordinate" else "")
+                        return _raw
                     log(f"[inspect] adopted element at ({x},{y}) is dead "
                         f"(rect={_r!r}) — its provider went away before it could "
                         "be read, so the point no longer identifies it. Skipping "
@@ -3552,10 +3722,26 @@ class Recorder:
         self.event_count += 1
         event["index"] = self.event_count
         pt = f" pt=({int(x)},{int(y)})" if x is not None else ""
+        # 2026-08-05 (사용자 보고 "파일 -> 사이트 관리자를 눌렀는데 파일만 2번
+        # 누른 걸로 나온다"): 콤보/메뉴 항목 선택 이벤트는 설계상 element가
+        # **트리거**의 것이고(_menu_item_from_cache/_dropdown_item_from_cache가
+        # describe(trigger)를 쓴다), 고른 항목은 menuItemIndex/menuItemName에
+        # 따로 실린다 — 그런데 이 로그 줄은 name(=트리거 이름)만 찍어서
+        # 트리거 클릭과 항목 선택이 화면상 완전히 똑같이 보였다. 캡처 데이터는
+        # 정확한데 로그만 오해를 부르는 상황이라, 실제로 무엇을 골랐는지를
+        # 함께 찍는다.
+        _el = event['element']
+        _pick = ""
+        if _el.get('menuItemIndex') is not None:
+            _pick = (f" -> menu item #{_el['menuItemIndex']}"
+                     f"/{_el.get('menuItemCount')} '{(_el.get('menuItemName') or '')[:40]}'")
+        elif _el.get('comboItemIndex') is not None:
+            _pick = (f" -> combo item #{_el['comboItemIndex']}"
+                     f"/{_el.get('comboItemCount')} '{(_el.get('comboItemName') or '')[:40]}'")
         log(f"#{self.event_count} {action:11s} "
-            f"id='{event['element']['automationId']}' "
-            f"name='{event['element']['name'][:30]}'"
-            f" rect={event['element'].get('rect')}{pt}"
+            f"id='{_el['automationId']}' "
+            f"name='{_el['name'][:30]}'{_pick}"
+            f" rect={_el.get('rect')}{pt}"
             + (f" value='{value}'" if value else ""))
         try:
             requests.post(EXPRESS_EVENTS_URL, json=event, timeout=3)

@@ -50,10 +50,26 @@ cd generated-wdio\Calculator
 node CalculatorTestById.js       # folder name = PascalCase app name
 ```
 
+Sweep every control in an app and audit what codegen makes of each one
+(`/sweep` drives this and then fixes what it finds):
+
+```powershell
+python agent\sweep\run.py enumerate --app SevenZip   # needs the app on screen
+python agent\sweep\run.py codegen   --app SevenZip   # needs only the server
+python agent\sweep\run.py live      --app SevenZip --max-controls 2 --yes
+```
+
+> `live` physically clicks. It **must run from an ADMINISTRATOR PowerShell** —
+> agent.py is elevated, so the apps it launches are too, and a non-elevated
+> reader gets a 2-element stub tree instead of the real one (measured
+> 2026-08-05: 7-Zip = 243 elements when the user launched it, 2 when the agent
+> did). Tier 1 (`codegen`) needs no elevation and no GUI, but it synthesizes
+> events and therefore cannot see capture-layer (`agent.py`) bugs at all.
+
 Regression gate (server must be running, agent not needed):
 
 ```powershell
-python agent\mock_events.py      # 403/403 checks as of 2026-08-05
+python agent\mock_events.py      # 409/409 checks as of 2026-08-05
 ```
 
 > `mock_events.py` POSTs synthetic events to the live server. If you called

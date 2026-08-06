@@ -273,6 +273,18 @@ async function _typeScoped(sid, rootElId, selector, text) {
         const elId = el.ELEMENT || el['element-6066-11e4-a52e-4f735466cecf'];
         await _appiumPost(`/session/${sid}/element/${elId}/clear`, {});
         await _appiumPost(`/session/${sid}/element/${elId}/value`, { text });
+        // 2026-08-05 (TeamViewer "빠른 연결 허용" 이메일/비밀번호 실측): 이
+        // 함수는 성공 시 지금까지 아무것도 안 찍었다 — 실패만 찍는 catch와
+        // 합쳐서 보면 "성공해서 조용했다"와 "그 어떤 호출도 실제로 안
+        // 일어났다"를 로그만으로 구분할 방법이 없었다(simple 모드로 생성된
+        // 파일에서 이 함수가 실제로 도는 코드인 걸 확인하는 데만 세 번의
+        // 재녹화가 들었다 — session-mode 전용 코드만 계속 고치고 있었음).
+        // WinAppDriver의 element/value가 예외 없이 성공을 보고해도 앱에
+        // 실제로 반영 안 되는 사례가 이미 WebView2에서 확인됐다(§ isWebContent
+        // 타이핑 분기 주석) — 여기서 element/value가 "성공"을 보고했다는
+        // 사실 자체를 남겨야, 다음에도 같은 증상(로그는 성공, 화면은 빈칸)이
+        // 나면 "WAD REST가 거짓 성공을 보고하는 컨트롤"로 확정할 수 있다.
+        console.log(`[type] scoped sendKeys ok (sid=${sid} elId=${elId} sel=${selector})`);
         return true;
     } catch (e) { console.warn('[type] scoped sendKeys failed:', String(e.message || e).substring(0, 100)); return false; }
 }
@@ -483,15 +495,39 @@ async function initAppHwnd() {
 // never run launchApp's foreground/normalize step, so a freshly launched app
 // can be spawned behind other windows or off-position — bring it forward
 // before the first click so OS-level input actually reaches it.
-function osActivate(titleLike) {
+function osActivate(titleLike, hwnd) {
     try {
-        const args = _appHwnd ? `-hwnd ${_appHwnd}` : `-titleLike "${titleLike}"`;
+        // 2026-08-05 (TeamViewer "빠른 연결 허용" 이메일/비밀번호 실측): 원래
+        // hwnd 인자가 없어서 항상 _appHwnd(메인 창)만 활성화할 수 있었다 —
+        // 크로스윈도우 대화상자를 지정할 방법이 아예 없었다. session 헤더의
+        // osActivate 시그니처와 맞춘다. 기존 호출부(인자 1개, 예: 빈 문자열 또는
+        // title만 넘기는 호출)는 hwnd가 undefined이므로 _appHwnd 폴백으로
+        // 그대로 동작해 변화 없음.
+        const h = hwnd || _appHwnd;
+        const args = h ? `-hwnd ${h}` : `-titleLike "${titleLike}"`;
         execSync(
             `powershell -NoProfile -File "${_helperFile('osActivate.ps1')}" ${args}`,
             { stdio: 'pipe', timeout: 15000 }
         );
     } catch (e) {
         console.warn('[osActivate] failed:', String(e.message || e).substring(0, 100));
+    }
+}
+
+// 2026-08-05: session 헤더의 _listWindowHwnds()와 동일 — 크로스윈도우 타이핑
+// 스텝이 simple 모드에서도 대화상자의 진짜 hwnd를 라이브로 찾을 수 있어야
+// 해서 여기에도 둔다(원래 session 전용이었음).
+function _listWindowHwnds(frag) {
+    if (!frag) return [];
+    try {
+        const out = execSync(
+            `powershell -NoProfile -File "${_helperFile('osWindowRect.ps1')}" -titleLike "${frag}" -listOnly`,
+            { stdio: 'pipe', timeout: 15000 }
+        ).toString().trim();
+        if (!out) return [];
+        return out.split(/\r?\n/).map(s => s.trim()).filter(Boolean).map(Number);
+    } catch {
+        return [];
     }
 }
 
@@ -635,16 +671,48 @@ async function _step(label, fn) {
 }
 
 class CalculatorPageById {
-    async click1() {
-        await _clickBySid(_appSid, null, '~num7Button');
-    }
-
     async click2() {
         await _clickBySid(_appSid, null, '~num8Button');
     }
 
     async click3() {
-        await _clickBySid(_appSid, null, '~Close');
+        await _clickBySid(_appSid, null, '~num9Button');
+    }
+
+    async click4() {
+        await _clickBySid(_appSid, null, '~multiplyButton');
+    }
+
+    async click5() {
+        await _clickBySid(_appSid, null, '~num6Button');
+    }
+
+    async click6() {
+        await _clickBySid(_appSid, null, '~num5Button');
+    }
+
+    async click7() {
+        await _clickBySid(_appSid, null, '~num2Button');
+    }
+
+    async click8() {
+        await _clickBySid(_appSid, null, '~equalButton');
+    }
+
+    async click9() {
+        await _clickBySid(_appSid, null, '~divideButton');
+    }
+
+    async click11() {
+        await _clickBySid(_appSid, null, '~num8Button');
+    }
+
+    async click12() {
+        await _clickBySid(_appSid, null, '~num7Button');
+    }
+
+    async click13() {
+        await _clickBySid(_appSid, null, '~equalButton');
     }
 }
 
@@ -665,13 +733,24 @@ async function run() {
     _appSid = await _createSession("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App");
     console.log(`[session] app session ${_appSid} ready`);
     await initAppHwnd();
-    normalizeWindowSimple({"left":2915,"top":209,"width":418,"height":633});
+    normalizeWindowSimple({"left":2915,"top":209,"width":418,"height":666});
 
         const page = new CalculatorPageById();
             osActivate("계산기");
-            await _step('1:click 7', () => page.click1());
+            // [STEP 1] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
+            _failures.push('1:click:no-selector');
             await _step('2:click 8', () => page.click2());
-            await _step('3:click 계산기 닫기', () => page.click3());
+            await _step('3:click 9', () => page.click3());
+            await _step('4:click 곱', () => page.click4());
+            await _step('5:click 6', () => page.click5());
+            await _step('6:click 5', () => page.click6());
+            await _step('7:click 2', () => page.click7());
+            await _step('8:click 일치', () => page.click8());
+            await _step('9:click 나누기', () => page.click9());
+            // [STEP 10] drag scope-out — replay skipped (event scope: Click/Type/DoubleClick/Scroll, 2026-07-10)
+            await _step('11:click 8', () => page.click11());
+            await _step('12:click 7', () => page.click12());
+            await _step('13:click 일치', () => page.click13());
     } finally {
 
         if (_appSid) { try { await _appiumFetch(`/session/${_appSid}`, { method: 'DELETE' }, 5000); } catch {} }
