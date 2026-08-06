@@ -69,7 +69,7 @@ python agent\sweep\run.py live      --app SevenZip --max-controls 2 --yes
 Regression gate (server must be running, agent not needed):
 
 ```powershell
-python agent\mock_events.py      # 409/409 checks as of 2026-08-05
+python agent\mock_events.py      # 419/419 checks as of 2026-08-06
 ```
 
 > `mock_events.py` POSTs synthetic events to the live server. If you called

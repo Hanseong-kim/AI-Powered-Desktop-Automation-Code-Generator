@@ -38,6 +38,7 @@ generated-wdio/MockWebContent/
 generated-wdio/MockDoubleClickRow/
 generated-wdio/MockWindowClick/
 generated-wdio/MockVolatileMenuItem/
+generated-wdio/MockMenuIndexNotATrigger/
 generated-wdio/MockPostNavTitle/
 generated-wdio/MockGoldenCalculator/
 generated-wdio/MockGoldenFileZilla/
@@ -78,6 +79,7 @@ generated-wdio/_debug-helpers/MockWebContent/
 generated-wdio/_debug-helpers/MockDoubleClickRow/
 generated-wdio/_debug-helpers/MockWindowClick/
 generated-wdio/_debug-helpers/MockVolatileMenuItem/
+generated-wdio/_debug-helpers/MockMenuIndexNotATrigger/
 generated-wdio/_debug-helpers/MockPostNavTitle/
 generated-wdio/_debug-helpers/MockGoldenCalculator/
 generated-wdio/_debug-helpers/MockGoldenFileZilla/

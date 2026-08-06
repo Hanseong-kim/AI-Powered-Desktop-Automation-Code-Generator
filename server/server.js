@@ -2736,11 +2736,53 @@ function isUntrackedCrossWindowEvent(next, e, recordedRect) {
   return true;
 }
 
+// "이 클릭은 그 자체로 이미 목록/메뉴의 항목 하나를 고르는 완결된 2단 동작인가?"
+//
+// 그런 이벤트는 절대 다른 클릭의 **트리거로 삼켜지면 안 된다** — 삼켜지는 순간
+// 자기가 실어 나르던 "몇 번째 항목" 정보가 통째로 사라지고, 재생은 트리거만
+// 누른 채 항목 선택을 영영 못 한다.
+//
+// mergeCrossWindowTriggerClicks는 이 규칙을 **이름 기반 형태(expandItemName)에
+// 대해서만** 갖고 있었다(mergeExpandCollapseClicks가 붙여주는 필드). 그런데
+// 같은 뜻의 **인덱스 기반 형태**(comboItemIndex / menuItemIndex — 항목에 이름이
+// 아예 없어서 위치로 고를 수밖에 없는 owner-drawn 콤보/팝업 메뉴,
+// 2026-07-31 ComboBoxEx · 2026-08-04 HeidiSQL "더 보기")는 몰랐다.
+//
+// 2026-08-06 실측 (HeidiSQL 라이브 녹화 + 재생):
+//   #16 click '더 보기' menuItemIndex=0/6   <- 환경설정을 여는 완결된 동작
+//   #17 click '로그 기록' (환경 설정 창의 TabItem, hwnd=0 → rootHwndHex 없음)
+// TabItem이 UIA-가상 요소(hwnd=0)라 describe()가 rootHwnd를 못 채우고(agent.py
+// 1650행: hwnd가 0이면 rootHwnd를 아예 안 채움), 그 빈 값 때문에
+// isUntrackedCrossWindowEvent가 #17을 "추적 안 되는 팝업"으로 오판 → #16이
+// 트리거로 소비되며 menuItemIndex=0이 증발 → 재생에서 "환경 설정" 창이 아예
+// 안 열리고 이후 9개 스텝이 연쇄 실패했다.
+//
+// 같은 녹화의 #30(menuItemIndex=1)·#33(=5)은 뒤따르는 클릭이 자체 hwnd를 가진
+// Button(취소/닫기)이라 rootHwndHex가 실려 병합을 피했고, **바로 그 재생에서
+// 정상 동작했다**("selected item #1 of 6", "#5 of 6") — 이 가드는 #16을 그
+// 검증된 경로로 되돌려놓는 것이다.
+//
+// 이건 2026-08-05 osExpandCollapse.py가 고친 것과 **정확히 같은 맹점**이다:
+// 그쪽도 `not item_name`만 보고 args.item_index를 무시했다. 재생 쪽은 고쳤는데
+// 병합 쪽에 같은 구멍이 남아 있었다.
+//
+// 좁게 잡은 이유(회귀 방지): 골든 리코딩 6개 전체에서 항목 인덱스를 실은
+// 이벤트는 3개뿐이고, 실제로 발동하는 cross-window 병합은 1건(FileZilla
+// 파일(F) 메뉴)뿐인데 그 1건은 인덱스를 **item(next)** 쪽에 실었지
+// **trigger(e)** 쪽은 비어 있다 — 이 가드는 거기서 발동하지 않는다.
+function alreadyPicksAnItem(e) {
+  const el = e?.element;
+  if (!el) return false;
+  return el.comboItemIndex !== null && el.comboItemIndex !== undefined
+      || el.menuItemIndex  !== null && el.menuItemIndex  !== undefined;
+}
+
 function mergeCrossWindowTriggerClicks(events, recordedRect) {
   const out = [];
   for (let i = 0; i < events.length; i++) {
     const e = events[i];
     if (e.action === 'click' && !e.expandItemName
+        && !alreadyPicksAnItem(e)
         && (e.element?.name || e.element?.automationId)
         && !isCrossWindowEvent(e, recordedRect)) {
       const next = events[i + 1];

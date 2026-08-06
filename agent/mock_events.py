@@ -1175,6 +1175,70 @@ TITLE_COLLISION_DIALOGRECT_EVENTS = [
 ]
 
 
+# An event that ALREADY picks a menu/list item by position must never be
+# swallowed as a bare trigger for the click that follows (2026-08-06, HeidiSQL
+# "더 보기" -> 환경 설정 live recording + replay).
+#
+# mergeCrossWindowTriggerClicks() refuses to consume an event carrying
+# `expandItemName` (the NAME-based "this click already picks an item" marker
+# that mergeExpandCollapseClicks attaches) but knew nothing about the
+# INDEX-based form of the very same thing — comboItemIndex/menuItemIndex,
+# which is what owner-drawn combos and icon-only popup menus must use because
+# their items expose no Name at all.
+#
+# What made it fire in the wild: the following click was a TabItem inside the
+# dialog the menu pick had just opened. A TabItem is a UIA-virtual element
+# (hwnd=0), and describe() only fills rootHwnd when hwnd is non-zero
+# (agent.py), so the event reached the server with NO rootHwndHex — and
+# isUntrackedCrossWindowEvent() reads that emptiness as "an untracked popup",
+# which is exactly the shape it merges. The menu pick was consumed as its
+# trigger, menuItemIndex went with it, and the 환경 설정 window never opened on
+# replay; nine later steps died with it.
+#
+# MockComboIndex already asserts the same INTENT, but its trailing click sits
+# in the main window, so isCrossWindowEvent() is false and this merge path is
+# never entered — which is how the bug survived that scenario. This one
+# reproduces the cross-window shape, and asserts BOTH directions:
+#   #1+#2  index on the TRIGGER  -> must NOT merge (the bug)
+#   #3+#4  no index on the trigger -> must STILL merge (the FileZilla 파일(F)
+#          menu is the one real merge in all six golden recordings, and it
+#          carries its index on the ITEM, not the trigger)
+MENU_INDEX_TRIGGER_APP = "MockMenuIndexNotATrigger"
+MENU_INDEX_TRIGGER_EVENTS = [
+    make_event("click", name="More", automation_id="", class_name="",
+               control_type="SplitButton", window_title="MainWin",
+               app_name=MENU_INDEX_TRIGGER_APP, expand_collapse=True, index=1,
+               winLeft=100, winTop=100, winWidth=600, winHeight=400),
+    make_event("click", name="Logging", automation_id="", class_name="",
+               control_type="TabItem", window_title="MainWin",
+               app_name=MENU_INDEX_TRIGGER_APP, index=2,
+               winLeft=400, winTop=300, winWidth=500, winHeight=300),
+    make_event("click", name="OpenDialog", automation_id="btnOpen", class_name="",
+               control_type="Button", window_title="MainWin",
+               app_name=MENU_INDEX_TRIGGER_APP, index=3,
+               winLeft=100, winTop=100, winWidth=600, winHeight=400),
+    make_event("click", name="Field", automation_id="edtField", class_name="",
+               control_type="Edit", window_title="MainWin",
+               app_name=MENU_INDEX_TRIGGER_APP, index=4,
+               winLeft=400, winTop=300, winWidth=500, winHeight=300),
+]
+MENU_INDEX_TRIGGER_EVENTS[0]["element"]["menuItemIndex"] = 0
+MENU_INDEX_TRIGGER_EVENTS[0]["element"]["menuItemCount"] = 6
+MENU_INDEX_TRIGGER_EVENTS[0]["element"]["menuItemName"] = ""
+# hwnd=0 on the dialog-side clicks is the whole point — that is what leaves
+# rootHwndHex empty and makes them look "untracked" to the merge.
+for _e in (MENU_INDEX_TRIGGER_EVENTS[1], MENU_INDEX_TRIGGER_EVENTS[3]):
+    _e["element"]["hwnd"] = 0
+MENU_INDEX_TRIGGER_SESSION_META = {
+    "action": "session_meta",
+    "app": MENU_INDEX_TRIGGER_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
+
 # ---------------------------------------------------------------------------
 # Test steps
 # ---------------------------------------------------------------------------
@@ -2628,6 +2692,52 @@ def step_wdio_generate_owner_drawn_dropdown_by_index():
         )
 
 
+def step_wdio_generate_menu_index_is_not_a_trigger():
+    print("\n[16] An index-based item pick is a complete action, not a bare trigger (HeidiSQL 더 보기, 2026-08-06)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", MENU_INDEX_TRIGGER_SESSION_META)
+    for ev in MENU_INDEX_TRIGGER_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": MENU_INDEX_TRIGGER_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (menu-index trigger) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped menu-index-trigger checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname, content = f.get("filename", ""), f.get("content", "")
+        check(
+            f"  {fname} keeps the recorded menu position instead of being consumed as a trigger",
+            ", 0, 6)" in content and content.count("osExpandCollapse(_appHwnd") == 1,
+            "the event already encodes 'open the 더 보기 menu and pick item #0'. "
+            "Swallowing it as the trigger of the NEXT click throws that index "
+            "away — measured live 2026-08-06: the step vanished, the 환경 설정 "
+            "window never opened, and the nine steps that needed it all failed",
+        )
+        check(
+            f"  {fname} does not embed the item pick as the following click's triggerTarget",
+            '{"automationId":"","className":"","name":"More"}, null, null' not in content,
+            "when the merge fired, 'More' was emitted as the triggerTarget of "
+            "the Logging click and its own step disappeared entirely",
+        )
+        check(
+            f"  {fname} still emits the dialog-side click as its own step",
+            "click Logging" in content,
+            "the TabItem click must survive with its own step; it is only the "
+            "TRIGGER side of the pairing that this guard refuses",
+        )
+        check(
+            f"  {fname} still merges a GENUINE bare trigger with its untracked popup item",
+            '"automationId":"btnOpen"' in content,
+            "this is the regression direction that matters most: the one real "
+            "cross-window merge across all six golden recordings (FileZilla "
+            "파일(F) menu) carries its index on the ITEM, not the trigger, so "
+            "it must keep merging exactly as before",
+        )
+
+
 def step_wdio_generate_hwnd_trigger_keeps_name():
     print("\n[14] COM helper target/triggerTarget also reject hwnd-as-automationId (HeidiSQL 더보기 follow-up, 3차)")
     request("DELETE", "/api/events")
@@ -3164,6 +3274,7 @@ def step_output_folders_isolated():
         NAMELESS_ITEM_APP, HWND_TRIGGER_APP, DUP_DROPDOWN_APP, ANIM_APP,
         NESTED_DROPDOWN_APP, SIMPLE_ROOTHWND_APP, TITLE_COLLISION_DIALOGRECT_APP,
         WEB_APP, DBLROW_APP, WINCLICK_APP, VOLATILE_MENUITEM_APP,
+        MENU_INDEX_TRIGGER_APP,
         "SevenZipStateReset",
         "MockGoldenCalculator", "MockGoldenFileZilla", "MockGoldenHeidiSQL",
         "MockGoldenPuTTY", "MockGoldenSevenZip", "MockGoldenTeamViewer",
@@ -3219,6 +3330,7 @@ def main():
     step_wdio_generate_trigger_expand_merge_order()
     step_wdio_generate_nameless_item_no_fake_itemname()
     step_wdio_generate_owner_drawn_dropdown_by_index()
+    step_wdio_generate_menu_index_is_not_a_trigger()
     step_wdio_generate_combobox_ex_reclick_drops_name()
     step_wdio_generate_hwnd_trigger_keeps_name()
     step_wdio_generate_volatile_menuitem_id()
