@@ -58,11 +58,17 @@ def main():
         def __init__(self, trace):
             self._last_trace = trace
 
-    def restore(picked_by, raw, late, x, y):
+    class _FakeRec:
+        """Only what the repair actually reads, plus the real helper it calls."""
+        target_hwnds = {6885104}
+        _adopt_dead_row_cell = Recorder._adopt_dead_row_cell
+
+    def restore(picked_by, raw, late, x, y, root_hwnd=6885104):
         """Run the repair and hand back the (possibly) fixed element dict."""
         info = dict(late)
-        Recorder._restore_recycled_row_name(
-            _FakeIns({"picked_by": picked_by, "raw_info": raw}), info, x, y)
+        ins = _FakeIns({"picked_by": picked_by, "raw_info": raw,
+                        "root_hwnd": root_hwnd})
+        Recorder._restore_recycled_row_name(_FakeRec(), ins, info, x, y)
         return info
 
     # #4: user double-clicked 'C:'; the late read had already slid onto the
@@ -93,13 +99,47 @@ def main():
     check("no rot (1st read == 2nd read) leaves the element untouched",
           got["name"] == "컴퓨터")
 
-    # #7: the late read degenerated to the List container. Not repaired on
-    # purpose — restoring a name there would build a chimera.
+    # #7: the element DIED before the second read (every field failed, rect came
+    # back as an ERR string). raw is the unlabeled Edit name-cell surrogate, so
+    # the row-ancestor climb element_at() would have done is applied to the last
+    # good observation. Numbers are the live 2026-08-06 capture.
+    _DEAD_RECT = "ERR:COMError:(-2147220991, '이벤트에서 가입자를 불러낼 수 없습니다.', ...)"
     got = restore("smallest_element_at",
-                  {"name": "hansung", "rect": (1000, 406, 1087, 430), "automationId": ""},
-                  {"name": "", "rect": (994, 306, 1911, 982), "automationId": "1001"},
-                  1055, 417)
-    check("a non-row-ancestor pick is left alone (no chimera)", got["name"] == "")
+                  {"name": "hansung", "rect": (1000, 406, 1087, 430),
+                   "automationId": "", "controlType": "Edit", "className": ""},
+                  {"name": "", "rect": _DEAD_RECT, "automationId": "", "controlType": ""},
+                  1050, 418)
+    check("dead row cell: recovers 'hansung' from the pre-death read",
+          got["name"] == "hansung")
+    check("dead row cell: records it as the ListItem row, not the Edit cell",
+          got["controlType"] == "ListItem")
+    check("dead row cell: replaces the ERR rect with the real one",
+          got["rect"] == (1000, 406, 1087, 430))
+
+    # ...but only for the narrow shape. A large named element under the point is
+    # the 'adopted the backdrop instead of the control' failure (FileZilla log
+    # pane, 2026-08-05) — must stay dropped.
+    got = restore("smallest_element_at",
+                  {"name": "RichEdit Control", "rect": (994, 306, 1911, 982),
+                   "automationId": "", "controlType": "Edit", "className": ""},
+                  {"name": "", "rect": _DEAD_RECT, "automationId": "", "controlType": ""},
+                  1050, 418)
+    check("dead element: a window-filling backdrop is NOT adopted", got["name"] == "")
+
+    got = restore("smallest_element_at",
+                  {"name": "hansung", "rect": (1000, 406, 1087, 430),
+                   "automationId": "", "controlType": "Edit", "className": ""},
+                  {"name": "", "rect": _DEAD_RECT, "automationId": "", "controlType": ""},
+                  1050, 418, root_hwnd=66794)   # Chrome, not a tracked window
+    check("dead element: an untracked window is NOT adopted", got["name"] == "")
+
+    got = restore("smallest_element_at",
+                  {"name": "Save", "rect": (1000, 406, 1087, 430),
+                   "automationId": "btnSave", "controlType": "Button", "className": ""},
+                  {"name": "", "rect": _DEAD_RECT, "automationId": "", "controlType": ""},
+                  1050, 418)
+    check("dead element: a normal named control is NOT relabelled as a row",
+          got["name"] == "" and got["controlType"] == "")
 
     # Guards.
     got = restore("row-ancestor",

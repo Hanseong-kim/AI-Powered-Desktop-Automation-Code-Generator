@@ -2670,8 +2670,82 @@ class Recorder:
             self._type_buffer += char
             return
 
-    @staticmethod
-    def _restore_recycled_row_name(ins, info, x, y):
+    # UIA ControlType id for Edit — element_at() already uses the same literal
+    # when it decides an unlabeled Edit is a list row's name cell.
+    _UIA_EDIT_CT = 50004
+
+    def _adopt_dead_row_cell(self, trace, raw, info, x, y):
+        """Recover a list row whose element DIED before the second read.
+
+        A softer form of the same race as _restore_recycled_row_name's: instead
+        of the pooled row element being repointed at a different row, its
+        provider goes away entirely. Measured 2026-08-06 (7-Zip, entering
+        'hansung'):
+
+            raw  = name='hansung' ct='Edit' id='' rect=(1000,406,1087,430)
+            late = name=''        ct=''     id='' rect=ERR:COMError(-2147220991)
+
+        Every field of the second read failed; the first read, taken before
+        this click's own navigation, is the only surviving observation of what
+        the user actually clicked — the same "earliest observation wins"
+        principle used by dedupeDoubleClicks and by the light-dismiss dead
+        element recovery further down _inspect().
+
+        Two things kept the existing recoveries from covering it. The
+        light-dismiss one is gated on `light_dismiss` (this element is not a
+        scrim) and on picked_by starting with "raw-" (here element_at() had
+        deepened, so picked_by was "smallest_element_at"). That picked_by test
+        was protecting against adopting a large ANCESTOR when the pipeline had
+        deliberately descended — which is a real concern, but it is really a
+        question about raw's SIZE, not about which branch produced the pick.
+        This checks the size directly instead.
+
+        Why the recovered element is recorded as a ListItem rather than the
+        Edit that raw literally reports: element_at() already encodes the rule
+        that an Edit with no AutomationId inside this control family IS a list
+        row's name-cell surrogate, and responds by climbing to
+        _nearest_row_ancestor() (see its `is_unlabeled_edit` branch, and
+        CLAUDE.md §5 — WinAppDriver's element/click on that surrogate is a
+        silent no-op while Invoke() on the parent ListItem genuinely
+        navigates). That climb is exactly what could not run here, because the
+        element died first. Applying the codebase's own established rule to the
+        last good observation is what keeps replay on the proven COM/ListItem
+        path; recording it as an Edit would produce a step that replays
+        cleanly and does nothing — the §3 false PASS this project forbids.
+
+        Deliberately does NOT fire when raw is large: a window-filling
+        container that happens to be named is exactly the "adopted the backdrop
+        instead of the control" failure the light-dismiss guard was written for
+        (FileZilla's log pane / status bar, 2026-08-05).
+        """
+        _r = info.get("rect")
+        if isinstance(_r, tuple) and _r != (0, 0, 0, 0):
+            return False                      # the late read is fine — not this case
+        raw_rect = raw.get("rect")
+        if not isinstance(raw_rect, tuple) or not point_in_rect(raw_rect, x, y):
+            return False
+        if raw.get("automationId") or raw.get("controlType") != "Edit":
+            return False                      # not the unlabeled name-cell surrogate
+        if (trace.get("root_hwnd") or 0) not in self.target_hwnds:
+            return False                      # same self-contamination guard as below
+        w, h = raw_rect[2] - raw_rect[0], raw_rect[3] - raw_rect[1]
+        if w <= 0 or h <= 0 or w > 400 or h > 80:
+            return False                      # a row's name cell, not a container
+        info["name"] = raw.get("name") or ""
+        info["className"] = raw.get("className") or ""
+        info["automationId"] = ""
+        info["controlType"] = "ListItem"
+        info["rect"] = raw_rect
+        info["hwnd"] = raw.get("hwnd") or 0
+        log(f"[inspect] the element at ({x},{y}) died before it could be read "
+            f"a second time (rect={_r!r}), but element_at()'s first read caught "
+            f"it alive: an unlabeled Edit named {info['name']!r} at {raw_rect} "
+            "— this control family's list-row name cell. Recording it as the "
+            "ListItem row it belongs to, which is what the row-ancestor climb "
+            "would have produced had the element survived.")
+        return True
+
+    def _restore_recycled_row_name(self, ins, info, x, y):
         """Undo a virtualized list row's identity being recycled mid-inspection.
 
         A virtualized ListView (7-Zip's SysListView32, and the same pattern in
@@ -2728,16 +2802,10 @@ class Recorder:
         if not raw_name or raw_name == late_name:
             return
         if trace.get("picked_by") != "row-ancestor":
-            # Same rot, different shape — and not yet safe to repair blindly.
-            # Measured 2026-08-06 (7-Zip 'hansung'): picked_by was
-            # smallest_element_at and the late read had degenerated all the way
-            # to the List container itself (id=1001, no name, 98% of the
-            # window). Restoring just the name there would build a chimera
-            # (List named 'hansung') whose selector matches nothing, and
-            # adopting raw wholesale is only correct if raw is itself a row
-            # rather than the Edit surrogate cell — which the trace has never
-            # printed. Log the one fact that decides it so the next live
-            # capture settles it instead of another round of guessing.
+            if self._adopt_dead_row_cell(trace, raw, info, x, y):
+                return
+            # Neither shape — leave it alone, but print the two facts that
+            # would decide how to handle it if it ever shows up.
             log(f"[inspect] identity rot at ({x},{y}) NOT repaired: "
                 f"picked_by={trace.get('picked_by')!r} "
                 f"raw=[name={raw_name!r} ct={raw.get('controlType')!r} "
