@@ -2670,6 +2670,98 @@ class Recorder:
             self._type_buffer += char
             return
 
+    @staticmethod
+    def _restore_recycled_row_name(ins, info, x, y):
+        """Undo a virtualized list row's identity being recycled mid-inspection.
+
+        A virtualized ListView (7-Zip's SysListView32, and the same pattern in
+        every other Win32 report view) does not create one UIA element per row.
+        It keeps a small pool and REPOINTS those elements at different rows as
+        the list scrolls or reloads. The element stays alive the whole time —
+        it simply starts reporting a different Name.
+
+        That collides with the fact that this pipeline reads a click's element
+        TWICE: element_at() describes the raw hit-test result, then climbs to
+        the row and returns a live COM pointer, and _inspect() describes that
+        pointer again. Between the two reads sits the navigation the user's own
+        double-click just triggered. Measured 2026-08-06 (7-Zip, presses
+        back-computed from the emit timestamps and the [diag-click] gap):
+
+            event   element_at()'s 1st read   _inspect()'s 2nd read
+            #4      'C:'                      '$Recycle.Bin'
+            #10     'project'                 '.code-review-graph'
+
+        In BOTH cases the first read was the truth — it is what the user
+        actually double-clicked — and the second read had already slid onto the
+        row that the navigation put under the cursor afterwards. The worker was
+        362ms and 225ms behind the press respectively, which is longer than
+        7-Zip takes to repaint, so even the FIRST of a double-click's two
+        presses inspected post-navigation.
+
+        Why this is not dedupeDoubleClicks' problem: that function already
+        picks the earliest constituent click of a trio, and that rule is
+        correct. It just cannot help when the value ON the earliest click was
+        already corrupted before the server ever saw it. Fixing it here keeps
+        one rule ("the earliest observation is the pre-navigation one") in one
+        place instead of two competing ones.
+
+        Deliberately NOT a wholesale swap to the raw element. raw is the narrow
+        inner name CELL (rect 1000..1041 vs the row's 996..1756), and CLAUDE.md
+        §5 records that WinAppDriver's element/click on that Edit surrogate is
+        a silent no-op while Invoke() on the parent ListItem genuinely
+        navigates — adopting it would trade this bug for that one. The climbed
+        row is the structurally correct element; only its Name rotted, so only
+        its Name is restored.
+
+        Fires only when all of these hold, so a capture where nothing was
+        recycled (first read == second read) is bit-for-bit unaffected:
+          - element_at() ended on the row-ancestor climb
+          - the raw first read had a name, and it differs from the late one
+          - the click point falls inside the raw element's rect
+          - the raw element's rect sits inside the adopted row's rect, i.e.
+            raw really is a cell OF this row and not something unrelated
+        """
+        trace = getattr(ins, "_last_trace", None) or {}
+        raw = trace.get("raw_info") or {}
+        raw_name = raw.get("name") or ""
+        late_name = info.get("name") or ""
+        if not raw_name or raw_name == late_name:
+            return
+        if trace.get("picked_by") != "row-ancestor":
+            # Same rot, different shape — and not yet safe to repair blindly.
+            # Measured 2026-08-06 (7-Zip 'hansung'): picked_by was
+            # smallest_element_at and the late read had degenerated all the way
+            # to the List container itself (id=1001, no name, 98% of the
+            # window). Restoring just the name there would build a chimera
+            # (List named 'hansung') whose selector matches nothing, and
+            # adopting raw wholesale is only correct if raw is itself a row
+            # rather than the Edit surrogate cell — which the trace has never
+            # printed. Log the one fact that decides it so the next live
+            # capture settles it instead of another round of guessing.
+            log(f"[inspect] identity rot at ({x},{y}) NOT repaired: "
+                f"picked_by={trace.get('picked_by')!r} "
+                f"raw=[name={raw_name!r} ct={raw.get('controlType')!r} "
+                f"id={raw.get('automationId')!r} rect={raw.get('rect')!r}] "
+                f"late=[name={late_name!r} ct={info.get('controlType')!r} "
+                f"id={info.get('automationId')!r} rect={info.get('rect')!r}]")
+            return
+        raw_rect, row_rect = raw.get("rect"), info.get("rect")
+        if not isinstance(raw_rect, tuple) or not isinstance(row_rect, tuple):
+            return
+        if not point_in_rect(raw_rect, x, y):
+            return
+        if not (row_rect[0] <= raw_rect[0] and row_rect[1] <= raw_rect[1]
+                and raw_rect[2] <= row_rect[2] and raw_rect[3] <= row_rect[3]):
+            return
+        info["name"] = raw_name
+        if not info.get("automationId") and raw.get("automationId"):
+            info["automationId"] = raw["automationId"]
+        log(f"[inspect] row at ({x},{y}) was recycled between element_at()'s "
+            f"read and this one: it now reports {late_name!r} but the first "
+            f"read — taken before this click's own navigation — saw "
+            f"{raw_name!r}. Restoring the earlier name; the row element "
+            "itself (rect/controlType) is kept as-is.")
+
     def _inspect(self, ins, x, y):
         try:
             # 2026-08-05 (TeamViewer "세션 코드가 만료되었습니다" 대화상자
@@ -2753,6 +2845,7 @@ class Recorder:
                         f"element (name={info.get('name')!r}) — restored "
                         f"'{confirmed}' from the row-ancestor climb that "
                         "found it moments earlier, alive")
+            self._restore_recycled_row_name(ins, info, x, y)
             # DIAGNOSTIC: element_at()'s full decision path in one line, plus
             # both window-identity signals (top_window_at: Win32 hit test at
             # this point; foreground_top_window: GetForegroundWindow) and the
