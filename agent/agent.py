@@ -4352,6 +4352,16 @@ class Recorder:
         # 재생 시점엔 "선택 의도였는지 이동 의도였는지" 추측만 가능하지만,
         # 캡처 시점엔 실제로 관측할 수 있다.
         if self._is_activation_check_candidate(elem):
+            # 2026-08-10 (PuTTY 도움말 트리 실측 — 서로 다른 항목을 0.4초
+            # 안에 연속 단클릭하면 앞 클릭이 통째로 사라짐): 이전 클릭이
+            # 활성화-확인 대기 중(아직 ACTIVATION_CHECK_DELAY가 안 지남)일
+            # 때 여기 다시 들어오면, 그 대기값을 그냥 덮어써서 이벤트 자체가
+            # 유실됐다. _pending_press가 새 press를 받기 전에 이전 값을
+            # 먼저 flush하는 것(3145행)과 같은 원칙 — 새 후보를 보류시키기
+            # 전에 기존 보류값부터 내보낸다. 더블클릭 페어링 분기(위,
+            # 4343행)는 이미 flush하므로 이 변경의 영향을 안 받는다.
+            if self._pending_activation is not None:
+                self._flush_pending_activation(verify=False)
             self._pending_activation = {
                 "elem": elem, "com_elem": com_elem, "x": cx, "y": cy, "ts": ts,
                 "due": time.time() + ACTIVATION_CHECK_DELAY,

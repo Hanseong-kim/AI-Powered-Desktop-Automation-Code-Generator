@@ -1267,6 +1267,8 @@ async function _step(label, fn) {
 // Windows in this recording:
 //   [W1] "PuTTY Configuration" (main)
 //   [W2] "PuTTY User Manual" (opened during recording)
+//   [W3] "항목 인쇄" (opened during recording)
+//   [W4] "PuTTY User Manual" (opened during recording)
 
 class PuTTYPageByClass {
 
@@ -1282,38 +1284,82 @@ class PuTTYPageByClass {
     // [W2] PuTTY User Manual (new window)
     // ════════════════════════════════════════════════════════════
     async click2() {
-        await _clickScoped('PuTTY User Manual', '//TreeItem[@Name="Using PuTTY"]');
-    }
-
-    async click3() {
-        await _clickScoped('PuTTY User Manual', '//TreeItem[@Name="PuTTY User Manual"]');
-    }
-
-    async click4() {
         await _clickScoped('PuTTY User Manual', '//TreeItem[@Name="Introduction to PuTTY"]');
     }
 
-    async click5() {
+    async click3() {
         await _clickScoped('PuTTY User Manual', '//TreeItem[@Name="Getting started with PuTTY"]');
     }
 
-    async click6() {
+    async click4() {
+        await _clickScoped('PuTTY User Manual', '//TreeItem[@Name="Using PuTTY"]');
+    }
+
+    async click5() {
         await _clickScoped('PuTTY User Manual', '//TreeItem[@Name="Configuring PuTTY"]');
     }
 
-    async click7() {
+    async click6() {
         await _clickScoped('PuTTY User Manual', '//TreeItem[@Name="Using PSCP to transfer files securely"]');
     }
 
+    async click7() {
+        await _clickScoped('PuTTY User Manual', '//TreeItem[@Name="Using PSFTP to transfer files securely"]');
+    }
+
     async click8() {
-        await _clickScoped('PuTTY User Manual', '//TreeItem[@Name="Using public keys for SSH authentication"]');
+        await _clickScoped('PuTTY User Manual', '//TreeItem[@Name="Using the command-line connection tool Plink"]');
     }
 
     async click9() {
-        await _clickScoped('PuTTY User Manual', '//TreeItem[@Name="Getting started with PuTTY"]');
+        await _clickScoped('PuTTY User Manual', '//TreeItem[@Name="Using public keys for SSH authentication"]');
     }
 
     async click10() {
+        await _clickScoped('PuTTY User Manual', '//TreeItem[@Name="PuTTY User Manual"]');
+    }
+
+    async click11() {
+        await _clickScoped('PuTTY User Manual', '//TreeItem[@Name="Using PuTTY"]');
+    }
+
+    async click12() {
+        await _clickScoped('PuTTY User Manual', '//Button[@Name="뒤로"]');
+    }
+
+    async click13() {
+        await _clickScoped('PuTTY User Manual', '//Button[@Name="다음"]');
+    }
+
+    async click14() {
+        await _clickScoped('PuTTY User Manual', '//Button[@Name="다음"]');
+    }
+
+    async click15() {
+        await _clickScoped('PuTTY User Manual', '//Button[@Name="홈"]');
+    }
+
+    async click16() {
+        await _clickScoped('PuTTY User Manual', '//Button[@Name="글꼴"]');
+    }
+
+    async click17() {
+        await _clickScoped('PuTTY User Manual', '//Button[@Name="인쇄"]');
+    }
+
+
+    // ════════════════════════════════════════════════════════════
+    // [W3] 항목 인쇄 (new window)
+    // ════════════════════════════════════════════════════════════
+    async click18() {
+        await _clickScoped('항목 인쇄', '//Button[@Name="닫기"]');
+    }
+
+
+    // ════════════════════════════════════════════════════════════
+    // [W4] PuTTY User Manual (new window)
+    // ════════════════════════════════════════════════════════════
+    async click19() {
         await _clickScoped('PuTTY User Manual', '//Button[@Name="닫기"]');
     }
 }
@@ -1332,7 +1378,7 @@ async function run() {
         _warmupPowerShell();
 
     _mainTitleFrag = "PuTTY Configuration";
-    _dialogRects = {"PuTTY Configuration":{"left":651,"top":264,"width":618,"height":551},"PuTTY User Manual":{"left":1365,"top":10,"width":550,"height":450}};
+    _dialogRects = {"PuTTY Configuration":{"left":651,"top":264,"width":618,"height":551},"PuTTY User Manual":{"left":1365,"top":10,"width":550,"height":450},"항목 인쇄":{"left":1407,"top":96,"width":466,"height":277}};
     await ensureAppium();
     _rootSid = await _createSession('Root');
     console.log(`[session] Root session ${_rootSid} ready`);
@@ -1350,15 +1396,34 @@ async function run() {
     // [W2] PuTTY User Manual (new window)
     // ════════════════════════════════════════════════════════════
             await _step('switch to window: PuTTY User Manual', async () => { await _switchWindow('PuTTY User Manual'); osActivate('PuTTY User Manual', _hwndCache['PuTTY User Manual']); });
-            await _step('2:click Using PuTTY', () => page.click2());
-            await _step('3:click PuTTY User Manual', () => page.click3());
-            await _step('4:click Introduction to PuTTY', () => page.click4());
-            await _step('5:click Getting started with PuTTY', () => page.click5());
-            await _step('6:click Configuring PuTTY', () => page.click6());
-            await _step('7:click Using PSCP to transfer files securely', () => page.click7());
-            await _step('8:click Using public keys for SSH authentication', () => page.click8());
-            await _step('9:click Getting started with PuTTY', () => page.click9());
-            await _step('10:click 닫기', () => page.click10());
+            await _step('2:click Introduction to PuTTY', () => page.click2());
+            await _step('3:click Getting started with PuTTY', () => page.click3());
+            await _step('4:click Using PuTTY', () => page.click4());
+            await _step('5:click Configuring PuTTY', () => page.click5());
+            await _step('6:click Using PSCP to transfer files securely', () => page.click6());
+            await _step('7:click Using PSFTP to transfer files securely', () => page.click7());
+            await _step('8:click Using the command-line connection tool Plink', () => page.click8());
+            await _step('9:click Using public keys for SSH authentication', () => page.click9());
+            await _step('10:click PuTTY User Manual', () => page.click10());
+            await _step('11:click Using PuTTY', () => page.click11());
+            await _step('12:click 뒤로', () => page.click12());
+            await _step('13:click 다음', () => page.click13());
+            await _step('14:click 다음', () => page.click14());
+            await _step('15:click 홈', () => page.click15());
+            await _step('16:click 글꼴', () => page.click16());
+            await _step('17:click 인쇄', () => page.click17());
+
+    // ════════════════════════════════════════════════════════════
+    // [W3] 항목 인쇄 (new window)
+    // ════════════════════════════════════════════════════════════
+            await _step('switch to window: 항목 인쇄', async () => { await _switchWindow('항목 인쇄'); osActivate('항목 인쇄', _hwndCache['항목 인쇄']); });
+            await _step('18:click 닫기', () => page.click18());
+
+    // ════════════════════════════════════════════════════════════
+    // [W4] PuTTY User Manual (new window)
+    // ════════════════════════════════════════════════════════════
+            await _step('switch to window: PuTTY User Manual', async () => { await _switchWindow('PuTTY User Manual'); osActivate('PuTTY User Manual', _hwndCache['PuTTY User Manual']); });
+            await _step('19:click 닫기', () => page.click19());
     } finally {
 
         for (const { sid } of Object.values(_sessionIds)) {
