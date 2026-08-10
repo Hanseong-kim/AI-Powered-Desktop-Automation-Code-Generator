@@ -83,6 +83,43 @@ class INPUT(ctypes.Structure):
     _fields_ = [("type", wintypes.DWORD), ("u", _INPUTUNION)]
 
 
+def force_foreground(hwnd):
+    """AttachThreadInput 트릭으로 포그라운드 잠금을 우회해 hwnd를 실제 OS
+    포그라운드/활성 창으로 올린다 — SIMPLE_HEADER의 osActivate.ps1
+    (WinActivate.Force)과 같은 로직이지만, 별도 프로세스를 띄우고 그 프로세스가
+    끝나길 기다리는 대신 이 프로세스 안에서 곧바로 이어지는 Expand()/Invoke()
+    호출과 같은 프로세스 수명 안에서 실행된다.
+    2026-08-08 실측(FileZilla "도움말(H)" 메뉴, launchApp 직후 첫 액션):
+    launchApp()이 별도 PowerShell 프로세스(osActivate)로 창을 활성화했는데도
+    Expand()가 매번 state=0(펼쳐지지 않음), 새 팝업 0개로 실패했다 — PowerShell
+    프로세스가 활성화 직후 종료되면 Windows가 포그라운드를 그 부모(터미널)에게
+    돌려주는 것으로 보여, 별도 프로세스가 끝나는 순간 활성화 효과가 사라진다.
+    실제 화면 클릭(COM-SendInput)을 거치는 스텝들은 클릭 좌표 아래 창이 자연히
+    포그라운드가 되므로 이 레이스를 겪지 않는다 — Expand()처럼 시각적 동작이
+    없는 패턴 API만 문제다.
+    """
+    if not hwnd:
+        return
+    try:
+        SW_RESTORE = 9
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        fg = user32.GetForegroundWindow()
+        fg_tid = user32.GetWindowThreadProcessId(fg, None)
+        me_tid = ctypes.windll.kernel32.GetCurrentThreadId()
+        attached = False
+        if fg_tid and fg_tid != me_tid:
+            attached = bool(user32.AttachThreadInput(me_tid, fg_tid, True))
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0003)   # HWND_TOPMOST, NOMOVE|NOSIZE
+        user32.SetWindowPos(hwnd, -2, 0, 0, 0, 0, 0x0003)   # HWND_NOTOPMOST
+        if attached:
+            user32.AttachThreadInput(me_tid, fg_tid, False)
+        time.sleep(0.15)
+    except Exception:
+        pass
+
+
 def enable_per_monitor_dpi():
     # agent.py의 _enable_per_monitor_dpi_awareness()와 동일한 근거로 필수:
     # 파이썬 프로세스는 기본 DPI-unaware라 125% 스케일 환경에서 UIA가 돌려주는
@@ -442,11 +479,36 @@ def resolve_cond(uia, sel):
         conds.append(uia.CreatePropertyCondition(UIA_NameProperty, sel["name"]))
     if sel.get("className"):
         conds.append(uia.CreatePropertyCondition(UIA_ClassNameProperty, sel["className"]))
+    # 2026-08-10 (FileZilla "C:" 트리 vs 리스트 혼동 실측): comSafeTarget()이
+    # automationId/className 둘 다 없을 때만 controlTypeId를 싣는다 — 같은
+    # 화면에 같은 Name의 owner-drawn 컨트롤이 둘 이상(TreeItem/ListItem) 있을
+    # 때 FindFirst가 아무거나 먼저 걸리는 걸 막는 추가 AND 조건.
+    if sel.get("controlTypeId") is not None:
+        conds.append(uia.CreatePropertyCondition(
+            UIA_ControlTypeProperty, int(sel["controlTypeId"])))
     if not conds:
         return None
     cond = conds[0]
     for c in conds[1:]:
         cond = uia.CreateAndCondition(cond, c)
+    # 2026-08-08 실측 (FileZilla "파일 검색" 창 STEP 37 "click 닫기"): 그
+    # 창의 타이틀바 닫기 버튼은 automationId/className이 전혀 없어 셀렉터가
+    # Name="닫기" 단독이 된다. 같은 창 안의 ComboBox 드롭다운 화살표
+    # (automationId="DropDown")도 펼쳐진 상태에서는 Name이 "닫기"로 바뀐다
+    # (owner_window_for()의 2026-08-03 PuTTY 코멘트에 이미 같은 충돌이
+    # 기록돼 있음). 이전 스텝들이 드롭다운 3개를 펼쳐놓은 채였던 이번 케이스는
+    # FindFirst가 그 화살표 중 하나를 먼저 찾아 "성공"으로 보고했지만 실제
+    # 창은 닫히지 않았다. 드롭다운 화살표는 자기 자신을 가리킬 때 항상
+    # automationId="DropDown"을 셀렉터에 싣는다(comSafeTarget의
+    # isComboDropDownArrow) — 그러니 automationId/className이 전혀 없는
+    # (즉 진짜로 모호한) 순수 Name 매칭에서만 그 화살표들을 후보에서 제외한다.
+    if not sel.get("automationId") and not sel.get("className") and sel.get("name"):
+        try:
+            not_dropdown = uia.CreateNotCondition(
+                uia.CreatePropertyCondition(UIA_AutomationIdProperty, "DropDown"))
+            cond = uia.CreateAndCondition(cond, not_dropdown)
+        except Exception:
+            pass
     return cond
 
 

@@ -917,6 +917,76 @@ VOLATILE_MENUITEM_SESSION_META = {
 }
 
 
+# Ancestor+sibling-index scenario (2026-08-08, FileZilla wxToolBar buttons):
+# a toolbar button with NO Name, NO AutomationId, and nothing recoverable via
+# LegacyIAccessible either (agent.py's describe() fallback already tried and
+# failed) is addressed as "sibling #N of M with the same ControlType, under
+# the nearest named ancestor" — UIAInspector._ancestor_sibling_selector's
+# output. Codegen must route this through osAncestorInvoke(), NOT
+# osExpandCollapse() (no trigger to expand — the button is already visible)
+# and NOT the plain click branch (no automationId/name to build a WAD
+# selector from at all).
+ANCESTOR_INDEX_APP = "MockAncestorIndex"
+ANCESTOR_INDEX_EVENTS = [
+    make_event("click", name="", automation_id="", class_name="",
+               control_type="Button", app_name=ANCESTOR_INDEX_APP, index=1),
+]
+ANCESTOR_INDEX_EVENTS[0]["element"]["ancestorAutomationId"] = "MainToolBar"
+ANCESTOR_INDEX_EVENTS[0]["element"]["ancestorName"] = ""
+ANCESTOR_INDEX_EVENTS[0]["element"]["ancestorClassName"] = "ToolbarWindow32"
+ANCESTOR_INDEX_EVENTS[0]["element"]["ancestorHwnd"] = 445566
+ANCESTOR_INDEX_EVENTS[0]["element"]["ancestorSiblingIndex"] = 2
+ANCESTOR_INDEX_EVENTS[0]["element"]["ancestorSiblingCount"] = 8
+ANCESTOR_INDEX_EVENTS[0]["element"]["ancestorItemControlTypeId"] = 50000  # UIA_ButtonControlTypeId
+ANCESTOR_INDEX_SESSION_META = {
+    "action": "session_meta",
+    "app": ANCESTOR_INDEX_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
+
+def step_wdio_generate_ancestor_index():
+    print("\n[20] a nameless element with no LegacyIAccessible hint either is addressed by ancestor+sibling-index (FileZilla wxToolBar, 2026-08-08)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", ANCESTOR_INDEX_SESSION_META)
+    for ev in ANCESTOR_INDEX_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": ANCESTOR_INDEX_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (ancestor index) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped ancestor-index checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname, content = f.get("filename", ""), f.get("content", "")
+        check(
+            f"  {fname} routes the nameless button through osAncestorInvoke()",
+            "osAncestorInvoke(" in content,
+            "no automationId/name to build a WAD selector or an "
+            "osExpandCollapse trigger from — the only usable identifier is "
+            "'sibling #2 of 8 under MainToolBar', which only "
+            "osAncestorInvoke() knows how to resolve",
+        )
+        check(
+            f"  {fname} passes the recorded sibling index and count through",
+            "osAncestorInvoke(" in content and ", 2, 8, 50000)" in content,
+            "itemIndex/itemCount must survive verbatim into the call so "
+            "replay can refuse to guess if the live sibling count drifted "
+            "from what was recorded (§3 No false PASS)",
+        )
+        check(
+            f"  {fname} labels the step with the sibling position, not a bare 'click'",
+            "ancestor-sibling #2/8" in content,
+            "a bare '1:click' step label gives no diagnostic signal when "
+            "this kind of step fails at replay",
+        )
+
+
 def step_wdio_generate_volatile_menuitem_id():
     print("\n[16] a volatile popup-MenuItem id is rejected without dropping the trigger pairing (HeidiSQL 더보기, 2026-08-04)")
     request("DELETE", "/api/events")
@@ -1052,6 +1122,66 @@ COMBOBOXEX_RECLICK_EVENTS[0]["element"]["hwnd"] = 2690052  # equals nothing here
 COMBOBOXEX_RECLICK_SESSION_META = {
     "action": "session_meta",
     "app": COMBOBOXEX_RECLICK_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
+# Reused AutomationId on a cross-window click, resolved via comSafeTarget's
+# dropNameIfStableId (2026-08-06, real FileZilla Site Manager repro). Site
+# Manager reuses automationId "5999" across every Edit field (Host/User/
+# Password/local+remote dir) — confirmed 2026-07-19 for the WAD-path selector
+# (wdioSelectorById's ambiguousIds check), but the COM cross-window click
+# branch (server.js ~5197) built its target via comSafeTarget(el,
+# {dropNameIfStableId:true}) with no such check, so it dropped Name whenever
+# the id merely LOOKED stable (not a window handle / render counter /
+# volatile menu id) — which "5999" always does. osScopedInvoke.py's
+# resolve_cond() then matched on automationId+className alone, and its
+# FindFirst always returns the FIRST same-id field in the dialog regardless
+# of which one was actually clicked. Live symptom: every click AND every
+# type after the first Edit field landed on that first field instead —
+# 사용자(U)/비밀번호(W)/기본 원격 디렉터리(E) clicks all resolved to 호스트(H)/
+# 기본 로컬 디렉터리(L), and a checkbox click landed on an unrelated control
+# hard enough to flip verified_toggle_click's before/after check into a false
+# PASS (§3 "No false PASS" — the toggle it verified was not the one asked
+# for). The DropDown-arrow pair proves the fix doesn't overcorrect: their
+# automationId is ALSO reused, but the Name is the state-dependent 열기/닫기
+# label dropNameIfStableId exists to strip (2026-07-14 PuTTY regression
+# class) — reviving it would recreate that bug.
+AMBIGUOUS_CROSSWINDOW_APP = "MockAmbiguousCrossWindow"
+AMBIGUOUS_CROSSWINDOW_EVENTS = [
+    # Main-window click — establishes recordedRect; not itself cross-window.
+    make_event("click", name="Site Manager", automation_id="siteManagerBtn",
+               class_name="Button", control_type="Button",
+               app_name=AMBIGUOUS_CROSSWINDOW_APP, index=1,
+               winLeft=100, winTop=100, winWidth=600, winHeight=400),
+    # Dialog Edit fields sharing automationId "5999" with distinct Names —
+    # each carries its own rootHwndHex (as a real dialog capture would) so
+    # mergeCrossWindowTriggerClicks doesn't swallow them into the trigger
+    # above.
+    make_event("click", name="Host:", automation_id="5999", class_name="Edit",
+               control_type="Edit", app_name=AMBIGUOUS_CROSSWINDOW_APP, index=2,
+               winLeft=200, winTop=200, winWidth=300, winHeight=200,
+               rootHwndHex="AAAA"),
+    make_event("click", name="User:", automation_id="5999", class_name="Edit",
+               control_type="Edit", app_name=AMBIGUOUS_CROSSWINDOW_APP, index=3,
+               winLeft=200, winTop=200, winWidth=300, winHeight=200,
+               rootHwndHex="AAAA"),
+    # Same dialog's DropDown arrow, opened twice — automationId also reused,
+    # but Name flips 닫기/열기 with open/closed state. Must stay name-dropped.
+    make_event("click", name="닫기", automation_id="DropDown", class_name="",
+               control_type="Button", app_name=AMBIGUOUS_CROSSWINDOW_APP, index=4,
+               winLeft=200, winTop=200, winWidth=300, winHeight=200,
+               rootHwndHex="AAAA"),
+    make_event("click", name="열기", automation_id="DropDown", class_name="",
+               control_type="Button", app_name=AMBIGUOUS_CROSSWINDOW_APP, index=5,
+               winLeft=200, winTop=200, winWidth=300, winHeight=200,
+               rootHwndHex="AAAA"),
+]
+AMBIGUOUS_CROSSWINDOW_SESSION_META = {
+    "action": "session_meta",
+    "app": AMBIGUOUS_CROSSWINDOW_APP,
     "platform": PLATFORM,
     "timestamp": time.time(),
     "isElectron": False,
@@ -2849,6 +2979,58 @@ def step_wdio_generate_combobox_ex_reclick_drops_name():
         )
 
 
+def step_wdio_generate_ambiguous_id_crosswindow_keeps_name():
+    print("\n[18] A cross-window click target keeps Name when its AutomationId is reused with a different Name elsewhere (FileZilla Site Manager \"5999\", 2026-08-06)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", AMBIGUOUS_CROSSWINDOW_SESSION_META)
+    for ev in AMBIGUOUS_CROSSWINDOW_EVENTS:
+        request("POST", "/api/events", ev)
+
+    status, body = request("POST", "/api/generate", {
+        "appName": AMBIGUOUS_CROSSWINDOW_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (ambiguous id cross-window) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped ambiguous-id cross-window checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname = f.get("filename", "")
+        content = f.get("content", "")
+        check(
+            f"  {fname} keeps 'Host:' Name on the first reused-id Edit field",
+            '{"automationId":"5999","className":"Edit","name":"Host:"}' in content,
+            "comSafeTarget's dropNameIfStableId dropped Name whenever "
+            "automationId merely LOOKED stable, with no check for whether it "
+            "was actually unique in this dialog — FileZilla Site Manager "
+            "reuses \"5999\" across every Edit field",
+        )
+        check(
+            f"  {fname} keeps 'User:' Name on the second reused-id Edit field (not silently dropped like Host's)",
+            '{"automationId":"5999","className":"Edit","name":"User:"}' in content,
+            "with Name dropped, osScopedInvoke.py's resolve_cond() matches "
+            "only on automationId+className, and FindFirst always returns "
+            "the FIRST same-id field in the dialog — measured live: this "
+            "click and its following type() both silently landed on 호스트(H) "
+            "instead of 사용자(U)",
+        )
+        check(
+            f"  {fname} does NOT resurrect Name on the reused DropDown arrow (must stay overcorrection-proof)",
+            content.count('{"automationId":"DropDown","className":"","name":""}') >= 2,
+            "automationId=\"DropDown\" is ALSO reused, but its Name is the "
+            "state-dependent 열기/닫기 label that dropNameIfStableId exists to "
+            "strip (2026-07-14 PuTTY regression class) — the ambiguousIds "
+            "rescue must exclude isComboDropDownArrow/"
+            "isStateDependentValueDisplay controls or it reintroduces that bug",
+        )
+        check(
+            f"  {fname} never leaks either DropDown click's captured Name (닫기/열기)",
+            '"name":"닫기"' not in content and '"name":"열기"' not in content,
+            "a state-dependent Name must never reach a generated selector, "
+            "with or without the ambiguousIds fix",
+        )
+
+
 def step_delete_event():
     print("\n[8] Event row delete (6 inject -> 1 delete -> 5 remain)")
     request("DELETE", "/api/events")
@@ -3117,6 +3299,42 @@ def step_wad_boundary_intact():
         )
 
 
+def step_wad_type_success_is_verified():
+    """A 200 from WAD element/value is not proof that native UI changed.
+
+    FileZilla Quick Connect reproduced this on 2026-08-06: host/user/port
+    calls all logged success while their live UIA ValuePattern stayed empty.
+    The generated simple and session type paths must therefore share a
+    verification wrapper before treating WAD typing as complete.
+    """
+    print("\n[19] WAD type success is verified before replay continues")
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    targets = [
+        (APP_NAME, f"{APP_NAME}TestById.js", "simple"),
+        (SESSION_APP, f"{SESSION_APP}TestById.js", "session"),
+    ]
+    for app, js_name, mode in targets:
+        path = os.path.join(repo_root, "generated-wdio", app, js_name)
+        if not os.path.exists(path):
+            check(f"  [{mode}] {js_name} generated", False, f"missing at {path}")
+            continue
+        with open(path, encoding="utf-8") as fh:
+            js = _strip_embedded_helpers(fh.read())
+        check(
+            f"  [{mode}] generated type code defines _typeVerified()",
+            "async function _typeVerified(" in js,
+            "FileZilla showed WAD element/value returning success while the "
+            "actual native Edit value remained empty; generated tests need a "
+            "post-WAD verification wrapper before accepting that success",
+        )
+        check(
+            f"  [{mode}] ordinary Edit type steps call _typeVerified()",
+            "await _typeVerified(" in js,
+            "checking helper existence alone is insufficient: simple and "
+            "session codegen must route their normal Edit type steps through it",
+        )
+
+
 GOLDEN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden")
 
 
@@ -3335,9 +3553,12 @@ def main():
     step_wdio_generate_hwnd_trigger_keeps_name()
     step_wdio_generate_volatile_menuitem_id()
     step_wdio_generate_dup_dropdown_position_disambiguation()
+    step_wdio_generate_ambiguous_id_crosswindow_keeps_name()
+    step_wdio_generate_ancestor_index()
     step_com_sendinput_helpers()
     step_esc_recovery_guards()
     step_wad_boundary_intact()
+    step_wad_type_success_is_verified()
     step_golden_recordings()
 
     passed = sum(_results)

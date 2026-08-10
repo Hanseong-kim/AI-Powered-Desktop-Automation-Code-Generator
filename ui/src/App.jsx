@@ -111,9 +111,18 @@ export default function App() {
     }
   }
 
-  async function handleDeleteEvent(arrayIndex) {
+  async function handleDeleteEvent(indexOrIndices) {
+    // EventTable may pass a single array index (plain row) or an array of
+    // indices (a merged click/click/doubleClick row — see its grouping
+    // logic). Deleting must go highest-index-first: the server's
+    // deleteEvent(index) re-indexes the remaining array on every call, so
+    // deleting low-to-high would shift indices out from under later deletes.
+    const indices = Array.isArray(indexOrIndices) ? indexOrIndices : [indexOrIndices];
+    const descending = [...indices].sort((a, b) => b - a);
     try {
-      await deleteEvent(arrayIndex);
+      for (const idx of descending) {
+        await deleteEvent(idx);
+      }
       // Server broadcasts snapshot; onSnapshot will update state.
     } catch (e) {
       addToast('warn', `Delete failed: ${e.message}`);

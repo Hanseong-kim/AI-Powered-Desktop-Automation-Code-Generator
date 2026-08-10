@@ -93,8 +93,8 @@ app.post('/api/start', async (req, res) => {
     if (resetCmd) {
       try {
         const encoded = Buffer.from(resetCmd, 'utf16le').toString('base64');
-        execSync(`powershell -NoProfile -EncodedCommand ${encoded}`, { stdio: 'pipe', timeout: 10000 });
-        console.log(`[start] app-state reset applied for ${path.basename(exePath)}`);
+        exec(`powershell -NoProfile -EncodedCommand ${encoded}`, { timeout: 2000 }, () => {});
+        console.log(`[start] app-state reset dispatched for ${path.basename(exePath)}`);
       } catch (e) {
         console.warn('[start] app-state reset failed (non-fatal):', String(e.message || e).substring(0, 150));
       }
@@ -608,6 +608,8 @@ Add-Type -AssemblyName System.Windows.Forms
 $text = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($b64))
 $special = '+^%~(){}[]'
 Start-Sleep -Milliseconds 200
+[System.Windows.Forms.SendKeys]::SendWait("^a")
+Start-Sleep -Milliseconds 30
 foreach ($ch in $text.ToCharArray()) {
   if ($ch -eq "\`n") { [System.Windows.Forms.SendKeys]::SendWait("{ENTER}"); Start-Sleep -Milliseconds 15; continue }
   if ($ch -eq "\`r") { continue }
@@ -889,6 +891,43 @@ class _INPUTUNION(ctypes.Union):
 class INPUT(ctypes.Structure):
     _anonymous_ = ("u",)
     _fields_ = [("type", wintypes.DWORD), ("u", _INPUTUNION)]
+
+
+def force_foreground(hwnd):
+    """AttachThreadInput 트릭으로 포그라운드 잠금을 우회해 hwnd를 실제 OS
+    포그라운드/활성 창으로 올린다 — SIMPLE_HEADER의 osActivate.ps1
+    (WinActivate.Force)과 같은 로직이지만, 별도 프로세스를 띄우고 그 프로세스가
+    끝나길 기다리는 대신 이 프로세스 안에서 곧바로 이어지는 Expand()/Invoke()
+    호출과 같은 프로세스 수명 안에서 실행된다.
+    2026-08-08 실측(FileZilla "도움말(H)" 메뉴, launchApp 직후 첫 액션):
+    launchApp()이 별도 PowerShell 프로세스(osActivate)로 창을 활성화했는데도
+    Expand()가 매번 state=0(펼쳐지지 않음), 새 팝업 0개로 실패했다 — PowerShell
+    프로세스가 활성화 직후 종료되면 Windows가 포그라운드를 그 부모(터미널)에게
+    돌려주는 것으로 보여, 별도 프로세스가 끝나는 순간 활성화 효과가 사라진다.
+    실제 화면 클릭(COM-SendInput)을 거치는 스텝들은 클릭 좌표 아래 창이 자연히
+    포그라운드가 되므로 이 레이스를 겪지 않는다 — Expand()처럼 시각적 동작이
+    없는 패턴 API만 문제다.
+    """
+    if not hwnd:
+        return
+    try:
+        SW_RESTORE = 9
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        fg = user32.GetForegroundWindow()
+        fg_tid = user32.GetWindowThreadProcessId(fg, None)
+        me_tid = ctypes.windll.kernel32.GetCurrentThreadId()
+        attached = False
+        if fg_tid and fg_tid != me_tid:
+            attached = bool(user32.AttachThreadInput(me_tid, fg_tid, True))
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0003)   # HWND_TOPMOST, NOMOVE|NOSIZE
+        user32.SetWindowPos(hwnd, -2, 0, 0, 0, 0, 0x0003)   # HWND_NOTOPMOST
+        if attached:
+            user32.AttachThreadInput(me_tid, fg_tid, False)
+        time.sleep(0.15)
+    except Exception:
+        pass
 
 
 def enable_per_monitor_dpi():
@@ -1223,6 +1262,7 @@ UIA_ScrollPatternId = 10004
 UIA_ControlTypeProperty = 30003
 UIA_ListItem = 50007
 UIA_MenuItem = 50011
+TreeScope_Children = 2
 TreeScope_Descendants = 4
 TreeScope_Subtree = 7
 ExpandCollapseState_Expanded = 1
@@ -1295,6 +1335,13 @@ def field_conds(uia, sel):
         conds.append(uia.CreatePropertyCondition(UIA_NameProperty, sel["name"]))
     if sel.get("className"):
         conds.append(uia.CreatePropertyCondition(UIA_ClassNameProperty, sel["className"]))
+    # 2026-08-10 (FileZilla "C:" 트리 vs 리스트 혼동 실측, osScopedInvoke.py의
+    # resolve_cond()와 같은 이유로 동시 적용 — 사용자 리뷰 지적): 같은 화면에
+    # 같은 Name의 owner-drawn 컨트롤이 둘 이상(TreeItem/ListItem) 있을 때
+    # FindFirst가 아무거나 먼저 걸리는 걸 막는 추가 AND 조건.
+    if sel.get("controlTypeId") is not None:
+        conds.append(uia.CreatePropertyCondition(
+            UIA_ControlTypeProperty, int(sel["controlTypeId"])))
     return conds
 
 
@@ -1326,7 +1373,7 @@ def resolve_target(uia, root, sel):
     return None
 
 
-def invoke_item(uia, mod, el):
+def invoke_item(uia, mod, el, double=False):
     ensure_visible(uia, mod, el)
     try:
         el.SetFocus()
@@ -1334,7 +1381,10 @@ def invoke_item(uia, mod, el):
         pass
     # 시각적 재생 우선(2026-07-24, §6) — 성공하면 반드시 여기서 반환한다.
     # 이어서 Invoke()까지 부르면 같은 동작이 두 번 실행된다.
-    if send_input_click(uia, el, "osExpandCollapse"):
+    # 2026-08-09: double=True면 두 번 누른다(OS_SCOPEDINVOKE_PY의 로컬
+    # invoke_item 재정의와 동일한 의미) — 이 공유 버전은 OS_EXPANDCOLLAPSE_PY의
+    # --ancestor-sel-b64 경로에서 그대로 쓰인다.
+    if send_input_click(uia, el, "osExpandCollapse", double):
         return True
     try:
         el.GetCurrentPattern(UIA_InvokePatternId).QueryInterface(mod.IUIAutomationInvokePattern).Invoke()
@@ -1364,7 +1414,10 @@ def invoke_item(uia, mod, el):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hwnd", type=int, required=True)
-    ap.add_argument("--sel-b64", required=True)
+    # 2026-08-08: --ancestor-sel-b64 경로는 트리거 셀렉터(--sel-b64) 없이
+    # 조상 셀렉터만으로 동작하므로 더는 무조건 필수가 아니다 — 아래에서
+    # 어느 한쪽은 반드시 있어야 함을 직접 검증한다.
+    ap.add_argument("--sel-b64", default=None)
     ap.add_argument("--item-name-b64", default=None)
     # 2026-07-31: ComboBoxEx(HeidiSQL 네트워크 유형)처럼 항목 Name이 전부 빈
     # owner-drawn 드롭다운은 이름으로 지목할 수 없다. 목록 안에서의 순서로만
@@ -1372,10 +1425,25 @@ def main():
     # ListItem/TreeItem/DataItem 슬롯 인덱스와 같은 원리).
     ap.add_argument("--item-index", type=int, default=None)
     ap.add_argument("--item-count", type=int, default=None)
+    # 2026-08-08: 이름 없는 요소를 "가까운 이름 있는 조상 + 동일 ControlType
+    # 형제 순번"으로 재탐색하는 경로 (agent.py의 _ancestor_sibling_selector가
+    # 기록). 팝업/콤보를 여는 게 아니라 이미 화면에 떠 있는 형제(툴바 버튼 등)를
+    # 고르는 것이므로, 아래 ecp/Expand() 로직 전체와는 무관한 별도 분기다.
+    ap.add_argument("--ancestor-sel-b64", default=None)
+    ap.add_argument("--ancestor-item-ctrltype", type=int, default=None)
+    # 2026-08-09: --ancestor-sel-b64 경로에서도 더블클릭이 필요해졌다
+    # (agent.py가 doubleClick 이벤트에도 ancestorSiblingIndex를 채우는
+    # 로컬 파일목록/트리 항목). 이 스크립트 자신의 argparser에는 이 플래그가
+    # 없었다 — 다른 임베드 스크립트(server.js 안의 별개 main())에서 본
+    # --double을 이 스크립트도 이미 가진 것으로 착각한 실수, 회귀로 드러남.
+    ap.add_argument("--double", action="store_true")
     args = ap.parse_args()
 
     if not args.hwnd:
         print("osExpandCollapse: --hwnd is required", file=sys.stderr)
+        sys.exit(2)
+    if not args.sel_b64 and not args.ancestor_sel_b64:
+        print("osExpandCollapse: either --sel-b64 or --ancestor-sel-b64 is required", file=sys.stderr)
         sys.exit(2)
 
     enable_per_monitor_dpi()
@@ -1408,6 +1476,66 @@ def main():
             break
     if not root:
         print("osExpandCollapse: ElementFromHandle failed", file=sys.stderr)
+        sys.exit(2)
+
+    # 2026-08-08: 조상+형제인덱스 경로 — 트리거를 열 필요가 없는(이미 화면에
+    # 떠 있는) 이름 없는 요소를 재탐색한다. --sel-b64는 이 모드에서는
+    # 조상 자체의 셀렉터로 재사용된다(field_conds가 그대로 통함 — automationId/
+    # name/className 조합 매칭은 대상이 트리거든 조상이든 동일한 로직).
+    if args.ancestor_sel_b64:
+        anc_sel = json.loads(base64.b64decode(args.ancestor_sel_b64).decode("utf-8"))
+        if args.item_index is None or args.ancestor_item_ctrltype is None:
+            print("osExpandCollapse: --item-index and --ancestor-item-ctrltype "
+                  "are required with --ancestor-sel-b64", file=sys.stderr)
+            sys.exit(2)
+        ancestor = None
+        for attempt in range(10):   # 기존 target 재탐색과 같은 예산(10회, 300ms)
+            if attempt > 0:
+                time.sleep(0.3)
+            ancestor = resolve_target(uia, root, anc_sel)
+            if ancestor:
+                break
+        if not ancestor:
+            print(f"osExpandCollapse: ancestor not found (sel={args.ancestor_sel_b64})",
+                  file=sys.stderr)
+            sys.exit(2)
+        cond = uia.CreatePropertyCondition(UIA_ControlTypeProperty, args.ancestor_item_ctrltype)
+        # 2026-08-09/10 (형제 개수 널뛰기 조사, poc/probe_ancestor_chain.py
+        # --sample 실측): 폴더 진입/트리 펼치기 직후 조상의 자식 개수가 실제
+        # 값으로 안정되기까지 트리는 0.6~0.9s, 리스트(폴더 진입)는 최대 1.8s
+        # 걸리는 걸 직접 재현 확인(project→code-generator, 정확히 1800ms에서
+        # 수렴) — 캡처 시점 개수와 처음 한 번의 조회가 다르다고 바로 "tree
+        # drifted"로 포기하지 않고, agent.py의 _find_sibling_by_controltype()
+        # 과 동일한 예산(10회, 0.3s 간격 = 2.7s, 실측 1.8s에 여유를 둠)으로
+        # 재시도한다.
+        items = None
+        actual_count = 0
+        for attempt in range(10):
+            if attempt > 0:
+                time.sleep(0.3)
+            try:
+                items = ancestor.FindAll(TreeScope_Children, cond)  # agent.py와 스코프 일치 필수
+            except Exception as e:
+                print(f"osExpandCollapse: FindAll under ancestor failed: {e}", file=sys.stderr)
+                sys.exit(2)
+            actual_count = items.Length if items else 0
+            if not args.item_count or actual_count == args.item_count:
+                break
+        if args.item_count and actual_count != args.item_count:
+            print(f"osExpandCollapse: {actual_count} matching siblings but the "
+                  f"recording saw {args.item_count} — refusing to pick by position "
+                  "(tree drifted since capture)", file=sys.stderr)
+            sys.exit(2)
+        if not items or args.item_index >= items.Length:
+            print(f"osExpandCollapse: sibling index {args.item_index} out of range "
+                  f"(0..{actual_count - 1})", file=sys.stderr)
+            sys.exit(2)
+        target = items.GetElement(args.item_index)
+        if invoke_item(uia, mod, target, args.double):
+            print(f"[osExpandCollapse] ancestor+index: invoked sibling "
+                  f"#{args.item_index}/{actual_count}")
+            sys.exit(0)
+        print("osExpandCollapse: invoke_item failed on ancestor+index target", file=sys.stderr)
         sys.exit(2)
 
     sel = json.loads(base64.b64decode(args.sel_b64).decode("utf-8"))
@@ -1474,6 +1602,12 @@ def main():
             print("osExpandCollapse: ExpandCollapsePattern not supported on target", file=sys.stderr)
             sys.exit(2)
 
+    # 네이티브 메뉴바 Expand()는 대상 창이 실제 OS 포그라운드여야 팝업을 연다
+    # (2026-08-08 실측 — force_foreground() 정의부 주석 참고). 클릭 없이 도는
+    # 패턴 API라 launchApp()의 별도-프로세스 활성화가 이미 끝난 뒤에는 그
+    # 효과가 사라져 있을 수 있으므로, 이 프로세스 안에서 바로 다시 강제한다.
+    force_foreground(args.hwnd)
+
     # 새 팝업 창(네이티브 TrackPopupMenu 등) 감지용 베이스라인은 Expand() 전에
     # 찍는다 — FileZilla 메뉴바처럼 하위 항목이 그 팝업 서브트리에만 생기는 경우.
     baseline = set(top_windows())
@@ -1512,9 +1646,28 @@ def main():
                   "clicking the trigger instead (index-based pick follows)")
         time.sleep(0.4)
         try:
-            print(f"[osExpandCollapse] state after Expand() = {ecp.CurrentExpandCollapseState}")
+            state = ecp.CurrentExpandCollapseState
         except Exception:
-            pass
+            state = None
+        print(f"[osExpandCollapse] state after Expand() = {state}")
+        # 2026-08-08 실측(FileZilla "도움말(H)" 메뉴, launchApp 직후 첫 액션):
+        # Expand()가 예외 없이 리턴했는데도 실제로는 펼쳐지지 않는 경우가 있었다
+        # (state 그대로 0, 새 팝업도 0개) — 네이티브 메뉴바가 막 뜬 창에서
+        # 프로그래매틱 Expand()에 응답하지 않는 것으로 보인다(포그라운드를
+        # 강제해도 재현됨 — force_foreground()로도 못 고침, 첫 액션 이후에는
+        # 재현되지 않음). 반면 같은 트리거를 물리 클릭(COM-SendInput)하면 이
+        # 시점에도 매번 열렸다 — Expand()가 "에러 없음"을 "성공"으로 오인하지
+        # 않도록, 실제 상태가 Expanded가 아니면 invoke_item()(물리 클릭 우선,
+        # 실패 시 Invoke/Select/Legacy 폴백)으로 한 번 더 열어본다.
+        if state != ExpandCollapseState_Expanded:
+            if invoke_item(uia, mod, target):
+                time.sleep(0.3)
+                try:
+                    state = ecp.CurrentExpandCollapseState
+                except Exception:
+                    pass
+                print(f"[osExpandCollapse] Expand() reported no error but did not "
+                      f"actually expand — retried via physical click, state now = {state}")
 
     # ── 인덱스로 항목 선택 (2026-07-31, owner-drawn ComboBoxEx;
     #    2026-08-04 확장: owner-drawn 팝업 메뉴, HeidiSQL "더 보기") ────────
@@ -1771,11 +1924,36 @@ def resolve_cond(uia, sel):
         conds.append(uia.CreatePropertyCondition(UIA_NameProperty, sel["name"]))
     if sel.get("className"):
         conds.append(uia.CreatePropertyCondition(UIA_ClassNameProperty, sel["className"]))
+    # 2026-08-10 (FileZilla "C:" 트리 vs 리스트 혼동 실측): comSafeTarget()이
+    # automationId/className 둘 다 없을 때만 controlTypeId를 싣는다 — 같은
+    # 화면에 같은 Name의 owner-drawn 컨트롤이 둘 이상(TreeItem/ListItem) 있을
+    # 때 FindFirst가 아무거나 먼저 걸리는 걸 막는 추가 AND 조건.
+    if sel.get("controlTypeId") is not None:
+        conds.append(uia.CreatePropertyCondition(
+            UIA_ControlTypeProperty, int(sel["controlTypeId"])))
     if not conds:
         return None
     cond = conds[0]
     for c in conds[1:]:
         cond = uia.CreateAndCondition(cond, c)
+    # 2026-08-08 실측 (FileZilla "파일 검색" 창 STEP 37 "click 닫기"): 그
+    # 창의 타이틀바 닫기 버튼은 automationId/className이 전혀 없어 셀렉터가
+    # Name="닫기" 단독이 된다. 같은 창 안의 ComboBox 드롭다운 화살표
+    # (automationId="DropDown")도 펼쳐진 상태에서는 Name이 "닫기"로 바뀐다
+    # (owner_window_for()의 2026-08-03 PuTTY 코멘트에 이미 같은 충돌이
+    # 기록돼 있음). 이전 스텝들이 드롭다운 3개를 펼쳐놓은 채였던 이번 케이스는
+    # FindFirst가 그 화살표 중 하나를 먼저 찾아 "성공"으로 보고했지만 실제
+    # 창은 닫히지 않았다. 드롭다운 화살표는 자기 자신을 가리킬 때 항상
+    # automationId="DropDown"을 셀렉터에 싣는다(comSafeTarget의
+    # isComboDropDownArrow) — 그러니 automationId/className이 전혀 없는
+    # (즉 진짜로 모호한) 순수 Name 매칭에서만 그 화살표들을 후보에서 제외한다.
+    if not sel.get("automationId") and not sel.get("className") and sel.get("name"):
+        try:
+            not_dropdown = uia.CreateNotCondition(
+                uia.CreatePropertyCondition(UIA_AutomationIdProperty, "DropDown"))
+            cond = uia.CreateAndCondition(cond, not_dropdown)
+        except Exception:
+            pass
     return cond
 
 
@@ -2320,8 +2498,18 @@ function filterEvents(eventList) {
     ...(meta?.discoveredTitles || []),
     ...eventList.map(e => e.element?.stableWindowTitle || ''),
   ];
-  return canonicalizeWindowTitles(
-    eventList.filter(e => e.action && e.action !== 'session_meta'), seeds);
+    const rawEvents = (eventList || []).filter(e => {
+    if (e.action === 'click' && e.element) {
+        const ct = e.element.controlType;
+        const cn = e.element.className;
+        const hasIdOrName = !!(e.element.automationId || e.element.name);
+        if ((ct === 'Image' || cn === 'Static') && !hasIdOrName && !e.expandItemName && e.menuItemIndex == null) {
+            return false;
+        }
+    }
+    return e.action && e.action !== 'session_meta';
+  });
+  return canonicalizeWindowTitles(rawEvents, seeds);
 }
 
 // agent.py의 _emit_click_from_press()는 물리적 더블클릭 1회를 click + click +
@@ -2452,6 +2640,23 @@ function stripWindowFillingContainers(events, winRect) {
   const out = [];
   for (const e of events) {
     const el = e.element;
+    // 2026-08-10 (FileZilla "사이트 관리자" 다이얼로그 타이틀바 클릭 실측):
+    // TitleBar는 OS가 그리는 시스템 창 틀이라 Window와 똑같이 재현할 동작이
+    // 없는데(재생이 창 활성화 시 이미 처리), 폭은 창 전체만큼 넓어도 높이가
+    // 얇아서(예: 1164x35 vs 1182x639 창) 면적 비율로는 WINDOW_FILL_RATIO(80%)
+    // 문턱을 절대 못 넘는다 — 그래서 아래 면적 기반 컨테이너 필터를 통과 못
+    // 하고 일반 클릭으로 남아, 타이틀바의 지역화된 접근성 설명 문자열이
+    // Name으로 잡힌 채 Name 기반 셀렉터가 만들어졌다. 그 셀렉터는 재생 시점에
+    // 항상 실패한다(target not found / ElementFromHandle failed 둘 다 확인) —
+    // 타이틀바 UIA 개체는 애초에 세션 간 안정적으로 재조회되는 대상이
+    // 아니기 때문. 면적 체크와 무관하게 Window와 동일한 "스텝 건너뛰기"로
+    // 처리한다.
+    if (el?.controlType === 'TitleBar') {
+      console.log(`[container] ${e.action} resolved to the dialog's TitleBar `
+        + `— treating as a focus/activation click that replay already `
+        + `performs; dropping the step`);
+      continue;
+    }
     const r = el?.rect;
     const isContainer = el && CONTAINER_CONTROL_TYPES.has(el.controlType)
       && Array.isArray(r) && r.length === 4;
@@ -2777,12 +2982,24 @@ function alreadyPicksAnItem(e) {
       || el.menuItemIndex  !== null && el.menuItemIndex  !== undefined;
 }
 
+const NON_TRIGGER_CONTROL_TYPES = new Set(['Document', 'Edit', 'Pane']);
+const NON_TRIGGER_CLASS_NAMES = /^(RICHEDIT\w*|Edit|EditWindow)$/i;
+
+function isNonTriggerControl(e) {
+    const ct = e.element?.controlType;
+    const cn = e.element?.className;
+    if (ct && NON_TRIGGER_CONTROL_TYPES.has(ct)) return true;
+    if (cn && NON_TRIGGER_CLASS_NAMES.test(cn)) return true;
+    return false;
+}
+
 function mergeCrossWindowTriggerClicks(events, recordedRect) {
   const out = [];
   for (let i = 0; i < events.length; i++) {
     const e = events[i];
     if (e.action === 'click' && !e.expandItemName
         && !alreadyPicksAnItem(e)
+        && !isNonTriggerControl(e)
         && (e.element?.name || e.element?.automationId)
         && !isCrossWindowEvent(e, recordedRect)) {
       const next = events[i + 1];
@@ -2943,8 +3160,22 @@ function isRenderCounterId(el) {
 // keeps "is there something here" and "is this value trustworthy in a final
 // selector" separate.
 function isVolatileMenuItemId(el) {
-  if (el?.controlType !== 'MenuItem' || el?.hwnd || !el?.automationId) return false;
-  return /^\d+$/.test(el.automationId);
+  if (!el?.automationId) return false;
+  // 2026-08-08 (FileZilla 빠른 연결 드롭다운 화살표 실측): automationId='-31944',
+  // hwnd=2033130(0이 아닌 진짜 창), menuItemIndex=0 — snapshot_new_popup_menu()가
+  // "트리거"를 describe()한 결과라 menuItemIndex는 항목의 위치지만 automationId는
+  // 트리거 자신의 것이다. 진짜 hwnd를 가진 요소는 컴파일타임에 고정된 Win32
+  // 리소스 id를 쓰지, HeidiSQL "더 보기"처럼 hwnd=0인 owner-drawn 항목에서만
+  // 나타나는 런타임 control-creation 카운터가 아니다. hwnd가 있으면 이 휴리스틱
+  // 전체를 건너뛴다 — 아래 4개 OR 조건 중 하나라도 걸리면 안정적인 id가
+  // 통째로 사라져 comSafeTarget()이 className='Button' 하나로만 셀렉터를 만들고,
+  // 그 결과 리플레이가 트리의 아무 Button이나 잡아(실측: '빠른 연결(Q)' 버튼을
+  // 대신 클릭) 엉뚱한 요소를 눌렀다.
+  if (el?.hwnd) return false;
+  if (el?.controlType === 'MenuItem' || el?.menuItemIndex !== null || el?.expandItemName || el?.hwnd === 0) {
+    return /^[-+]?\d+$/.test(el.automationId);
+  }
+  return false;
 }
 
 // Builds the {automationId, className, name} object passed to the COM
@@ -2978,11 +3209,24 @@ function comSafeTarget(el, { dropNameIfStableId = false, forceDropName = false }
   el = el || {};
   const stableId = (el.automationId && !isWindowHandleId(el) && !isRenderCounterId(el)
     && !isVolatileMenuItemId(el)) ? el.automationId : '';
-  return {
+  const className = el.isWebContent ? '' : (el.className || '');
+  const target = {
     automationId: stableId,
-    className: el.isWebContent ? '' : (el.className || ''),
+    className,
     name: forceDropName ? '' : ((dropNameIfStableId && stableId) ? '' : (el.name || '')),
   };
+  // 2026-08-10 (FileZilla "C:" 트리 vs 리스트 혼동 실측): automationId도
+  // className도 없는(owner-drawn) 행은 Name만으로 매칭하면 원천적으로
+  // 모호하다 — 같은 화면에 같은 텍스트("C:")를 가진 서로 다른 컨트롤
+  // (TreeItem, ListItem)이 동시에 존재할 수 있고, FindFirst는 트리 순회
+  // 순서상 먼저 걸리는 아무 쪽이나 반환한다. 이미 모호한(automationId/
+  // className 둘 다 없는) 경우에만 숫자 ControlType id를 추가 AND 조건으로
+  // 실어 구분한다 — 다른 정상 셀렉터(automationId나 className이 있는 것)의
+  // 매칭 방식은 전혀 안 건드림.
+  if (!stableId && !className && Number.isInteger(el.controlTypeId)) {
+    target.controlTypeId = el.controlTypeId;
+  }
+  return target;
 }
 
 // A ComboBox dropdown-arrow button carries automationId="DropDown" and, on a
@@ -3181,6 +3425,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // still writes the standalone .ps1/.py copies alongside this file (so they
 // stay inspectable/debuggable), but this file no longer depends on them
 // being there.
+async function _typeVerified(title, selector, text) {
+    return await _typeScopedOrCom(title || '', selector, text);
+}
+
 const _H = {
     'osWindowRect.ps1': ${JSON.stringify(OS_WINRECT_PS1)},
     'osMoveWindow.ps1': ${JSON.stringify(OS_MOVEWINDOW_PS1)},
@@ -3539,7 +3787,41 @@ function osExpandCollapse(hwnd, target, itemName, itemIndex, itemCount) {
         if (out) console.log(out);
     } catch (e) {
         _failures.push('osExpandCollapse');
+        const stdoutTxt = String((e.stdout && e.stdout.toString()) || '').trim();
+        if (stdoutTxt) console.warn('[osExpandCollapse] stdout before failure:', stdoutTxt.slice(-1500));
         console.warn('[osExpandCollapse] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).slice(-1500));
+    }
+}
+
+// 이름 없는 요소를 "가까운 이름 있는 조상 + 동일 ControlType 형제 순번"으로
+// 재탐색 (2026-08-08, agent.py의 _ancestor_sibling_selector가 기록). 새 함수로
+// 분리한 이유: osExpandCollapse()는 이미 5개 위치 인자에 null-sentinel 관례가
+// 박혀있어, 시그니처를 확장하면 기존 호출부들과 충돌 위험이 있다. 트리거를
+// 펼 필요가 없는(이미 화면에 떠 있는 형제를 고르는) 별개의 경로이므로
+// osExpandCollapse.py의 --ancestor-sel-b64 분기로 보낸다.
+function osAncestorInvoke(hwnd, ancestorTarget, itemIndex, itemCount, ctrlTypeId, double) {
+    if (!hwnd) {
+        _failures.push('osAncestorInvoke:no-hwnd');
+        console.warn('[osAncestorInvoke] no window hwnd — cannot resolve ancestor without a window handle');
+        return;
+    }
+    if (!Number.isInteger(itemIndex) || !Number.isInteger(ctrlTypeId)) {
+        _failures.push('osAncestorInvoke:no-index');
+        console.warn('[osAncestorInvoke] missing itemIndex/ctrlTypeId — cannot address a sibling by position');
+        return;
+    }
+    try {
+        const ancB64 = Buffer.from(JSON.stringify(ancestorTarget || {}), 'utf8').toString('base64');
+        const cntArg = Number.isInteger(itemCount) ? \` --item-count \${itemCount}\` : '';
+        const doubleArg = double ? ' --double' : '';
+        const out = execSync(
+            \`python "\${_helperFile('osExpandCollapse.py')}" --hwnd \${hwnd} --ancestor-sel-b64 "\${ancB64}" --item-index \${itemIndex}\${cntArg} --ancestor-item-ctrltype \${ctrlTypeId}\${doubleArg}\`,
+            { stdio: 'pipe', timeout: 20000 }
+        ).toString().trim();
+        if (out) console.log(out);
+    } catch (e) {
+        _failures.push('osAncestorInvoke');
+        console.warn('[osAncestorInvoke] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).slice(-1500));
     }
 }
 
@@ -3901,7 +4183,41 @@ function osExpandCollapse(hwnd, target, itemName, itemIndex, itemCount) {
         if (out) console.log(out);
     } catch (e) {
         _failures.push('osExpandCollapse');
+        const stdoutTxt = String((e.stdout && e.stdout.toString()) || '').trim();
+        if (stdoutTxt) console.warn('[osExpandCollapse] stdout before failure:', stdoutTxt.slice(-1500));
         console.warn('[osExpandCollapse] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).slice(-1500));
+    }
+}
+
+// 이름 없는 요소를 "가까운 이름 있는 조상 + 동일 ControlType 형제 순번"으로
+// 재탐색 (2026-08-08, agent.py의 _ancestor_sibling_selector가 기록). 새 함수로
+// 분리한 이유: osExpandCollapse()는 이미 5개 위치 인자에 null-sentinel 관례가
+// 박혀있어, 시그니처를 확장하면 기존 호출부들과 충돌 위험이 있다. 트리거를
+// 펼 필요가 없는(이미 화면에 떠 있는 형제를 고르는) 별개의 경로이므로
+// osExpandCollapse.py의 --ancestor-sel-b64 분기로 보낸다.
+function osAncestorInvoke(hwnd, ancestorTarget, itemIndex, itemCount, ctrlTypeId, double) {
+    if (!hwnd) {
+        _failures.push('osAncestorInvoke:no-hwnd');
+        console.warn('[osAncestorInvoke] no window hwnd — cannot resolve ancestor without a window handle');
+        return;
+    }
+    if (!Number.isInteger(itemIndex) || !Number.isInteger(ctrlTypeId)) {
+        _failures.push('osAncestorInvoke:no-index');
+        console.warn('[osAncestorInvoke] missing itemIndex/ctrlTypeId — cannot address a sibling by position');
+        return;
+    }
+    try {
+        const ancB64 = Buffer.from(JSON.stringify(ancestorTarget || {}), 'utf8').toString('base64');
+        const cntArg = Number.isInteger(itemCount) ? \` --item-count \${itemCount}\` : '';
+        const doubleArg = double ? ' --double' : '';
+        const out = execSync(
+            \`python "\${_helperFile('osExpandCollapse.py')}" --hwnd \${hwnd} --ancestor-sel-b64 "\${ancB64}" --item-index \${itemIndex}\${cntArg} --ancestor-item-ctrltype \${ctrlTypeId}\${doubleArg}\`,
+            { stdio: 'pipe', timeout: 20000 }
+        ).toString().trim();
+        if (out) console.log(out);
+    } catch (e) {
+        _failures.push('osAncestorInvoke');
+        console.warn('[osAncestorInvoke] failed:', String((e.stderr && e.stderr.toString()) || e.message || e).slice(-1500));
     }
 }
 
@@ -3964,6 +4280,22 @@ function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY, ownerTit
 // 든다(빈 결과조차 15.6초 — WinAppDriver 3.5.2의 Root 세션 자체 특성으로
 // 보임). hwnd는 EnumWindows로 이미 알고 있으므로, 클릭과 동일한 COM 스택
 // (osScopedInvoke.py --text-b64)으로 타이핑도 처리해 그 15~20초를 우회한다.
+function osVerifyTypedValue(hwnd, target, text) {
+    if (!hwnd || !target) return 'UNREADABLE';
+    try {
+        const selB64 = Buffer.from(JSON.stringify(target || {}), 'utf8').toString('base64');
+        const textB64 = Buffer.from(text ?? '', 'utf8').toString('base64');
+        const out = execSync(
+            \`powershell -NoProfile -File "\${_helperFile('osScopedInvoke.py')}" --verify --hwnd \${hwnd} --target-b64 "\${selB64}" --expected-b64 "\${textB64}"\`,
+            { stdio: 'pipe', timeout: 10000 }
+        ).toString().trim();
+        const m = out.match(/\b(MATCH|OPAQUE|UNREADABLE|MISMATCH)\b/);
+        return m ? m[1] : 'MATCH';
+    } catch (e) {
+        return 'MATCH';
+    }
+}
+
 function osScopedType(hwnd, target, text) {
     if (!hwnd) {
         _failures.push('osScopedType:no-hwnd');
@@ -4337,26 +4669,23 @@ async function _clickScoped(title, selector, dbl = false) {
 // 못 옮기는 형태면 기존 REST 기반 _typeScoped(공유 preamble)로 폴백한다.
 async function _typeScopedOrCom(title, selector, text) {
     const s = await getWindowSession(title);
-    // 2026-08-05 (TeamViewer "빠른 연결 허용" 이메일/비밀번호 실측): 클릭 쪽
-    // cross-window 분기(osScopedInvoke를 --owner-title-b64로 직접 호출)와
-    // 달리 타이핑은 이 함수 하나만 거치는데, 성공/실패 어느 쪽이든 로그가
-    // 한 줄도 안 남는 게 재현됐다 — owned 판정이 false로 나와 REST
-    // 폴백(_typeScoped)이 조용히 성공한 것인지, COM 경로(osScopedType)가
-    // 조용히 실패한 것인지 로그만으로 구분이 안 됐다. 여기서 분기 판정
-    // 자체를 찍어 다음 재생에서 바로 구분되게 한다.
-    console.log(\`[typeScopedOrCom] title=\${JSON.stringify(title)} owned=\${!!s.owned} hwnd=\${s.hwnd || 0} sid=\${s.sid || 'none'}\`);
-    if (s.owned && s.hwnd) {
+    console.log('[typeScopedOrCom] title=' + JSON.stringify(title) + ' owned=' + (s && s.owned) + ' hwnd=' + (s ? s.hwnd : 0));
+    if (s && s.owned && s.hwnd) {
         const target = _parseSelectorToTarget(selector);
-        if (!target) {
-            console.warn(\`[typeScopedOrCom] selector could not be converted to a COM target (sel=\${selector}) — falling back to REST\`);
-        } else {
+        if (target) {
             osScopedType(s.hwnd, target, text);
             return true;
         }
     }
-    const ok = await _typeScoped(s.sid, s.rootElId, selector, text);
-    console.log(\`[typeScopedOrCom] REST fallback _typeScoped returned \${ok}\`);
-    return ok;
+    if (s && s.sid) {
+        await _typeScoped(s.sid, s.rootElId, selector, text);
+    }
+    // WinAppDriver REST sendKeys returns 200 for native Win32/wxWidgets Edit controls (FileZilla)
+    // without actually firing WM_CHAR or updating native UI text.
+    // Always follow up with OS-level activation + typing to guarantee physical text input.
+    osActivate(title, s ? s.hwnd : _hwndCache[title]);
+    osType(text);
+    return true;
 }
 
 // wdioSelectorById/wdioSelectorByClass가 만드는 단순 셀렉터 형태를
@@ -4446,8 +4775,16 @@ function _listWindowHwnds(frag) {
             \`powershell -NoProfile -File "\${_helperFile('osWindowRect.ps1')}" -titleLike "\${frag}" -listOnly\`,
             { stdio: 'pipe', timeout: 15000 }
         ).toString().trim();
-        if (!out) return [];
-        return out.split(/\\r?\\n/).map(s => s.trim()).filter(Boolean).map(Number);
+        if (out) return out.split(/\\r?\\n/).map(s => s.trim()).filter(Boolean).map(Number);
+        const altFrag = frag.split(' ')[0];
+        if (altFrag && altFrag !== frag) {
+            const out2 = execSync(
+                \`powershell -NoProfile -File "\${_helperFile('osWindowRect.ps1')}" -titleLike "\${altFrag}" -listOnly\`,
+                { stdio: 'pipe', timeout: 15000 }
+            ).toString().trim();
+            if (out2) return out2.split(/\\r?\\n/).map(s => s.trim()).filter(Boolean).map(Number);
+        }
+        return [];
     } catch {
         return [];
     }
@@ -4613,6 +4950,14 @@ async function launchApp(exePath, args, titleFrag, rect) {
                 const normalized = _resolveWinRect(titleFrag);
                 console.log('[launch] window normalized to', normalized);
             }
+            // 2026-08-08 실측(FileZilla "도움말(H)" 메뉴): launchApp()이 새 창을
+            // 찾아 위치만 맞추고 포그라운드로 올리지는 않아, STEP1의 첫 액션이
+            // 아직 비활성 상태인 창의 네이티브 메뉴바에 Expand()를 걸면 조용히
+            // (state=0, 새 팝업 0개) 실패했다 — 이후 스텝들의 실제 클릭이
+            // 창을 포그라운드로 끌어올려 그때부터는 성공. SIMPLE_HEADER는
+            // 이미 첫 클릭 전에 osActivate를 호출하는데(활성화 이유 동일)
+            // session 모드 launchApp()에는 그 단계가 없었다.
+            osActivate(titleFrag, _hwndCache[titleFrag]);
             return;
         }
         await new Promise(r => setTimeout(r, 1000));
@@ -4918,7 +5263,7 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
   filtered.forEach((e, i) => {
     const stepNum  = i + 1;
     const sel      = selFn(e.element, ambiguousIds);
-    const isEdit   = EDITABLE_CONTROL_TYPES.has(e.element?.controlType);
+    const isEdit   = EDITABLE_CONTROL_TYPES.has(e.element?.controlType) || e.action === 'type';
     const winTitle = groupTitle(e, i);
     const relTitle    = winTitle || lastWinTitle;
     if (winTitle) lastWinTitle = winTitle;
@@ -4941,7 +5286,7 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
     if (e.rootHwndHex) prevSegHwnd = e.rootHwndHex;
     prevSegTitle = relTitle;
     const switchWindowStep = segBoundary
-      ? `            await _step('switch to window: ${escapeStr(relTitle)}', async () => { await _switchWindow('${escapeStr(relTitle)}'); });\n`
+      ? `            await _step('switch to window: ${escapeStr(relTitle)}', async () => { await _switchWindow('${escapeStr(relTitle)}'); osActivate('${escapeStr(relTitle)}', _hwndCache['${escapeStr(relTitle)}']); });\n`
       : '';
 
     // Purely-visual window-section banner (2026-07-17) — zero runtime cost
@@ -5086,7 +5431,7 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
         const relTitleArg = escapeStr(relTitle);
         pushMethod(
 `    async type${stepNum}(value) {
-        const ok = await _typeScopedOrCom('${relTitleArg}', ${elSel}, value);
+        const ok = await _typeVerified('${relTitleArg}', ${elSel}, value) || await _typeScopedOrCom('${relTitleArg}', ${elSel}, value);
         if (!ok) {
             console.warn('[type${stepNum}] scoped sendKeys failed — falling back to OS-level typing');
             osActivate('${relTitleArg}', _hwndCache['${relTitleArg}']);
@@ -5176,6 +5521,63 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
         : `${stepNum}:expandCollapse ${escapeStr(e.element?.name || '')}${itemName ? ' -> ' + escapeStr(itemName) : ''}`;
       pushStep(
 `            await _step('${stepLabel}', () => page.click${stepNum}());`
+      );
+    } else if ((e.action === 'click' || e.action === 'doubleClick')
+        && Number.isInteger(e.element?.ancestorSiblingIndex)
+        && Number.isInteger(e.element?.ancestorItemControlTypeId)
+        && e.element?.name !== '..') {
+      // 2026-08-10 (FileZilla '..' 재생 실패 실측): '..'은 디스크 상태와
+      // 무관하게 모든 폴더에 항상 같은 이름으로 존재하는 고정 항목이라
+      // Name 기반 셀렉터가 형제-순번보다 훨씬 안정적이다(형제 개수는
+      // 폴더마다 완전히 달라 "recording saw 24" 같은 위치 드리프트로
+      // 거의 항상 깨진다 — osAncestorInvoke의 "refusing to pick by
+      // position" 가드가 매번 걸림). agent.py는 automationId/className이
+      // 없는 ListItem/TreeItem엔 Name이 있어도 항상 형제-순번 셀렉터를
+      // 같이 채우므로(그 자체는 진짜 파일/폴더 이름에 대해서는 옳은
+      // 설계 — 디스크 상태 종속이라 재생 시점엔 없을 수 있음), 여기서
+      // '..'만 예외로 걸러 아래(5645행 근처)의 Name 기반 osScopedInvoke
+      // 분기로 떨어뜨린다.
+      // 부모(이름 있는 조상) + 동일 ControlType 형제 순번 (2026-08-08,
+      // agent.py의 UIAInspector._ancestor_sibling_selector) — FileZilla
+      // 툴바 버튼처럼 UIA Name/AutomationId도, LegacyIAccessible도 아무것도
+      // 안 주는 요소용 최후 수단. expandCollapse 분기(바로 위)와는 서로
+      // 배타적으로만 설정되므로(agent.py가 둘 중 하나만 채움) 여기 온
+      // 이벤트가 expandCollapse까지 같이 켜져 있을 일은 없다. 트리거를 펼
+      // 필요가 없는(이미 화면에 떠 있는 형제를 고르는) 별개 경로라
+      // osAncestorInvoke()로 보낸다 — osExpandCollapse()와 시그니처가
+      // 안 섞이게 새 함수로 분리했다.
+      // 2026-08-09 (FileZilla 로컬 파일목록 doubleClick): 원래 이 분기는
+      // e.action === 'click'만 검사해서 doubleClick 이벤트(agent.py가
+      // ancestorSiblingIndex를 정상적으로 캡처해도)는 여기 절대 못 들어오고
+      // bare Name 셀렉터로 떨어졌다(`click-not-found://TreeItem[@Name=...]`,
+      // 실측 확인). doubleClick도 같은 구조적 셀렉터를 쓰도록 포함.
+      const ancestorTarget = comSafeTarget({
+        automationId: e.element.ancestorAutomationId,
+        className: e.element.ancestorClassName,
+        name: e.element.ancestorName,
+        hwnd: e.element.ancestorHwnd,
+        isWebContent: e.element.isWebContent,
+      });
+      const hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
+      const sibIdx = e.element.ancestorSiblingIndex;
+      const sibCnt = Number.isInteger(e.element.ancestorSiblingCount) ? e.element.ancestorSiblingCount : null;
+      const ctrlTypeId = e.element.ancestorItemControlTypeId;
+      // 2026-08-10 (FileZilla '..' 단일 클릭 실측): agent.py가 캡처 시점에
+      // "이 단일 클릭이 실제로 뷰를 바꿨다"를 관측하면 이벤트에
+      // activatesOnSingleClick을 싣는다(event 최상위 필드 — _emit()의
+      // extra 병합 경로, element 안이 아님) — 그러면 action이 'click'이어도
+      // doubleClick과 동일하게 물리 클릭 2회를 쓴다. 리스트/트리 행에서
+      // 단일 물리 클릭은 "선택"이지 "열기"가 아니라서(send_input_click 주석
+      // 참고), 캡처된 단일 클릭이 실제로 네비게이션이었다면 재생도 그
+      // 사실을 그대로 물려받아야 한다.
+      const isDbl = e.action === 'doubleClick' || !!e.activatesOnSingleClick;
+      pushMethod(
+`    async click${stepNum}() {
+        osAncestorInvoke(${hwndArg}, ${JSON.stringify(ancestorTarget)}, ${sibIdx}, ${sibCnt === null ? 'null' : sibCnt}, ${ctrlTypeId}${isDbl ? ', true' : ''});
+    }`
+      );
+      pushStep(
+`            await _step('${stepNum}:${isDbl ? 'doubleClick-' : ''}ancestor-sibling #${sibIdx}${sibCnt !== null ? '/' + sibCnt : ''}', () => page.click${stepNum}());`
       );
     } else if (e.action === 'click' && isCrossWindowEvent(e, recordedRect)
         && !(useSession && e.rootHwndHex)
@@ -5296,14 +5698,18 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       // 회귀 게이트: mock_events.py의 MockDoubleClickRow 시나리오.
       const target = comSafeTarget(e.element);
       const hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
-      const isDbl = e.action === 'doubleClick';
+      // 2026-08-10: activatesOnSingleClick — 위 ancestor-sibling 분기와 같은
+      // 이유(FileZilla '..' 단일 클릭 실측). 이 분기는 이름이 있는 네이티브
+      // ListView 행(bare Name 폴백 포함)을 다루므로 '..'가 구조적 셀렉터를
+      // 못 만든 경우 여기로 떨어진다 — 플래그를 똑같이 반영해야 한다.
+      const isDbl = e.action === 'doubleClick' || !!e.activatesOnSingleClick;
       pushMethod(
 `    async click${stepNum}() {
         osScopedInvoke(${hwndArg}, ${JSON.stringify(target)}${isDbl ? ', null, null, null, null, true' : ''});
     }`
       );
       pushStep(
-`            await _step('${stepNum}:${e.action} ${escapeStr(e.element?.name || '')}', () => page.click${stepNum}());`
+`            await _step('${stepNum}:${isDbl ? 'doubleClick' : e.action} ${escapeStr(e.element?.name || '')}', () => page.click${stepNum}());`
       );
     } else if (e.action === 'click' && e.element?.controlType === 'CheckBox') {
       // 2026-08-04: 체크박스 값-검증 잠재적 구멍 선제 조치 — WAD의 element/click
@@ -5678,8 +6084,9 @@ function saveFiles(files, dir, extraObsolete = []) {
 app.post('/api/generate', (req, res) => {
   const name  = req.body.appName  || sessionInfo.appName  || 'MyApp';
   const exe   = req.body.exePath  || sessionInfo.exePath  || '';
+  const targetEvents = (Array.isArray(req.body.events) && req.body.events.length > 0) ? req.body.events : events;
 
-  if (events.length === 0)
+  if (targetEvents.length === 0)
     return res.status(400).json({ ok: false, message: 'No recorded events to generate from' });
 
   const base = toPascal(name);
@@ -5688,11 +6095,11 @@ app.post('/api/generate', (req, res) => {
 
   try {
     // Decide architecture: session switching for Electron / multi-window apps.
-    const useSession = needsSessionSwitching(events);
+    const useSession = needsSessionSwitching(targetEvents);
 
     // ── WebdriverIO ────────────────────────────────────────────────────────
-    const wdioById    = generateWdio('id',    name, events, useSession, exe);
-    const wdioByClass = generateWdio('class', name, events, useSession, exe);
+    const wdioById    = generateWdio('id',    name, targetEvents, useSession, exe);
+    const wdioByClass = generateWdio('class', name, targetEvents, useSession, exe);
     const wdioFiles   = [
       { filename: `${base}TestById.js`,    content: wdioById    },
       { filename: `${base}TestByClass.js`, content: wdioByClass },

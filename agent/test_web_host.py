@@ -60,8 +60,9 @@ def main():
 
     class _FakeRec:
         """Only what the repair actually reads, plus the real helper it calls."""
-        target_hwnds = {6885104}
+        target_hwnds = {6885104, 1968768}
         _adopt_dead_row_cell = Recorder._adopt_dead_row_cell
+        _adopt_stale_menuitem = Recorder._adopt_stale_menuitem
 
     def restore(picked_by, raw, late, x, y, root_hwnd=6885104):
         """Run the repair and hand back the (possibly) fixed element dict."""
@@ -140,6 +141,48 @@ def main():
                   1050, 418)
     check("dead element: a normal named control is NOT relabelled as a row",
           got["name"] == "" and got["controlType"] == "")
+
+    # ── _adopt_stale_menuitem ────────────────────────────────────────────
+    # Real numbers from the live 2026-08-06 FileZilla capture (파일(F) ->
+    # 사이트 관리자(S)...): the click's own worker-thread inspection lagged
+    # 2.39s behind the press, long enough that by the time _inspect() ran,
+    # the File menu had closed and the Site Manager dialog it opens had
+    # already appeared at the same screen point.
+    got = restore("smallest_element_at",
+                  {"name": "사이트 관리자(S)...\tCtrl+S", "rect": (521, 130, 953, 156),
+                   "automationId": "33662", "controlType": "MenuItem", "className": ""},
+                  {"name": "", "rect": (520, 128, 571, 159),
+                   "automationId": "", "controlType": "SplitButton"},
+                  570, 143, root_hwnd=1968768)
+    check("stale menu item: restores the selected item's name over the dialog that opened under it",
+          got["name"] == "사이트 관리자(S)...\tCtrl+S")
+    check("stale menu item: restores the item's automationId",
+          got["automationId"] == "33662")
+    check("stale menu item: records it as a MenuItem, not the dialog's SplitButton",
+          got["controlType"] == "MenuItem")
+
+    # An icon-only menu item (no automationId) is not resolvable by selector
+    # either way — adopting it would just swap one empty selector for
+    # another, so this must NOT fire.
+    got = restore("smallest_element_at",
+                  {"name": "빠른 액세스", "rect": (521, 130, 953, 156),
+                   "automationId": "", "controlType": "MenuItem", "className": ""},
+                  {"name": "", "rect": (520, 128, 571, 159),
+                   "automationId": "", "controlType": "SplitButton"},
+                  570, 143, root_hwnd=1968768)
+    check("stale menu item: an icon-only item (no automationId) is NOT adopted",
+          got["name"] == "")
+
+    # A real (non-raced) control swap must stay dropped — same principle as
+    # the dead-element guards above.
+    got = restore("smallest_element_at",
+                  {"name": "저장", "rect": (521, 130, 953, 156),
+                   "automationId": "9001", "controlType": "Button", "className": ""},
+                  {"name": "", "rect": (520, 128, 571, 159),
+                   "automationId": "", "controlType": "SplitButton"},
+                  570, 143, root_hwnd=1968768)
+    check("stale menu item: a non-MenuItem raw controlType is NOT adopted",
+          got["name"] == "")
 
     # Guards.
     got = restore("row-ancestor",

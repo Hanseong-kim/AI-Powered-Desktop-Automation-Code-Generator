@@ -673,7 +673,6 @@ async function _step(label, fn) {
 // Windows in this recording:
 //   [W1] "TeamViewer" (main)
 //   [W2] "빠른 연결 허용" (opened during recording)
-//   [W3] "빠른 연결 허용" (opened during recording)
 
 class TeamViewerPageById {
 
@@ -702,11 +701,11 @@ class TeamViewerPageById {
     }
 
     async click6() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"Windows와 함께 TeamViewer 시작"});
+        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"Windows와 함께 TeamViewer 시작"}, null, null, null, null, true);
     }
 
     async click7() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"Windows와 함께 TeamViewer 시작"});
+        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"이 장치에 Easy Access 권한 부여"});
     }
 
 
@@ -714,15 +713,11 @@ class TeamViewerPageById {
     // [W2] 빠른 연결 허용 (new window)
     // ════════════════════════════════════════════════════════════
     async click8() {
-        await _clickBySid(_appSid, null, '//Text[@Name="이 장치에 Easy Access 권한 부여"]');
+        osScopedInvoke(_appHwnd, {"automationId":"","className":"#32770","name":"빠른 연결 허용"}, null, 149, null, "빠른 연결 허용");
     }
 
-
-    // ════════════════════════════════════════════════════════════
-    // [W3] 빠른 연결 허용 (new window)
-    // ════════════════════════════════════════════════════════════
     async click9() {
-        osScopedInvoke(_appHwnd, {"automationId":"1125","className":"Edit","name":""}, null, 146, null, "빠른 연결 허용");
+        osScopedInvoke(_appHwnd, {"automationId":"1125","className":"Edit","name":""}, null, 136, null, "빠른 연결 허용");
     }
 
     async type10(value) {
@@ -735,7 +730,7 @@ class TeamViewerPageById {
     }
 
     async click11() {
-        osScopedInvoke(_appHwnd, {"automationId":"1126","className":"Edit","name":""}, null, 166, null, "빠른 연결 허용");
+        osScopedInvoke(_appHwnd, {"automationId":"1126","className":"Edit","name":""}, null, 173, null, "빠른 연결 허용");
     }
 
     async type12(value) {
@@ -748,11 +743,11 @@ class TeamViewerPageById {
     }
 
     async click13() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"#32770","name":"빠른 연결 허용"}, null, 234, null, "빠른 연결 허용");
+        osScopedInvoke(_appHwnd, {"automationId":"","className":"#32770","name":"빠른 연결 허용"}, null, 225, null, "빠른 연결 허용");
     }
 
     async click14() {
-        osScopedInvoke(_appHwnd, {"automationId":"2","className":"Button","name":""}, null, 275, null, "빠른 연결 허용");
+        osScopedInvoke(_appHwnd, {"automationId":"2","className":"Button","name":""}, null, 274, null, "빠른 연결 허용");
     }
 
     async click15() {
@@ -802,27 +797,23 @@ async function run() {
             await _step('2:click 비밀번호를 복사하세요', () => page.click2());
             await _step('3:click 비밀번호를 새로고침하세요', () => page.click3());
             await _step('4:click 세션 코드', () => page.click4());
-            await _step('5:type qwer123456789', () => page.type5('qwer123456789'));
-            await _step('6:click Windows와 함께 TeamViewer 시작', () => page.click6());
-            await _step('7:click Windows와 함께 TeamViewer 시작', () => page.click7());
+            await _step('5:type 1234567889', () => page.type5('1234567889'));
+            await _step('6:doubleClick Windows와 함께 TeamViewer 시작', () => page.click6());
+            await _step('7:click 이 장치에 Easy Access 권한 부여', () => page.click7());
 
     // ════════════════════════════════════════════════════════════
     // [W2] 빠른 연결 허용 (new window)
     // ════════════════════════════════════════════════════════════
-            await _step('8:click 이 장치에 Easy Access 권한 부여', () => page.click8());
-
-    // ════════════════════════════════════════════════════════════
-    // [W3] 빠른 연결 허용 (new window)
-    // ════════════════════════════════════════════════════════════
+            await _step('8:click 빠른 연결 허용 (cross-window)', () => page.click8());
             await _step('9:click 이메일 (cross-window)', () => page.click9());
-            await _step('10:type testing', () => page.type10('testing'));
+            await _step('10:type asdf', () => page.type10('asdf'));
             await _step('11:click 비밀번호 (cross-window)', () => page.click11());
             await _step('12:type asdf', () => page.type12('asdf'));
             await _step('13:click 빠른 연결 허용 (cross-window)', () => page.click13());
             await _step('14:click 취소 (cross-window)', () => page.click14());
             await _step('15:click TeamViewer에 로그인', () => page.click15());
             await _step('16:click 이메일', () => page.click16());
-            await _step('17:type testing qa', () => page.type17('testing qa'));
+            await _step('17:type asdf', () => page.type17('asdf'));
             await _step('18:click 계속', () => page.click18());
             // [STEP 19] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
             _failures.push('19:click:no-selector');

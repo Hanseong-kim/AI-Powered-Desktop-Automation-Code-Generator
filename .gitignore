@@ -40,6 +40,9 @@ generated-wdio/MockWindowClick/
 generated-wdio/MockVolatileMenuItem/
 generated-wdio/MockMenuIndexNotATrigger/
 generated-wdio/MockPostNavTitle/
+generated-wdio/MockAmbiguousCrossWindow/
+generated-wdio/MockAncestorIndex/
+generated-wdio/MyApp/
 generated-wdio/MockGoldenCalculator/
 generated-wdio/MockGoldenFileZilla/
 generated-wdio/MockGoldenHeidiSQL/
@@ -81,6 +84,9 @@ generated-wdio/_debug-helpers/MockWindowClick/
 generated-wdio/_debug-helpers/MockVolatileMenuItem/
 generated-wdio/_debug-helpers/MockMenuIndexNotATrigger/
 generated-wdio/_debug-helpers/MockPostNavTitle/
+generated-wdio/_debug-helpers/MockAmbiguousCrossWindow/
+generated-wdio/_debug-helpers/MockAncestorIndex/
+generated-wdio/_debug-helpers/MyApp/
 generated-wdio/_debug-helpers/MockGoldenCalculator/
 generated-wdio/_debug-helpers/MockGoldenFileZilla/
 generated-wdio/_debug-helpers/MockGoldenHeidiSQL/
@@ -141,3 +147,14 @@ generated-wdio/**/replay.log
 agent/*.log
 # subagent-driven-development scratch (ledger, briefs, review packages)
 .superpowers/
+
+# verify_replay.py가 매 실행마다 재생성하는 산출물 (mock_events.py의
+# Mock*/Sweep* 산출물과 같은 이유로 커밋 대상 아님)
+generated-wdio/*/*VerifyManifest.json
+
+# Claude Code 로컬 도구 설정 — 팀 공유 대상 아님 (2026-08-10, 사용자 확인)
+.agents/
+AGENTS.md
+
+# 루트에서 임시로 만든 디버그 스크립트가 남기는 Appium 로그
+/appium.log

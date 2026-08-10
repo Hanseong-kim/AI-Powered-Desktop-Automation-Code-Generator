@@ -1202,10 +1202,8 @@ async function _step(label, fn) {
 //   [W2] "환경 설정" (opened during recording)
 //   [W3] "환경 설정" (opened during recording)
 //   [W4] "HeidiSQL 12.20.0.7320 - 세션 관리자" (opened during recording)
-//   [W5] "HeidiSQL 12.20.0.7320 - 세션 관리자" (opened during recording)
-//   [W6] "HeidiSQL 업데이트 확인 ..." (opened during recording)
-//   [W7] "HeidiSQL 12.20.0.7320 - 세션 관리자" (opened during recording)
-//   [W8] "HeidiSQL 정보" (opened during recording)
+//   [W5] "HeidiSQL 업데이트 확인 ..." (opened during recording)
+//   [W6] "HeidiSQL 12.20.0.7320 - 세션 관리자" (opened during recording)
 
 class HeidiSQLPageById {
 
@@ -1216,120 +1214,56 @@ class HeidiSQLPageById {
         await _clickScoped('HeidiSQL 12.20.0.7320 - 세션 관리자', '//SplitButton[@Name="신규"]');
     }
 
-    async click3() {
-        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"ComboBox","name":""}, null, 4, 18);
-    }
-
-    async click4() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"TCheckBox","name":"Windows 인증 사용"}, null, null, null, "HeidiSQL 12.20.0.7320 - 세션 관리자", false, true);
-    }
-
-    async click5() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"TCheckBox","name":"Windows 인증 사용"}, null, null, null, "HeidiSQL 12.20.0.7320 - 세션 관리자", false, true);
-    }
-
-    async click6() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"TCheckBox","name":"자격 증명 프롬프트"}, null, null, null, "HeidiSQL 12.20.0.7320 - 세션 관리자", false, true);
-    }
-
-    async click7() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"TCheckBox","name":"자격 증명 프롬프트"}, null, null, null, "HeidiSQL 12.20.0.7320 - 세션 관리자", false, true);
-    }
-
-    async click8() {
-        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"ComboBox","name":""}, null, 12, 18);
-    }
-
-    async click9() {
-        await _clickScoped('HeidiSQL 12.20.0.7320 - 세션 관리자', '//TabItem[@Name="SSH 터널"]');
-    }
-
-    async click10() {
-        await _clickScoped('HeidiSQL 12.20.0.7320 - 세션 관리자', '//TabItem[@Name="고급"]');
-    }
-
-    async click11() {
-        await _clickScoped('HeidiSQL 12.20.0.7320 - 세션 관리자', '//TabItem[@Name="SSL"]');
-    }
-
-    async click12() {
-        await _clickScoped('HeidiSQL 12.20.0.7320 - 세션 관리자', '//TabItem[@Name="통계"]');
+    async click2() {
+        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"TButton","name":"더 보기"}, null, 0, 6);
     }
 
 
     // ════════════════════════════════════════════════════════════
     // [W2] 환경 설정 (new window)
     // ════════════════════════════════════════════════════════════
-    async click13() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"로그 기록"}, {"automationId":"","className":"TButton","name":"더 보기"}, 65, 605, "환경 설정");
+    async click3() {
+        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"로그 기록"}, null, 63, null, "환경 설정");
     }
 
-    async click14() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"SQL"}, null, 64, null, "환경 설정");
+    async click4() {
+        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"SQL"}, null, 55, null, "환경 설정");
     }
 
-    async click15() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"그리드 서식 설정"}, null, 64, null, "환경 설정");
-    }
-
-    async click16() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"기본"}, null, 66, null, "환경 설정");
-    }
-
-    async click17() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"로그 기록"}, null, 60, null, "환경 설정");
+    async click5() {
+        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"그리드 서식 설정"}, null, 57, null, "환경 설정");
     }
 
 
     // ════════════════════════════════════════════════════════════
     // [W3] 환경 설정 (new window)
     // ════════════════════════════════════════════════════════════
-    async click18() {
-        await _clickScoped('환경 설정', '//CheckBox[@Name="파일로 SQL 로그 작성"]', true);
-    }
-
-    async click19() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"데이터 편집기"}, null, 63, null, "환경 설정");
-    }
-
-    async click20() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"단축키"}, null, 60, null, "환경 설정");
-    }
-
-    async click21() {
-        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"","name":"파일 및 탭"}, null, 56, null, "환경 설정");
+    async click6() {
+        await _clickScoped('환경 설정', '//Button[@Name="취소"]');
     }
 
 
     // ════════════════════════════════════════════════════════════
-    // [W5] HeidiSQL 12.20.0.7320 - 세션 관리자 (new window)
+    // [W4] HeidiSQL 12.20.0.7320 - 세션 관리자 (new window)
     // ════════════════════════════════════════════════════════════
-    async click23() {
+    async click7() {
         osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"TButton","name":"더 보기"}, null, 1, 6);
     }
 
 
     // ════════════════════════════════════════════════════════════
-    // [W6] HeidiSQL 업데이트 확인 ... (new window)
+    // [W5] HeidiSQL 업데이트 확인 ... (new window)
     // ════════════════════════════════════════════════════════════
-    async click24() {
+    async click8() {
         await _clickScoped('HeidiSQL 업데이트 확인 ...', '//Button[@Name="취소"]');
     }
 
 
     // ════════════════════════════════════════════════════════════
-    // [W7] HeidiSQL 12.20.0.7320 - 세션 관리자 (new window)
+    // [W6] HeidiSQL 12.20.0.7320 - 세션 관리자 (new window)
     // ════════════════════════════════════════════════════════════
-    async click25() {
-        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"TButton","name":"더 보기"}, null, 5, 6);
-    }
-
-
-    // ════════════════════════════════════════════════════════════
-    // [W8] HeidiSQL 정보 (new window)
-    // ════════════════════════════════════════════════════════════
-    async click26() {
-        await _clickScoped('HeidiSQL 정보', '//Button[@Name="닫기"]');
+    async click9() {
+        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"TButton","name":"더 보기"}, null, 2, 6);
     }
 }
 
@@ -1347,7 +1281,7 @@ async function run() {
         _warmupPowerShell();
 
     _mainTitleFrag = "HeidiSQL 12.20.0.7320 - 세션 관리자";
-    _dialogRects = {"HeidiSQL 12.20.0.7320 - 세션 관리자":{"left":797,"top":144,"width":875,"height":612},"환경 설정":{"left":187,"top":79,"width":925,"height":625},"HeidiSQL 업데이트 확인 ...":{"left":399,"top":103,"width":500,"height":575},"HeidiSQL 정보":{"left":346,"top":135,"width":607,"height":511}};
+    _dialogRects = {"HeidiSQL 12.20.0.7320 - 세션 관리자":{"left":797,"top":144,"width":875,"height":612},"환경 설정":{"left":187,"top":79,"width":925,"height":625},"HeidiSQL 업데이트 확인 ...":{"left":399,"top":103,"width":500,"height":575}};
     await ensureAppium();
     _rootSid = await _createSession('Root');
     console.log(`[session] Root session ${_rootSid} ready`);
@@ -1360,64 +1294,36 @@ async function run() {
     // ════════════════════════════════════════════════════════════
             await _step('switch to window: HeidiSQL 12.20.0.7320 - 세션 관리자', async () => { await _switchWindow('HeidiSQL 12.20.0.7320 - 세션 관리자'); });
             await _step('1:click 신규', () => page.click1());
-            // [STEP 2] skip type on non-editable element
-            await _step('3:select item #4 (unnamed)', () => page.click3());
-            await _step('4:click Windows 인증 사용', () => page.click4());
-            await _step('5:click Windows 인증 사용', () => page.click5());
-            await _step('6:click 자격 증명 프롬프트', () => page.click6());
-            await _step('7:click 자격 증명 프롬프트', () => page.click7());
-            await _step('8:select item #12 (unnamed)', () => page.click8());
-            await _step('9:click SSH 터널', () => page.click9());
-            await _step('10:click 고급', () => page.click10());
-            await _step('11:click SSL', () => page.click11());
-            await _step('12:click 통계', () => page.click12());
+            await _step('2:select item #0 (unnamed)', () => page.click2());
 
     // ════════════════════════════════════════════════════════════
     // [W2] 환경 설정 (new window)
     // ════════════════════════════════════════════════════════════
-            await _step('13:click 로그 기록 (cross-window)', () => page.click13());
-            await _step('14:click SQL (cross-window)', () => page.click14());
-            await _step('15:click 그리드 서식 설정 (cross-window)', () => page.click15());
-            await _step('16:click 기본 (cross-window)', () => page.click16());
-            await _step('17:click 로그 기록 (cross-window)', () => page.click17());
+            await _step('3:click 로그 기록 (cross-window)', () => page.click3());
+            await _step('4:click SQL (cross-window)', () => page.click4());
+            await _step('5:click 그리드 서식 설정 (cross-window)', () => page.click5());
 
     // ════════════════════════════════════════════════════════════
     // [W3] 환경 설정 (new window)
     // ════════════════════════════════════════════════════════════
             await _step('switch to window: 환경 설정', async () => { await _switchWindow('환경 설정'); });
-            await _step('18:doubleClick 파일로 SQL 로그 작성', () => page.click18());
-            await _step('19:click 데이터 편집기 (cross-window)', () => page.click19());
-            await _step('20:click 단축키 (cross-window)', () => page.click20());
-            await _step('21:click 파일 및 탭 (cross-window)', () => page.click21());
+            await _step('6:click 취소', () => page.click6());
 
     // ════════════════════════════════════════════════════════════
     // [W4] HeidiSQL 12.20.0.7320 - 세션 관리자 (new window)
     // ════════════════════════════════════════════════════════════
-            // [STEP 22] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
-            console.log('[STEP] switch to window: HeidiSQL 12.20.0.7320 - 세션 관리자 (skipped — no selector for this step)');
-            _failures.push('22:click:no-selector');
+            await _step('7:select item #1 (unnamed)', () => page.click7());
 
     // ════════════════════════════════════════════════════════════
-    // [W5] HeidiSQL 12.20.0.7320 - 세션 관리자 (new window)
-    // ════════════════════════════════════════════════════════════
-            await _step('23:select item #1 (unnamed)', () => page.click23());
-
-    // ════════════════════════════════════════════════════════════
-    // [W6] HeidiSQL 업데이트 확인 ... (new window)
+    // [W5] HeidiSQL 업데이트 확인 ... (new window)
     // ════════════════════════════════════════════════════════════
             await _step('switch to window: HeidiSQL 업데이트 확인 ...', async () => { await _switchWindow('HeidiSQL 업데이트 확인 ...'); });
-            await _step('24:click 취소', () => page.click24());
+            await _step('8:click 취소', () => page.click8());
 
     // ════════════════════════════════════════════════════════════
-    // [W7] HeidiSQL 12.20.0.7320 - 세션 관리자 (new window)
+    // [W6] HeidiSQL 12.20.0.7320 - 세션 관리자 (new window)
     // ════════════════════════════════════════════════════════════
-            await _step('25:select item #5 (unnamed)', () => page.click25());
-
-    // ════════════════════════════════════════════════════════════
-    // [W8] HeidiSQL 정보 (new window)
-    // ════════════════════════════════════════════════════════════
-            await _step('switch to window: HeidiSQL 정보', async () => { await _switchWindow('HeidiSQL 정보'); });
-            await _step('26:click 닫기', () => page.click26());
+            await _step('9:select item #2 (unnamed)', () => page.click9());
     } finally {
 
         for (const { sid } of Object.values(_sessionIds)) {

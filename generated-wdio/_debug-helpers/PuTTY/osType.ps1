@@ -3,6 +3,8 @@ Add-Type -AssemblyName System.Windows.Forms
 $text = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($b64))
 $special = '+^%~(){}[]'
 Start-Sleep -Milliseconds 200
+[System.Windows.Forms.SendKeys]::SendWait("^a")
+Start-Sleep -Milliseconds 30
 foreach ($ch in $text.ToCharArray()) {
   if ($ch -eq "`n") { [System.Windows.Forms.SendKeys]::SendWait("{ENTER}"); Start-Sleep -Milliseconds 15; continue }
   if ($ch -eq "`r") { continue }

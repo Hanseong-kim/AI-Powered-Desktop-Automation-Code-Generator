@@ -58,6 +58,13 @@ DRAG_MIN_DIST = 10             # pixels — press-to-release distance above whic
 SCROLL_FLUSH_IDLE = 0.40       # seconds of no scrolling -> emit scroll event
 QUEUE_POLL_TIMEOUT = 0.20      # worker wakeup interval for pending flushes
 DISCOVER_TIMEOUT = 5.0         # seconds to wait for the target window to appear
+# 2026-08-10 (FileZilla '..' 단일 클릭 실측): 로컬 파일목록/트리 행에서 이름
+# 없는(또는 automationId/className 둘 다 없는) ListItem/TreeItem을 단일
+# 클릭할 때, 그 클릭이 실제로 뷰를 바꿨는지(선택이 아니라 네비게이션/펼치기)
+# 이 지연 뒤에 확인한다 — 7번 이슈에서 측정한 형제-개수 수렴 시간(0.6~0.9s)과
+# 같은 예산.
+ACTIVATION_CHECK_DELAY = 0.40  # seconds before verifying a candidate single click
+UIA_EXPAND_COLLAPSE_PATTERN_ID = 10005   # same value as UIAInspector.EXPAND_COLLAPSE_PATTERN_ID
 
 UIA_CONTROL_TYPES = {
     50000: "Button", 50001: "Calendar", 50002: "CheckBox", 50003: "ComboBox",
@@ -114,6 +121,20 @@ def point_in_rect(rect, x, y):
         return False
     left, top, right, bottom = rect
     return left <= x < right and top <= y < bottom
+
+
+def rects_close(r1, r2, tol=2):
+    """True when two (left, top, right, bottom) rects describe the same
+    on-screen position within `tol` pixels per edge — a looser stand-in for
+    `==` when comparing a rect read at two different moments in time (e.g.
+    identity-rot recovery, 2026-08-10). A strict `==` can be fooled by a
+    scrollbar appearing/disappearing or similar sub-pixel repaint jitter
+    between the two reads, which would wrongly block a recovery that should
+    fire."""
+    if not (isinstance(r1, tuple) and len(r1) == 4
+            and isinstance(r2, tuple) and len(r2) == 4):
+        return False
+    return all(abs(a - b) <= tol for a, b in zip(r1, r2))
 
 
 def is_exclusive_edge_miss(rect, x, y):
@@ -330,21 +351,371 @@ class UIAInspector:
         try:
             walker = self._uia.ControlViewWalker
             cur = elem
-            for _ in range(max_up):
+            for hop in range(max_up):
                 try:
                     parent = walker.GetParentElement(cur)
-                except Exception:
-                    break
-                if parent is None:
-                    break
+                except Exception as e:
+                    log(f"[inspect] _nearest_named_ancestor: GetParentElement raised "
+                        f"at hop {hop}/{max_up}: {e}")
+                    return None
+                # comtypes FindFirst/GetParentElement return a NULL COM pointer
+                # on a miss, not None (CLAUDE.md §5) — `is None` never catches
+                # it, so the top-of-tree case fell through to
+                # parent.CurrentAutomationId on a NULL pointer and raised
+                # (measured 2026-08-08, FileZilla SplitButton: "parent
+                # property read raised at hop 0/1: NULL COM pointer access").
+                # A NULL COM pointer's __bool__ is False, so `not parent`
+                # catches both None and NULL without risking a false negative
+                # on a valid pointer.
+                if not parent:
+                    log(f"[inspect] _nearest_named_ancestor: no parent at hop "
+                        f"{hop}/{max_up} — reached top of tree")
+                    return None
                 try:
                     if parent.CurrentAutomationId or parent.CurrentName:
                         return parent
-                except Exception:
-                    break
+                except Exception as e:
+                    log(f"[inspect] _nearest_named_ancestor: parent property read "
+                        f"raised at hop {hop}/{max_up}: {e}")
+                    return None
                 cur = parent
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"[inspect] _nearest_named_ancestor: unexpected failure: {e}")
+            return None
+        log(f"[inspect] _nearest_named_ancestor: no named ancestor within "
+            f"{max_up} hops")
+        return None
+
+    def _ancestor_sibling_selector(self, elem, max_up=4, cached_rect=None,
+                                    cached_ct=None, cached_name=None):
+        """Last-resort structural selector for an elem that is STILL
+        nameless after describe()'s LegacyIAccessible/HelpText fallback
+        (2026-08-08, FileZilla toolbar buttons — controlType='CheckBox',
+        no Name, no AutomationId, and MSAA has nothing either). Finds the
+        nearest named ancestor (reusing _nearest_named_ancestor) and this
+        element's ordinal position among that ancestor's DIRECT children
+        (TreeScope_Children, not Subtree — Subtree's DFS order would let a
+        grandchild shift the count for a flat toolbar row) of the SAME
+        ControlType. Returns (ancestor_elem, sibling_index, sibling_count)
+        or None.
+
+        Does NOT replace elem as the click target — element_at()'s
+        elem_was_deepened guard (see its 2026-08-05 comment) already
+        rejected doing that, for good reason: swapping in a large named
+        container caused replay to click the container's CENTER instead of
+        the small precise element (measured on TeamViewer). This only
+        builds an auxiliary selector for re-finding elem later; the actual
+        click target is unchanged.
+
+        Identity check between elem and a candidate sibling uses
+        CurrentBoundingRectangle + ControlType (already matched by the
+        FindAll condition) + (CurrentNativeWindowHandle if elem has one,
+        else CurrentName) as a tiebreaker — NOT IUIAutomation::CompareElements,
+        which this codebase has never called before and which is prone to
+        false negatives comparing two separately-queried COM references to
+        the same underlying element.
+
+        cached_rect/cached_ct/cached_name (2026-08-08, FileZilla "사이트
+        관리자" SplitButton): this is normally called AFTER
+        snapshot_open_menu()'s up-to-0.6s retry budget has already run (see
+        _inspect()), so by the time it re-queries elem live, real time has
+        passed since describe() first read it — measured gap=1.5s on the
+        recording that motivated this. describe() already captured a good
+        rect/controlType/name near click time; reusing those as the match
+        target (instead of re-querying elem) removes that window entirely,
+        the same "earliest observation wins" principle _inspect() already
+        applies to its dead-element recovery path (see its 2026-08-05
+        comment). elem is still needed live for the tree walk
+        (GetParentElement/FindAll) — only the "is this candidate the one we
+        clicked" comparison switches to the cached values when given.
+
+        Climbs past the FIRST named ancestor if needed (2026-08-08, same
+        SplitButton, round 2): the diagnostic log added for the cache fix
+        above pinned the real cause — "ancestor has no direct children of
+        controlType=50031 (SplitButton)". The FileZilla toolbar's SplitButton
+        is nested one wrapper deeper than its sibling CheckBoxes, so the
+        NEAREST named ancestor (shared with those CheckBoxes) simply does not
+        directly contain it — TreeScope_Children was never going to find it
+        there no matter how fresh the query. If the nearest named ancestor's
+        direct children don't include a same-controlType match, keep
+        climbing to the next named ancestor above it (still within max_up),
+        instead of giving up after the first one — a flat toolbar (the
+        CheckBox case) still resolves on the first try, unchanged.
+
+        Round 3 (2026-08-08, same SplitButton — the climbing above still came
+        up empty at every level): confirmed via poc/probe_ancestor_chain.py
+        --walker-vs-refetch, within one COM session — a ControlViewWalker
+        reference obtained by climbing UP FROM the SplitButton itself omits
+        the SplitButton from its own FindAll(TreeScope_Children) afterward
+        (13 children, missing it), while a property-based FindFirst that
+        resolves the IDENTICAL ancestor (same hwnd/automationId/rect) sees
+        all 14. Climbing from a NEIGHBOR (e.g. a sibling CheckBox) to the
+        same ancestor does not trigger it either — only "climbed away from
+        the element you're about to search for" does. This is not something
+        _nearest_named_ancestor can avoid (it has to start the climb from
+        elem); the fix is to never hand a climbed reference to
+        _find_sibling_by_controltype directly — re-resolve it by its own
+        AutomationId/ClassName/Name first (_refetch_ancestor_clean below).
+        This exactly mirrors what server.js's osExpandCollapse.py already
+        does at replay time (resolve_target() is a plain property FindFirst,
+        never a walker climb) — replay was never affected by this, only
+        capture was.
+        """
+        if (isinstance(cached_rect, tuple) and len(cached_rect) == 4
+                and cached_ct is not None):
+            ct = cached_ct
+            target_rect = cached_rect
+            target_name = cached_name or ""
+            try:
+                target_hwnd = elem.CurrentNativeWindowHandle or 0
+            except Exception:
+                target_hwnd = 0
+        else:
+            try:
+                ct = elem.CurrentControlType
+                r = elem.CurrentBoundingRectangle
+                target_rect = (r.left, r.top, r.right, r.bottom)
+                target_hwnd = elem.CurrentNativeWindowHandle or 0
+                target_name = elem.CurrentName or ""
+            except Exception as e:
+                log(f"[inspect] _ancestor_sibling_selector: elem re-query raised "
+                    f"(no cached rect/controlType available as fallback): {e}")
+                return None
+
+        # 2026-08-10 (사용자 설계 제안, TreeView 11초 지연 실측): 레벨당
+        # 최대 2.7초(_SIBLING_SETTLE_RETRIES x _SIBLING_SETTLE_INTERVAL)
+        # 예산이 조상 climb 단계 수만큼 그대로 곱해지는 게 진짜 문제였다
+        # (트리뷰는 들여쓰기 때문에 rect가 레벨마다 미세하게 달라 패치(A)의
+        # "정확 일치 시 즉시 포기"가 걸리지 않는다). 레벨마다 새 예산을
+        # 주는 대신, 이 호출 전체에 하나의 데드라인을 걸어 아래
+        # _find_sibling_by_controltype에 전달한다 — 몇 번째 레벨이든
+        # 재시도가 몇 번 남았든, 데드라인을 넘기면 즉시 전체 탐색을
+        # 중단한다.
+        deadline = time.time() + self._SIBLING_SETTLE_DEADLINE
+        cur = elem
+        remaining = max_up
+        level = 0
+        while remaining > 0:
+            if time.time() >= deadline:
+                log(f"[inspect] _ancestor_sibling_selector: deadline "
+                    f"({self._SIBLING_SETTLE_DEADLINE}s) exceeded after "
+                    f"{level} ancestor level(s) — giving up instead of "
+                    "climbing further")
+                return None
+            ancestor = self._nearest_named_ancestor(cur, max_up=remaining)
+            if ancestor is None:
+                if level == 0:
+                    log("[inspect] _ancestor_sibling_selector: no named ancestor found")
+                return None
+            level += 1
+            remaining -= 1  # conservative: one named ancestor consumed, regardless of hop count
+            # 2026-08-08: identify WHICH ancestor this was — the earlier logs
+            # only said "named ancestor #N", leaving no way to tell from the
+            # recording log alone whether H1 (the clicked control is
+            # genuinely nested a level deeper than its siblings) or something
+            # else is going on. automationId/name/controlType here are cheap
+            # (already-resolved COM properties, no extra tree walk).
+            try:
+                anc_id = ancestor.CurrentAutomationId or ""
+                anc_class = ancestor.CurrentClassName or ""
+                anc_name = ancestor.CurrentName or ""
+                anc_ct = ancestor.CurrentControlType
+            except Exception:
+                anc_id, anc_class, anc_name, anc_ct = "?", "?", "?", "?"
+            # 2026-08-08 (H4, see docstring): never search children on the
+            # climbed reference directly — refetch a clean one first.
+            refetched = self._refetch_ancestor_clean(elem, anc_id, anc_class, anc_name)
+            search_from = refetched if refetched is not None else ancestor
+            hit = self._find_sibling_by_controltype(search_from, ct, target_rect,
+                                                      target_hwnd, target_name,
+                                                      deadline)
+            if hit is not None:
+                idx, count = hit
+                return ancestor, idx, count
+            log(f"[inspect] _ancestor_sibling_selector: named ancestor #{level} "
+                f"(id={anc_id!r} name={anc_name!r} controlType={anc_ct!r}) has "
+                f"no matching controlType={ct!r} child — trying the next named "
+                f"ancestor above it ({remaining} hop(s) left)")
+            cur = ancestor
+        return None
+
+    def _refetch_ancestor_clean(self, elem, anc_id, anc_class, anc_name):
+        """Re-resolves an ancestor by its own AutomationId/ClassName/Name via
+        a plain property FindFirst, discarding whatever COM reference
+        _nearest_named_ancestor's climb produced. See
+        _ancestor_sibling_selector's "Round 3" docstring — measured
+        (poc/probe_ancestor_chain.py --walker-vs-refetch, one COM session):
+        a reference obtained by climbing UP FROM element X omits X from its
+        own children enumeration afterward; a reference to the identical
+        element obtained by property search does not. Searches from
+        _search_root_for(elem) — the same window-root resolution every other
+        FindAll in this class already uses (§ its own docstring). Returns
+        None (falls back to the climbed reference) if nothing is given to
+        search on, the root can't be resolved, or FindFirst raises/misses —
+        never worse than not having tried."""
+        if not anc_id and not anc_class and not anc_name:
+            log("[inspect] _refetch_ancestor_clean: no automationId/className/name "
+                "to search on — falling back to the climbed reference")
+            return None
+        root = self._search_root_for(elem)
+        if root is None:
+            log("[inspect] _refetch_ancestor_clean: _search_root_for(elem) found no "
+                "window root — falling back to the climbed reference")
+            return None
+        conds = []
+        if anc_id and anc_id != "?":
+            conds.append(self._uia.CreatePropertyCondition(30011, anc_id))     # AutomationId
+        if anc_class and anc_class != "?":
+            conds.append(self._uia.CreatePropertyCondition(30012, anc_class))  # ClassName
+        if anc_name and anc_name != "?":
+            conds.append(self._uia.CreatePropertyCondition(30005, anc_name))   # Name
+        if not conds:
+            return None
+        cond = conds[0]
+        for c in conds[1:]:
+            cond = self._uia.CreateAndCondition(cond, c)
+        try:
+            found = root.FindFirst(7, cond)  # TreeScope_Subtree
+        except Exception as e:
+            log(f"[inspect] _refetch_ancestor_clean: FindFirst raised: {e}")
+            return None
+        if not found:
+            log(f"[inspect] _refetch_ancestor_clean: FindFirst found nothing under "
+                f"the resolved root for id={anc_id!r} class={anc_class!r} "
+                f"name={anc_name!r} — falling back to the climbed reference")
+            return None
+        return found
+
+    # 2026-08-09/10 (형제 개수 널뛰기 조사): poc/probe_ancestor_chain.py
+    # --sample으로 실측 — 폴더 진입/트리 펼치기 직후 조상의 자식 개수가
+    # 실제 값으로 안정되기까지 트리는 0.6~0.9s, **리스트(폴더 진입)는 최대
+    # 1.8s**까지 걸리는 걸 직접 재현 확인(project→code-generator 진입,
+    # 33→26으로 정확히 1800ms/샘플#6에서 수렴, 그 전까진 6번 연속 이전
+    # 값). 스크롤 위치를 바꿔도 개수가 그대로였으므로(가상화 가설은 리스트
+    # 컨트롤에서는 기각) 원인은 순수 타이밍 — 조회 자체를 몇 번 짧게
+    # 재시도하면 해결된다. 기존 예산(3회×0.3s=0.9s)은 실측된 1.8s의 절반
+    # 밖에 안 돼 부족했다 — 실측치 위에 여유를 둔 10회×0.3s(=2.7s)로 확장.
+    _SIBLING_SETTLE_RETRIES = 10
+    _SIBLING_SETTLE_INTERVAL = 0.3
+    # 2026-08-10 (사용자 설계 제안): whole-call deadline for
+    # _ancestor_sibling_selector, shared across every ancestor level it
+    # climbs — replaces the old per-level budget that multiplied by climb
+    # depth (up to 4 x 2.7s = 10.8s, measured on FileZilla's TreeView where
+    # indentation makes every rect miss the exact-match early-exit in
+    # _find_sibling_by_controltype). 1.0s total, no matter how many levels.
+    _SIBLING_SETTLE_DEADLINE = 1.0
+
+    def _find_sibling_by_controltype(self, ancestor, ct, target_rect, target_hwnd,
+                                      target_name, deadline=None):
+        """DIRECT children of ancestor (TreeScope_Children — see
+        _ancestor_sibling_selector's docstring for why not Subtree) matching
+        ct, narrowed to the one matching target_rect (+ hwnd/name tiebreaker).
+        Returns (index, count) or None. Split out of
+        _ancestor_sibling_selector so its climb-to-the-next-ancestor loop can
+        retry this cheaply at each level (2026-08-08).
+
+        Retries the whole census a few times on a miss (2026-08-09) — a miss
+        right after a state-changing action (folder navigation, tree expand)
+        is very often the ancestor still settling, not a real structural
+        absence (see poc/probe_ancestor_chain.py --sample measurements).
+
+        `deadline` (2026-08-10, whole-call budget) is a `time.time()`-based
+        cutoff shared across every ancestor level _ancestor_sibling_selector
+        climbs, checked before each retry sleep — see its definition for why
+        a per-level budget alone (this function retrying up to
+        _SIBLING_SETTLE_RETRIES times at EVERY level) wasn't enough."""
+        # 2026-08-10 (사용자 실측 — 캡처 지연 3~4초): 조상에 그 controlType의
+        # 자식이 "하나도 없음"은 구조적으로 불가능한 상태(Pane/panel 같은
+        # 컨테이너는 애초에 ListItem/TreeItem을 못 가짐)라 아무리 기다려도
+        # 안 바뀐다 — 재시도할 가치가 없다. "형제는 있는데 rect가 하나도 안
+        # 맞음"만 타이밍 문제일 수 있어 재시도 가치가 있다(원래 7번 이슈가
+        # 고치려던 것). 이 둘을 구분하지 않고 매 조상 레벨마다 3회씩 재시도한
+        # 게 _ancestor_sibling_selector의 4단계 climb과 곱해져 최대 2.4초가
+        # 그냥 버려지고 있었다 — "자식 0개"는 첫 시도에서 바로 포기한다.
+        last_log = None
+        for attempt in range(self._SIBLING_SETTLE_RETRIES):
+            if attempt > 0:
+                if deadline is not None and time.time() >= deadline:
+                    log(f"[inspect] _ancestor_sibling_selector: shared "
+                        f"deadline exceeded before retry attempt "
+                        f"{attempt + 1}/{self._SIBLING_SETTLE_RETRIES} — "
+                        "stopping this level's retries early")
+                    break
+                time.sleep(self._SIBLING_SETTLE_INTERVAL)
+            try:
+                items = ancestor.FindAll(
+                    2, self._uia.CreatePropertyCondition(30003, ct))  # TreeScope_Children
+            except Exception as e:
+                last_log = (f"[inspect] _ancestor_sibling_selector: FindAll under "
+                            f"ancestor raised: {e}")
+                continue
+            if not items or not items.Length:
+                last_log = (f"[inspect] _ancestor_sibling_selector: ancestor has no "
+                            f"direct children of controlType={ct!r} — structurally "
+                            f"impossible to settle into, not retrying")
+                break
+            # 2026-08-10 (settle-vs-structural diagnosis): capture every
+            # candidate's live rect on a miss so a reproduction recording can
+            # show whether they drift toward target_rect across attempts
+            # (still settling — worth the retry budget) or sit unrelated to
+            # it the whole time (never going to match — retrying is wasted
+            # time that only grows the worker queue's backlog).
+            candidate_rects = []
+            for i in range(items.Length):
+                try:
+                    it = items.GetElement(i)
+                    ir = it.CurrentBoundingRectangle
+                    it_rect = (ir.left, ir.top, ir.right, ir.bottom)
+                    candidate_rects.append(it_rect)
+                    if it_rect != target_rect:
+                        continue
+                    if target_hwnd:
+                        if (it.CurrentNativeWindowHandle or 0) != target_hwnd:
+                            continue
+                    else:
+                        if (it.CurrentName or "") != target_name:
+                            continue
+                except Exception:
+                    continue
+                if attempt > 0:
+                    log(f"[inspect] _ancestor_sibling_selector: matched on retry "
+                        f"attempt {attempt + 1}/{self._SIBLING_SETTLE_RETRIES}")
+                return i, items.Length
+            # a candidate whose rect matches target_rect exactly but was
+            # skipped above (hwnd/name tiebreaker failed) means the position
+            # itself is settled — the element sitting there is provably a
+            # different one, not the one we're waiting for.
+            rect_matched_wrong_identity = target_rect in candidate_rects
+            log(f"[diag-settle] attempt {attempt + 1}/{self._SIBLING_SETTLE_RETRIES} "
+                f"target_rect={target_rect!r} candidates={candidate_rects!r}")
+            last_log = (f"[inspect] _ancestor_sibling_selector: {items.Length} "
+                        f"same-controlType sibling(s) found but none matched "
+                        f"target_rect={target_rect!r} (hwnd={target_hwnd!r} "
+                        f"name={target_name!r}) (attempt {attempt + 1}/"
+                        f"{self._SIBLING_SETTLE_RETRIES})")
+            # 2026-08-10 (user-measured 4.5s capture delay, FileZilla local
+            # list): a rect that matches target_rect EXACTLY but still fails
+            # the hwnd/name tiebreaker is not "still settling" — a settling
+            # list's rects are still shifting into place, so an exact rect
+            # match this early means the position is already final and the
+            # element sitting there is provably a different one (the row was
+            # recycled/renamed under it, e.g. by the time a backlogged worker
+            # got here the user had already navigated further). No amount of
+            # waiting fixes an identity that has already changed — retrying
+            # here only burns the budget and grows the queue backlog that
+            # caused the staleness in the first place. Give up immediately
+            # instead of spending the remaining attempts.
+            if rect_matched_wrong_identity:
+                log(f"[inspect] _ancestor_sibling_selector: target_rect="
+                    f"{target_rect!r} matched exactly but failed the hwnd/name "
+                    f"tiebreaker — not a settling timing issue (rects are "
+                    f"already final), the element there is a different one; "
+                    f"giving up after attempt {attempt + 1}/"
+                    f"{self._SIBLING_SETTLE_RETRIES} instead of burning the "
+                    f"remaining retry budget")
+                break
+        if last_log:
+            log(last_log)
         return None
 
     def element_at(self, x, y):
@@ -669,6 +1040,13 @@ class UIAInspector:
     # 원래 요소 서브트리에서 안 보임(FileZilla 메뉴바, #32768 클래스).
     EXPAND_COLLAPSE_PATTERN_ID = 10005
 
+    # UIA_LegacyIAccessiblePatternId — MSAA/IAccessible bridge. Tried only as
+    # a last-resort naming fallback in describe() when both CurrentName and
+    # CurrentAutomationId come back empty: some native (Win32/MFC/VCL/wx)
+    # controls populate the older MSAA Name/Description/Help properties
+    # without ever populating the modern UIA Name/AutomationId properties.
+    LEGACY_IACCESSIBLE_PATTERN_ID = 10018
+
     def has_expand_collapse(self, elem):
         try:
             return elem.GetCurrentPattern(self.EXPAND_COLLAPSE_PATTERN_ID) is not None
@@ -824,8 +1202,9 @@ class UIAInspector:
             return root
         return None
 
-    def _same_process_top_windows(self, elem):
-        """Every visible top-level window owned by elem's own process.
+    def _same_process_top_windows(self, elem, extra_pids=None):
+        """Every visible top-level window owned by elem's own process (plus
+        any caller-supplied extra_pids — see below).
 
         A Win32 popup menu (TrackPopupMenu — "더 보기") always renders as a
         SEPARATE top-level window, and measured 2026-08-04 (HeidiSQL): unlike
@@ -837,28 +1216,46 @@ class UIAInspector:
         resolve against. A fresh same-PID window enumeration finds it
         without depending on watcher-thread timing or foreground/activation
         behavior, which differs per control (a combo's own owner-drawn list
-        is a CHILD of the main window and doesn't need this at all)."""
-        pid = 0
+        is a CHILD of the main window and doesn't need this at all).
+
+        2026-08-08 (FileZilla 빠른 연결 지우기 실측, poc/probe_filezilla_
+        quickconnect_dropdown.py로 확인): 이 함수가 PID를 구하는 두 경로 —
+        elem.CurrentNativeWindowHandle(항목 자체가 lightweight라 보통 0)과
+        foreground_top_window()(팝업이 열려 있는 동안 신뢰 불가, 바로 위
+        docstring이 이미 그렇게 말한다) — 가 둘 다 실패하면 pid=0으로
+        조용히 빈 리스트를 반환한다. 실측 로그(`searched:
+        ['hwnd=1575272: not a Menu root (fast path)']`)가 정확히 이 경우 —
+        진짜 열려 있던 팝업(#32768 Menu, 새 최상위 창)이 후보에 아예 없었다.
+        Recorder는 세션 내내 신뢰성 있는 PID 집합을 이미 별도로 추적한다
+        (self._target_pids() — watcher/self-heal이 채움). 호출자가 그 집합을
+        extra_pids로 넘기면, elem 기반 유도가 실패해도 이 신뢰할 수 있는
+        PID들로 계속 검색한다 — 매 호출마다 클릭된 요소 하나에서 PID를
+        재유도하는 취약한 단일 경로에 기대지 않는다."""
+        pids = set(extra_pids or ())
         try:
             h = elem.CurrentNativeWindowHandle
             if h:
-                pid = pid_of_hwnd(h)
+                p = pid_of_hwnd(h)
+                if p:
+                    pids.add(p)
         except Exception:
             pass
-        if not pid:
-            pid = pid_of_hwnd(foreground_top_window())
-        if not pid:
+        if not pids:
+            p = pid_of_hwnd(foreground_top_window())
+            if p:
+                pids.add(p)
+        if not pids:
             return []
         out = []
         for hwnd in visible_toplevel_windows():
             try:
-                if pid_of_hwnd(hwnd) == pid:
+                if pid_of_hwnd(hwnd) in pids:
                     out.append(hwnd)
             except Exception:
                 continue
         return out
 
-    def _search_roots_for_menu(self, elem):
+    def _search_roots_for_menu(self, elem, extra_pids=None):
         """_search_roots_for() plus every same-process top-level window —
         see _same_process_top_windows()."""
         seen = set()
@@ -870,7 +1267,7 @@ class UIAInspector:
             if h:
                 seen.add(h)
             yield root
-        for hwnd in self._same_process_top_windows(elem):
+        for hwnd in self._same_process_top_windows(elem, extra_pids=extra_pids):
             if not hwnd or hwnd in seen:
                 continue
             seen.add(hwnd)
@@ -1278,14 +1675,22 @@ class UIAInspector:
     # cannot both legitimately be open at once, but a shared cache would
     # still couple two independent state machines for no reason.
 
-    def snapshot_open_menu(self, elem, info):
+    def snapshot_open_menu(self, elem, info, extra_pids=None):
         """Record the geometry of a popup menu's items WHILE IT IS STILL OPEN.
 
         Same race as snapshot_open_dropdown(): the click that picks an item
         also closes the popup, and the worker thread inspects 0.2-0.5s later
         — by then the Menu container and its MenuItem children are gone. So
         snapshot on the click that OPENS it (elem is the trigger MenuItem,
-        already Expanded by the time this runs)."""
+        already Expanded by the time this runs).
+
+        extra_pids (2026-08-08): forwarded to _search_roots_for_menu() ->
+        _same_process_top_windows() — pass the caller's authoritative,
+        session-tracked PID set (Recorder._target_pids()) so candidate-window
+        search doesn't depend solely on this specific elem's own (often
+        hwnd=0) window handle or the momentarily-unreliable foreground
+        window. See _same_process_top_windows()'s docstring for the FileZilla
+        빠른 연결 지우기 case this fixes."""
         if not self._is_menu_like(info):
             # DIAGNOSTIC: only for elements that could plausibly BE a menu
             # trigger (support ExpandCollapsePattern) — avoids logging on
@@ -1386,7 +1791,7 @@ class UIAInspector:
                     break
                 time.sleep(0.1)
             tried = []
-            roots = list(self._search_roots_for_menu(elem))
+            roots = list(self._search_roots_for_menu(elem, extra_pids=extra_pids))
             menu = None
             # 1단계: 모든 후보의 빠른 경로만 확인 (전체 트리 스캔 없음).
             for root in roots:
@@ -1462,6 +1867,64 @@ class UIAInspector:
         self._menu_cache = {"trigger": elem, "rows": rows, "ts": time.time()}
         log(f"[inspect] popup menu opened — cached geometry of {len(rows)} items "
             "(the selecting click closes the menu before it can be inspected)")
+
+    def snapshot_new_popup_menu(self, new_hwnds, trigger):
+        """Controltype/pattern-agnostic counterpart to snapshot_open_menu():
+        given hwnds of top-level windows that just appeared (didn't exist
+        right before this click), check whether any of them IS a Win32 popup
+        menu (#32768, root ControlType == Menu) and, if so, cache its
+        MenuItem children the same way snapshot_open_menu() does.
+
+        Why this exists (2026-08-08, FileZilla 빠른 연결 드롭다운 실측via
+        poc/probe_filezilla_quickconnect_dropdown.py): the trigger here is a
+        plain Button, and both ExpandCollapsePattern and InvokePattern are
+        unsupported/no-op on it (confirmed live — the popup only opens via a
+        real SendInput click). snapshot_open_menu()'s _is_menu_like() gate
+        (controlType in MenuItem/SplitButton) never lets this trigger's
+        opening click reach the search at all, so the only chance left was
+        the item-picking click — by which point the popup is already being
+        destroyed (measured: `searched: ['hwnd=...: not a Menu root']` even
+        after fixing the PID-derivation bug in _same_process_top_windows).
+
+        This method is called unconditionally on EVERY click's inspection
+        (see Recorder._inspect()), comparing the current same-process
+        top-level window set against the previous click's — so it runs on
+        the OPENING click (while the popup still reliably exists), not the
+        closing one, regardless of what the trigger's own ControlType or
+        pattern support claims."""
+        for hwnd in new_hwnds:
+            try:
+                root = self._uia.ElementFromHandle(hwnd)
+                if not root or root.CurrentControlType != self.CT_MENU:
+                    continue
+                items = root.FindAll(7, self._uia.CreatePropertyCondition(
+                    30003, self.CT_MENU_ITEM))
+            except Exception:
+                continue
+            if not items or not items.Length:
+                continue
+            rows = []
+            for i in range(items.Length):
+                it = items.GetElement(i)
+                try:
+                    r = it.CurrentBoundingRectangle
+                except Exception:
+                    continue
+                rows.append((it, r))
+            if not rows:
+                continue
+            self._menu_cache = {
+                "trigger": trigger,
+                "rows": self._rows_to_cache(rows),
+                "ts": time.time(),
+            }
+            try:
+                trigger_name = trigger.CurrentName if trigger is not None else None
+            except Exception:
+                trigger_name = "?"
+            log(f"[inspect] snapshot_new_popup_menu: new window hwnd={hwnd} is a "
+                f"Menu with {len(rows)} item(s) — cached (trigger={trigger_name!r})")
+            return
 
     def _menu_item_from_cache(self, x, y):
         """Resolve (x, y) against the geometry cached while the menu was open."""
@@ -1556,7 +2019,7 @@ class UIAInspector:
             walker = self._uia.ControlViewWalker
             cur = elem
             for _ in range(max_up):
-                if cur is None:
+                if not cur:  # None or NULL COM pointer (CLAUDE.md §5)
                     return 0
                 try:
                     h = cur.CurrentNativeWindowHandle
@@ -1564,7 +2027,16 @@ class UIAInspector:
                         return h
                 except Exception:
                     pass
-                cur = walker.GetParent(cur)
+                # 2026-08-08: was walker.GetParent(cur) — IUIAutomationTreeWalker
+                # has no such method (only GetParentElement); every call here
+                # raised AttributeError, silently swallowed by the try/except
+                # below, so this always returned 0 for any hwnd=0 element that
+                # needed more than one hop (e.g. a SplitButton) — confirmed via
+                # a live FileZilla recording where this 0 sent _search_root_for
+                # to GetForegroundWindow() (by then the newly-opened dialog, not
+                # the app's own window), which made _refetch_ancestor_clean
+                # search the wrong window's subtree and silently return None.
+                cur = walker.GetParentElement(cur)
         except Exception:
             pass
         return 0
@@ -1596,9 +2068,46 @@ class UIAInspector:
         return self._uia.GetFocusedElement()
 
     @staticmethod
-    def describe(elem):
+    def describe(elem, fg_hwnd_hint=None, uia=None, root_hwnd_hint=None):
         """Extract metadata from a UIA element. Never raises - returns partial
-        data on failure (reliability requirement)."""
+        data on failure (reliability requirement).
+
+        root_hwnd_hint (2026-08-08, 2nd fix): element_at() ALREADY computes
+        a reliable owning-window hwnd for the RAW element via
+        resolve_root_hwnd() before deepening to a more specific child
+        (self._last_trace["root_hwnd"] — confirmed correct live: FileZilla's
+        "파일(F)" click resolved root_hwnd=395052 there). The uia ancestor
+        walk below re-derives this from the FINAL (deepened) elem instead,
+        and — confirmed live — that re-derivation can fail even when the
+        original walk on the raw element succeeded (deepened element's
+        ancestor chain/COM behavior differs). Prefer this already-proven
+        value first; it costs one GetAncestor+GetWindowText, no new COM
+        tree-walk. Only meaningful for the ONE describe() call right after
+        element_at() resolves this same click's primary element — other
+        describe() calls in _inspect() (self-heal, ancestor lookups, cache
+        hits) describe a DIFFERENT element and must not reuse this hint.
+
+        uia (2026-08-08): the caller's IUIAutomation COM object. When elem's
+        own hwnd is 0 (the common case — most menu items), windowTitle is
+        resolved by walking elem's UIA ancestors for the nearest real window
+        handle (same logic as UIAInspector.resolve_root_hwnd, duplicated
+        here since describe() is a staticmethod) — this is STRUCTURAL, not
+        focus-based, so it can't be fooled by which window happens to be
+        foreground. This was resolve_root_hwnd()'s own stated purpose
+        (2026-07-13, PuTTY: foreground fallback silently produced a correct
+        windowTitle for the WRONG element) but was never actually wired into
+        describe() — confirmed 2026-08-08 (FileZilla "파일(F)" menu click):
+        even with a captured fg_hwnd_hint, GetForegroundWindow() read inside
+        a low-level mouse hook can still reflect the PRE-click foreground
+        (the OS hasn't finished switching focus to the just-clicked window
+        yet), mislabeling windowTitle with an unrelated window (here: this
+        very recording tool's own Chrome tab) — which then poisoned
+        launchApp()'s target title and broke replay entirely.
+
+        fg_hwnd_hint (2026-08-08): the foreground hwnd captured AT THE MOMENT
+        of the physical click (see Recorder._on_click) — used only if the
+        uia ancestor walk above also fails to find a real window. Kept as a
+        second-best fallback before the live GetForegroundWindow() query."""
         info = {
             "automationId": "",
             "className": "",
@@ -1610,6 +2119,8 @@ class UIAInspector:
             "rootHwnd": 0,
             "locatorStrategy": "",   # NEW
             "locatorValue": "",      # NEW
+            "nameSource": "",        # "" = real UIA CurrentName; otherwise which
+                                      # fallback (below) scavenged the name from.
             "rect": None,            # DIAGNOSTIC: (left, top, right, bottom) of the
                                       # matched element — lets [click] log lines show
                                       # whether the click point actually falls inside
@@ -1627,10 +2138,63 @@ class UIAInspector:
                 info[key] = getter() or ""
             except Exception:
                 pass
+
+        # Last-resort naming fallback: standard UIA Name/AutomationId are
+        # both empty (measured on FileZilla's wxToolBar buttons, 2026-08-08 —
+        # controlType='CheckBox', name='', automationId=''). Never runs when
+        # either is already populated, so this cannot change behavior for
+        # any element that already resolves normally. Order: LegacyIAccessible
+        # (MSAA bridge — Name, then Description, then Help) before the plain
+        # UIA HelpText/FullDescription properties, since Legacy is more often
+        # populated by native Win32/MFC/VCL/wx controls that skip modern UIA
+        # naming. Every attempt is wrapped so an unbound/mismatched comtypes
+        # property name fails safely into the next fallback instead of
+        # crashing describe() (its own "never raises" contract).
+        if not info["automationId"] and not info["name"]:
+            try:
+                legacy = elem.GetCurrentPattern(UIAInspector.LEGACY_IACCESSIBLE_PATTERN_ID)
+                if legacy:  # comtypes: NULL COM pointer on miss, not None — test truthiness
+                    import comtypes.client  # local import (see UIAInspector.__init__ for the same pattern)
+                    mod = comtypes.client.GetModule("UIAutomationCore.dll")  # cached by comtypes after first call
+                    legacy = legacy.QueryInterface(mod.IUIAutomationLegacyIAccessiblePattern)
+                    for src, getter in (
+                        ("legacy-name", lambda: legacy.CurrentName),
+                        ("legacy-description", lambda: legacy.CurrentDescription),
+                        ("legacy-help", lambda: legacy.CurrentHelp),
+                    ):
+                        try:
+                            val = getter() or ""
+                        except Exception:
+                            val = ""
+                        if val:
+                            info["name"] = val
+                            info["nameSource"] = src
+                            break
+            except Exception:
+                pass
+            if not info["name"]:
+                for src, getter in (
+                    ("help-text", lambda: elem.CurrentHelpText),
+                    ("full-description", lambda: elem.CurrentFullDescription),
+                ):
+                    try:
+                        val = getter() or ""
+                    except Exception:
+                        val = ""
+                    if val:
+                        info["name"] = val
+                        info["nameSource"] = src
+                        break
+
         try:
-            info["controlType"] = UIA_CONTROL_TYPES.get(
-                elem.CurrentControlType, str(elem.CurrentControlType)
-            )
+            _ct_id = elem.CurrentControlType
+            info["controlType"] = UIA_CONTROL_TYPES.get(_ct_id, str(_ct_id))
+            # Raw numeric UIA ControlType id, additive alongside the
+            # human-readable string above — _ancestor_sibling_selector's
+            # cached_ct needs the numeric id (it feeds CreatePropertyCondition
+            # directly), and describe() is the only place that already reads
+            # CurrentControlType near click time (2026-08-08).
+            info["controlTypeId"] = _ct_id
         except Exception:
             pass
         try:
@@ -1655,13 +2219,51 @@ class UIAInspector:
                 info["windowTitle"] = win32gui.GetWindowText(root or hwnd)
         except Exception:
             pass
+        # 2026-08-08 (2차 수정): element_at()가 원본(raw) 요소에서 이미 성공적으로
+        # 계산해둔 root_hwnd(_last_trace["root_hwnd"])가 있으면 최우선으로 쓴다 —
+        # 아래 조상 탐색을 "깊어진" 최종 elem에서 다시 하면 실측상 실패할 수 있다
+        # (원본에서는 성공했던 걸). 새 COM 트리 탐색 없이 GetAncestor 한 번뿐.
+        if not info["windowTitle"] and root_hwnd_hint:
+            try:
+                root = ctypes.windll.user32.GetAncestor(root_hwnd_hint, GA_ROOT) or root_hwnd_hint
+                info["rootHwnd"] = root
+                info["windowTitle"] = win32gui.GetWindowText(root)
+            except Exception:
+                pass
+        # 2026-08-08: hwnd=0 요소(대부분의 메뉴 항목)는 포그라운드로 폴백하기
+        # 전에, elem 자신의 UIA 조상을 걸어 올라가 진짜 소유 창을 구조적으로
+        # 찾는다 — 포커스 상태와 무관하므로 타이밍에 흔들리지 않는다.
+        # resolve_root_hwnd()와 같은 로직(설계 의도가 바로 이거였는데
+        # describe()엔 실제로 연결된 적이 없었다 — 위 describe() docstring 참고).
+        if not info["windowTitle"] and uia is not None and elem is not None:
+            try:
+                walker = uia.ControlViewWalker
+                cur = elem
+                for _ in range(15):
+                    if not cur:  # None or NULL COM pointer (CLAUDE.md §5)
+                        break
+                    try:
+                        h = cur.CurrentNativeWindowHandle
+                        if h:
+                            root = ctypes.windll.user32.GetAncestor(h, GA_ROOT) or h
+                            info["rootHwnd"] = root
+                            info["windowTitle"] = win32gui.GetWindowText(root)
+                            break
+                    except Exception:
+                        pass
+                    # 2026-08-08: same GetParent -> GetParentElement typo fix
+                    # as resolve_root_hwnd() above (that one's comment has the
+                    # full story) — this copy silently never climbed either.
+                    cur = walker.GetParentElement(cur)
+            except Exception:
+                pass
         # Fallback: foreground window for UWP elements where hwnd=0
         # (UWP elements often return CurrentNativeWindowHandle=0, leaving
         #  windowTitle empty, causing buildUserPrompt to fall back to the
         #  English appName instead of the localized title like "계산기")
         if not info["windowTitle"]:
             try:
-                fg = ctypes.windll.user32.GetForegroundWindow()
+                fg = fg_hwnd_hint or ctypes.windll.user32.GetForegroundWindow()
                 if fg:
                     info["windowTitle"] = win32gui.GetWindowText(fg)
             except Exception:
@@ -1884,8 +2486,9 @@ def top_window_at(x, y):
         return 0
 
 
-def tracked_window_containing(x, y, hwnds):
-    """First tracked hwnd whose window rect contains the screen point.
+def tracked_window_containing(x, y, hwnds, margin=12):
+    """First tracked hwnd whose window rect (expanded by `margin` px)
+    contains the screen point.
 
     Used only as a contradiction detector: if top_window_at() says the point
     belongs to a foreign window while the point is geometrically inside a
@@ -1893,16 +2496,39 @@ def tracked_window_containing(x, y, hwnds):
     be dropped silently (2026-07-24 PuTTY: the click that switched to the
     Proxy panel vanished from the capture with no warning, so the generated
     test simply had no panel-switch step and every later step failed).
+
+    margin (2026-08-08, FileZilla close-button 실측): a control sitting right
+    at a window's edge (a titlebar close/X button is the common case) can
+    have its real click coordinate land a few px past GetWindowRect()'s exact
+    boundary — render/DPI/subpixel slop, measured 6-44px on FileZilla's own
+    close button. Exact-boundary comparison made every such click fall all
+    the way through to the harsher [skip] (fully dropped) path instead of
+    even reaching the [skip-contradiction] (kept, selector preserved when
+    independently confirmed — see _emit()) path. A small margin buys back
+    the edge without loosening the check for a click that's genuinely
+    elsewhere on screen.
     """
+    checked = []
     for h in list(hwnds or []):
         try:
-            if not win32gui.IsWindowVisible(h):
+            vis = win32gui.IsWindowVisible(h)
+            if not vis:
+                checked.append(f"hwnd={h} visible=False")
                 continue
             left, top, right, bottom = win32gui.GetWindowRect(h)
-        except Exception:
+        except Exception as e:
+            checked.append(f"hwnd={h} GetWindowRect raised {e!r}")
             continue
-        if left <= x < right and top <= y < bottom:
+        hit = left - margin <= x < right + margin and top - margin <= y < bottom + margin
+        checked.append(f"hwnd={h} rect=({left},{top},{right},{bottom}) hit={hit}")
+        if hit:
             return h
+    # 2026-08-08 진단: FileZilla 닫기 버튼이 명백히 창 경계 안(마진도 필요 없는
+    # 좌표)인데도 이 함수가 0을 반환하는 사례가 실측됐다 — 순수 코드 리딩으로는
+    # 원인(hwnd가 target_hwnds에 없었는지/rect가 달랐는지/visible=False였는지)을
+    # 못 좁혀서 다음 실행에서 바로 확인할 수 있게 여기 남긴다.
+    log(f"[tracked_window_containing] no match for ({x},{y}) margin={margin} — "
+        f"checked: {checked or 'no hwnds passed'}")
     return 0
 
 
@@ -1959,6 +2585,16 @@ class Recorder:
         self.proc = None
         self.target_hwnds = set()    # top-level window handles owned by the target
         self._popup_hwnds = set()    # windows discovered by watcher (always treated as popups)
+        # 2026-08-08: 가장 최근에 클릭 처리된 요소 — _watch_windows()가 새
+        # Menu 팝업을 발견해 큐에 넣는 "popup_check" 이벤트가 이걸 트리거로
+        # 재사용한다 (controlType/패턴 지원 여부와 무관하게 동작하는 팝업
+        # 메뉴 감지 경로 — FileZilla 빠른 연결 드롭다운처럼
+        # ExpandCollapsePattern/InvokePattern이 둘 다 무반응인 wx 커스텀
+        # 트리거를 위한 것. 기존 snapshot_open_menu()는 _is_menu_like() 게이트
+        # 때문에 이런 트리거의 여는 클릭에서 아예 시도되지 않았다). 트리거 없이
+        # trigger=None으로 캐시하면 describe(None)이 빈 정보만 돌려줘 리플레이용
+        # 셀렉터가 통째로 사라지므로, 반드시 실제 클릭 요소를 남겨둔다.
+        self._last_clicked_elem = None
         # 2026-08-05: watcher가 새로 감지한 web-host(WebView2/Chromium) 창 중
         # 아직 접근성 트리 settle을 못 받은 것들. _watch_windows()는 COM 없이
         # win32gui만 쓰는 별도 스레드라 여기서 settled_subtree_count()를 직접
@@ -2010,6 +2646,13 @@ class Recorder:
         # press-hold-move-release gesture can be told apart from a plain
         # click (drag support) — see _on_click/_handle/_emit_click_from_press.
         self._pending_press = None
+        # 2026-08-10 (FileZilla '..' 단일 클릭 실측): 이름 없는(또는
+        # automationId/className 둘 다 없는) ListItem/TreeItem 단일 클릭의
+        # "click" 이벤트 방출을 ACTIVATION_CHECK_DELAY만큼 보류 — 그 사이
+        # 실제로 뷰가 바뀌었는지(선택이 아니라 네비게이션/펼치기) 확인해
+        # activatesOnSingleClick 플래그를 붙일지 정한다. _pending_scroll과
+        # 같은 비차단 패턴(_flush_stale의 유휴 폴링에서 처리) — sleep 없음.
+        self._pending_activation = None
         # rootHwndHex of the last emitted event — lets _emit() flag a
         # window-segment boundary (newWindowSegment) from ground-truth hwnd
         # identity instead of codegen re-deriving it from title diffing
@@ -2029,6 +2672,7 @@ class Recorder:
         self._first_titles = {}
         self._probed_skip = False
         self._last_emitted_hwnd_hex = ""
+        self._last_clicked_elem = None
         self._app_install_dir_cache = None
 
         # Snapshot visible top-level windows BEFORE launching, so discovery can
@@ -2100,11 +2744,24 @@ class Recorder:
         # ever disagree at capture time.
         cursor_pt = wintypes.POINT()
         ctypes.windll.user32.GetCursorPos(ctypes.byref(cursor_pt))
+        # 2026-08-08 (FileZilla "파일(F)" 실측): describe()의 windowTitle
+        # 폴백(hwnd=0인 가벼운 요소 — 대부분의 메뉴 항목이 여기 해당)은
+        # GetForegroundWindow()를 읽는데, 원래는 워커 스레드가 그 클릭을
+        # 실제로 검사(_inspect)하는 시점에 "지금" 다시 조회했다. 워커 처리가
+        # 지연되면(실측 gap=2.86초) 그 사이 사용자가 이미 다음 동작들을
+        # 진행해 포그라운드가 바뀌어 있어, "클릭 당시"가 아니라 "뒤늦게 검사한
+        # 시점"의 창을 windowTitle로 잘못 기록했다(파일(F) 클릭이 아직 열리지도
+        # 않은 "사이트 관리자"로 찍힘 → launchFrag 오염 → launchApp이 존재한
+        # 적 없는 창을 기다려 타임아웃). GetForegroundWindow()는 GetCursorPos()와
+        # 같은 순수 win32 호출(COM/UIA 아님)이라 여기서 같이 읽어 큐에 실어
+        # 보낸다 — describe()가 나중에 다시 조회하는 대신 이 값을 쓴다.
+        fg_hwnd = ctypes.windll.user32.GetForegroundWindow()
         # Both press ("click") and release ("release") are enqueued — still
         # enqueue-only, no UIA/COM here. The worker pairs them to tell a plain
         # click apart from a press-hold-move-release drag (text selection).
         self.raw_queue.put({"kind": "click" if pressed else "release", "x": x, "y": y,
                             "cursor_x": cursor_pt.x, "cursor_y": cursor_pt.y,
+                            "fg_hwnd_at_capture": fg_hwnd,
                             "button": button.name, "ts": time.time()})
 
     def _on_scroll(self, x, y, dx, dy, injected=False):
@@ -2460,6 +3117,19 @@ class Recorder:
                             log(f"[watcher] added hwnd={hwnd} title='{title}'")
                         except Exception:
                             log(f"[watcher] added hwnd={hwnd}")
+                        # 2026-08-08 (FileZilla 빠른 연결 드롭다운): 이 새 창이
+                        # Win32 팝업 메뉴(#32768)일 수 있다 — 여기(watcher
+                        # 스레드)는 win32gui만 쓰고 COM은 절대 안 만지므로(§
+                        # "COM은 워커 스레드 하나에만"), 발견하는 이 순간 워커
+                        # 큐에 확인 요청만 넣는다. 워커가 자기 차례에 COM으로
+                        # 판별/스냅샷한다(_handle()의 popup_check 분기). 클릭
+                        # 처리 시점에만 폴링하면 트리거 클릭 처리가 팝업 생성보다
+                        # 먼저 끝나버리는 타이밍 공백이 있었다(2026-08-08 실측,
+                        # 3차 — gap=0.03s로는 아직 팝업이 없었다). 워처가 이미
+                        # 0.5초 주기로 팝업이 살아있는 동안 안정적으로 잡아내고
+                        # 있었으므로, 그 발견을 워커가 그대로 소비하게 한다.
+                        self.raw_queue.put({"kind": "popup_check", "hwnd": hwnd,
+                                             "ts": time.time()})
             except Exception:
                 pass
             time.sleep(0.5)
@@ -2493,7 +3163,7 @@ class Recorder:
 
         # final flushes
         self._flush_type_buffer()
-        self._flush_pending_click()
+        self._flush_pending_click(inspector)
         self._flush_pending_scroll()
         log("Worker finished")
 
@@ -2502,8 +3172,23 @@ class Recorder:
 
         if kind == "stop":
             self._flush_type_buffer()
-            self._flush_pending_click()
+            self._flush_pending_click(ins)
             self._flush_pending_scroll()
+            return
+
+        if kind == "popup_check":
+            # 2026-08-08: _watch_windows()가 새 same-PID 최상위 창을 발견한
+            # 순간 넣은 마커 — COM을 가진 이 스레드에서 그 창이 Win32 팝업
+            # 메뉴인지 판별하고, 맞으면 항목을 스냅샷해 _menu_cache에 넣는다.
+            # trigger는 "가장 최근에 클릭 처리된 요소"(트리거 버튼) — 없으면
+            # (녹화 시작 직후 등) describe(None)이 빈 정보만 줘서 캐시가
+            # 무의미해지므로 스킵.
+            if self._last_clicked_elem is not None:
+                try:
+                    ins.snapshot_new_popup_menu({item["hwnd"]}, self._last_clicked_elem)
+                except Exception:
+                    log("[popup_check] snapshot_new_popup_menu failed:")
+                    traceback.print_exc()
             return
 
         if kind == "click":
@@ -2522,7 +3207,7 @@ class Recorder:
             cy = item.get("cursor_y", y)
 
             if btn == "right":
-                self._flush_pending_click()
+                self._flush_pending_click(ins)
                 self._emit_pointer_event("rightClick", cx, cy, ins, ts)
                 return
 
@@ -2534,8 +3219,40 @@ class Recorder:
             # dropped. Element inspection stays at press time — that's the
             # correct element for both a click and a drag's start point.
             if self._pending_press is not None:
-                self._emit_click_from_press(self._pending_press)
-            elem = self._inspect(ins, cx, cy)
+                self._emit_click_from_press(self._pending_press, ins)
+            # 2026-08-09 (사용자 지시, FileZilla+7-Zip 실측): 더블클릭의 두
+            # 번째 서브클릭은 라이브 재조회를 하지 않는다 — 첫 클릭으로 UI가
+            # 반응(선택 하이라이트, 리스트 재도장, 폴더 진입 등)하는 사이
+            # hit-test 결과가 바뀌는 레이스가 실측됐다. "무엇을 클릭하려
+            # 했는가"는 첫 서브클릭 시점에 이미 정해져 있으므로, 이 press가
+            # 직전 완료된 클릭과 더블클릭으로 페어링될 조건(반경/시간)을 이미
+            # 만족하면 그 클릭의 elem을 그대로 물려쓴다. 첫 서브클릭이 완전히
+            # 못 찾은 "유령" 셀렉터(locatorStrategy=="coordinate")였다면
+            # 물려주지 않고 평소처럼 라이브 재조회로 폴백한다.
+            ll = self._last_left_click
+            ll_elem = ll.get("elem") if ll else None
+            ll_usable = bool(ll_elem) and ll_elem.get("locatorStrategy") != "coordinate"
+            if (ll and ts - ll["ts"] <= DOUBLE_CLICK_INTERVAL
+                    and abs(cx - ll["x"]) <= DOUBLE_CLICK_RADIUS
+                    and abs(cy - ll["y"]) <= DOUBLE_CLICK_RADIUS
+                    and ll_usable):
+                elem = ll_elem
+                com_elem = ll.get("com_elem")
+                log(f"[diag-click] second sub-click of a double-click — reusing "
+                    f"first sub-click's target (name={elem.get('name')!r}) "
+                    f"instead of re-inspecting at ({cx},{cy})")
+            else:
+                elem = self._inspect(ins, cx, cy, fg_hwnd_hint=item.get("fg_hwnd_at_capture"))
+                # 2026-08-10: _inspect()는 info 딕셔너리만 반환한다 — 활성화
+                # 감지(아래 _emit_click_from_press/_pending_activation)에 필요한
+                # 살아있는 COM 참조는 element_at()이 방금 채워둔
+                # self._last_clicked_elem에서 얻는다(팝업 감지가 이미 같은
+                # 용도로 쓰는 필드 재사용, 3.5xx행 근처). 콤보/메뉴 캐시-히트
+                # 경로처럼 이 필드가 최신이 아닐 수도 있는 케이스는 아래
+                # 후보 판정(controlType 등)이 대부분 걸러준다 — 최선 노력이지
+                # 재생 셀렉터처럼 정확성을 요구하지 않는다(검증 실패 시 그냥
+                # 플래그를 안 붙일 뿐).
+                com_elem = self._last_clicked_elem
             # DIAGNOSTIC (kept for verification) — pynput_pt vs cursor_pt and
             # the resolved element name, so a re-recording can be eyeballed.
             gap = time.time() - ts
@@ -2543,7 +3260,7 @@ class Recorder:
             log(f"[diag-click] pynput_pt=({x},{y}) cursor_pt=({cx},{cy}) "
                 f"delta={delta} gap={gap:.4f}s "
                 f"elem_name='{elem.get('name', '')}' elem_rect={elem.get('rect')}")
-            self._pending_press = {"x": cx, "y": cy, "ts": ts, "elem": elem}
+            self._pending_press = {"x": cx, "y": cy, "ts": ts, "elem": elem, "com_elem": com_elem}
             return
 
         if kind == "release":
@@ -2563,12 +3280,12 @@ class Recorder:
                            ts=press["ts"], end=(cx, cy))
                 self._last_left_click = None  # a drag breaks any double-click chain
             else:
-                self._emit_click_from_press(press)
+                self._emit_click_from_press(press, ins)
             return
 
         if kind == "scroll":
             self._flush_type_buffer()
-            self._flush_pending_click()
+            self._flush_pending_click(ins)
             x, y, ts = item["x"], item["y"], item["ts"]
             cx = item.get("cursor_x", x)
             cy = item.get("cursor_y", y)
@@ -2602,7 +3319,7 @@ class Recorder:
             return
 
         if kind == "key":
-            self._flush_pending_click()
+            self._flush_pending_click(ins)
             self._flush_pending_scroll()
             special = item.get("special")
             char = item.get("char")
@@ -2729,7 +3446,13 @@ class Recorder:
         if (trace.get("root_hwnd") or 0) not in self.target_hwnds:
             return False                      # same self-contamination guard as below
         w, h = raw_rect[2] - raw_rect[0], raw_rect[3] - raw_rect[1]
-        if w <= 0 or h <= 0 or w > 400 or h > 80:
+        # 2026-08-10 (FileZilla local-list, w=490 rejected): 400 was tuned on
+        # 7-Zip's narrower columns and over-rejects a wider single-column
+        # name list. Widened rather than dropped — controlType=='Edit' above
+        # already excludes containers (Pane/Window), so this height-paired
+        # cap is only a sanity backstop against a degenerate/huge rect, not
+        # the primary guard.
+        if w <= 0 or h <= 0 or w > 1500 or h > 80:
             return False                      # a row's name cell, not a container
         info["name"] = raw.get("name") or ""
         info["className"] = raw.get("className") or ""
@@ -2743,6 +3466,71 @@ class Recorder:
             "— this control family's list-row name cell. Recording it as the "
             "ListItem row it belongs to, which is what the row-ancestor climb "
             "would have produced had the element survived.")
+        return True
+
+    def _adopt_stale_menuitem(self, trace, raw, info, x, y):
+        """Recover a native popup-menu item whose second read landed on
+        whatever opened AFTER the menu closed, not on a dead/empty read.
+
+        A third shape of the same "read twice, world changed in between" race
+        as _adopt_dead_row_cell, for Win32 menus instead of virtualized list
+        rows. Measured live 2026-08-06 (FileZilla 파일(F) -> 사이트 관리자(S)...):
+        the user's click landed 2.39s before the worker thread inspected it
+        (a slow gap, [diag-click] gap=2.3880s) — long enough that by the time
+        _inspect() re-described the same screen point, the menu had closed
+        AND the Site Manager dialog it opens had already appeared there:
+
+            raw  = name='사이트 관리자(S)...\\tCtrl+S' ct='MenuItem' id='33662'
+                   rect=(521,130,953,156)
+            late = name=''                              ct='SplitButton' id=''
+                   rect=(520,128,571,159)
+
+        Unlike the ListView case, `late` here is not dead (COMError/all-zero
+        rect) — it is a perfectly valid, live element. It is simply the WRONG
+        one: a toolbar SplitButton belonging to the dialog that opened at
+        that exact screen position after the click, not the menu item the
+        user actually selected. _menu_item_from_cache() exists for exactly
+        this race but only matches while its own geometry snapshot is still
+        current; a gap this long can outlast it. _adopt_dead_row_cell() does
+        not apply either — it requires the late read to have failed and the
+        raw read to be an unlabeled Edit surrogate, neither of which holds.
+
+        Consequence when this goes unrepaired: the event that should select
+        "사이트 관리자(S)..." from the 파일(F) menu gets an empty name AND
+        automationId, codegen has nothing to build a selector from, and drops
+        the click. The dialog that click was supposed to open never opens at
+        replay, and every later step scoped to that window fails
+        ("window ... not found") — one uncaptured click cascading into total
+        failure for the rest of the recording.
+
+        Deliberately narrow: only a MenuItem raw read with BOTH a name and an
+        automationId (a resolvable, selector-worthy item — not an icon-only
+        one) is restored, and only when the click point still falls inside
+        raw's own rect and raw's root window is one this session is tracking.
+        A control that genuinely differs between reads for a real reason
+        (not this race) is not something this function can distinguish from
+        one that raced, so it is intentionally scoped to the one measured
+        shape rather than generalized to "raw differs from late, adopt raw."
+        """
+        if raw.get("controlType") != "MenuItem":
+            return False
+        if not raw.get("name") or not raw.get("automationId"):
+            return False
+        raw_rect = raw.get("rect")
+        if not isinstance(raw_rect, tuple) or not point_in_rect(raw_rect, x, y):
+            return False
+        if (trace.get("root_hwnd") or 0) not in self.target_hwnds:
+            return False
+        late_name = info.get("name") or "(unnamed)"
+        info["name"] = raw["name"]
+        info["automationId"] = raw["automationId"]
+        info["controlType"] = "MenuItem"
+        info["className"] = raw.get("className") or ""
+        info["rect"] = raw_rect
+        log(f"[inspect] menu item at ({x},{y}) was stale: the second read landed "
+            f"on {late_name!r} from whatever opened after the menu closed, but "
+            f"the first read — taken while the menu was still open — saw "
+            f"{raw['name']!r}. Restoring the earlier identity.")
         return True
 
     def _restore_recycled_row_name(self, ins, info, x, y):
@@ -2804,8 +3592,35 @@ class Recorder:
         if trace.get("picked_by") != "row-ancestor":
             if self._adopt_dead_row_cell(trace, raw, info, x, y):
                 return
-            # Neither shape — leave it alone, but print the two facts that
-            # would decide how to handle it if it ever shows up.
+            if self._adopt_stale_menuitem(trace, raw, info, x, y):
+                return
+            # 2026-08-10 (FileZilla, picked_by='smallest_element_at'): late
+            # is a perfectly live, valid element here — just the wrong one,
+            # because the element at this exact screen position was
+            # recycled/repointed between the two reads. Same "earliest
+            # observation wins" principle as the row-ancestor branch below,
+            # generalized to any picked_by: if raw and the adopted element
+            # sit at (within a few pixels of) the same position, only the
+            # Name is provably stale — restore just that, and leave the
+            # click target itself (info's rect/controlType) untouched.
+            raw_rect = raw.get("rect")
+            late_rect = info.get("rect")
+            if (rects_close(raw_rect, late_rect)
+                    and point_in_rect(raw_rect, x, y)):
+                info["name"] = raw_name
+                if not info.get("automationId") and raw.get("automationId"):
+                    info["automationId"] = raw["automationId"]
+                log(f"[inspect] element at ({x},{y}) (picked_by="
+                    f"{trace.get('picked_by')!r}) was recycled between "
+                    f"element_at()'s read and this one: it now reports "
+                    f"{late_name!r} but the first read — taken before this "
+                    f"click's own navigation — saw {raw_name!r} at the same "
+                    f"position (raw_rect={raw_rect!r} late_rect="
+                    f"{late_rect!r}). Restoring the earlier name; the "
+                    "element itself (rect/controlType) is kept as-is.")
+                return
+            # None of the known shapes — leave it alone, but print the two
+            # facts that would decide how to handle it if it ever shows up.
             log(f"[inspect] identity rot at ({x},{y}) NOT repaired: "
                 f"picked_by={trace.get('picked_by')!r} "
                 f"raw=[name={raw_name!r} ct={raw.get('controlType')!r} "
@@ -2830,7 +3645,7 @@ class Recorder:
             f"{raw_name!r}. Restoring the earlier name; the row element "
             "itself (rect/controlType) is kept as-is.")
 
-    def _inspect(self, ins, x, y):
+    def _inspect(self, ins, x, y, fg_hwnd_hint=None):
         try:
             # 2026-08-05 (TeamViewer "세션 코드가 만료되었습니다" 대화상자
             # 실측): watcher가 감지한 새 web-host 창은 여기서 소비한다 —
@@ -2883,7 +3698,7 @@ class Recorder:
                 cache_kind = "menu"
             if cache_hit is not None:
                 trigger, idx, total, item_name = cache_hit
-                info = ins.describe(trigger)
+                info = ins.describe(trigger, fg_hwnd_hint=fg_hwnd_hint, uia=ins._uia)
                 if cache_kind == "combo":
                     info["comboItemIndex"] = idx
                     info["comboItemCount"] = total
@@ -2895,7 +3710,23 @@ class Recorder:
                 info["expandCollapse"] = True
                 return info
             elem = ins.element_at(x, y)
-            info = ins.describe(elem)
+            # 2026-08-08 (2차 수정): element_at()가 원본 요소에서 이미 계산해둔
+            # 신뢰성 있는 root_hwnd — 아래 primary describe() 호출에만 전달
+            # (다른 8개 describe() 호출은 각각 다른 요소를 기술하므로 이 값을
+            # 재사용하면 안 됨 — describe()의 root_hwnd_hint docstring 참고).
+            root_hwnd_hint = ins._last_trace.get("root_hwnd")
+            info = ins.describe(elem, fg_hwnd_hint=fg_hwnd_hint, uia=ins._uia, root_hwnd_hint=root_hwnd_hint)
+            # 2026-08-08 (FileZilla 빠른 연결 드롭다운 실측, 3차 수정): 트리거의
+            # controlType/패턴 지원 여부와 무관하게 새 Menu 팝업을 잡아내는
+            # 감지는 여기(클릭 처리 시점)가 아니라 _watch_windows()가 새 창을
+            # 발견하는 순간 큐에 넣는 "popup_check" 이벤트로 처리한다(아래
+            # _handle()의 popup_check 분기, _watch_windows() 참고) — 클릭
+            # 처리 시점에만 폴링하면 트리거 클릭 처리가 팝업 생성보다 먼저
+            # 끝나버리는 타이밍 공백이 있었다(실측: gap=0.03s로 폴링해도 그
+            # 순간엔 아직 팝업이 없었다). 여기서는 "가장 최근에 클릭한 요소"만
+            # 기억해 popup_check가 트리거로 재사용할 수 있게 한다.
+            if elem is not None:
+                self._last_clicked_elem = elem
             # 2026-08-05 (7-Zip "hansung" 실측): describe()가 방금 위에서 이미
             # 성공적으로 읽은 controlType을 여기서 독립적으로 재조회하는데,
             # 그 사이 요소가 죽으면(자기 클릭이 유발한 화면 전환) 이 필드만
@@ -3086,7 +3917,7 @@ class Recorder:
                         menu_hit = ins.open_menu_item_at(elem, x, y)
                     if combo_hit is not None:
                         inner, idx, total, item_name = combo_hit
-                        info = ins.describe(inner)
+                        info = ins.describe(inner, fg_hwnd_hint=fg_hwnd_hint, uia=ins._uia)
                         elem = inner
                         info["comboItemIndex"] = idx
                         info["comboItemCount"] = total
@@ -3098,7 +3929,7 @@ class Recorder:
                             "dropping the selector")
                     elif menu_hit is not None:
                         trigger, idx, total, item_name = menu_hit
-                        info = ins.describe(trigger)
+                        info = ins.describe(trigger, fg_hwnd_hint=fg_hwnd_hint, uia=ins._uia)
                         elem = trigger
                         info["menuItemIndex"] = idx
                         info["menuItemCount"] = total
@@ -3120,7 +3951,7 @@ class Recorder:
                     # an item closes it first. See snapshot_open_dropdown()/
                     # snapshot_open_menu().
                     ins.snapshot_open_dropdown(elem, info)
-                    ins.snapshot_open_menu(elem, info)
+                    ins.snapshot_open_menu(elem, info, extra_pids=self._target_pids())
             # The adopted element was DEAD by the time describe() read it —
             # its BoundingRectangle either raised (describe stores the reason
             # as an "ERR:..." string) or came back all-zero. Measured
@@ -3209,6 +4040,14 @@ class Recorder:
                         # (정상 캡처와 같은 모양을 유지).
                         _raw["locatorFallback"] = (
                             "coordinate" if _raw.get("locatorStrategy") == "coordinate" else "")
+                        # 2026-08-08 (FileZilla 사이트관리자 닫기 버튼 실측): _raw는
+                        # element_at() 내부의 별도 이른 describe() 호출 결과라
+                        # root_hwnd_hint/uia가 전달되지 않아 rootHwnd가 안 채워져
+                        # 있었다 — _emit()의 same_owner 판정(elem.rootHwnd가
+                        # target_hwnds 멤버인지)이 이 경로에서는 항상 실패하는
+                        # 원인이었다. 위 조건에서 이미 _rroot in self.target_hwnds를
+                        # 검증했으므로 그대로 채워 넣는다 — 재조회 불필요.
+                        _raw["rootHwnd"] = _rroot
                         return _raw
                     log(f"[inspect] adopted element at ({x},{y}) is dead "
                         f"(rect={_r!r}) — its provider went away before it could "
@@ -3278,7 +4117,7 @@ class Recorder:
                         "skipping light-dismiss recovery (would search the "
                         "wrong app's tree)")
                 if under is not None:
-                    resolved = ins.describe(under)
+                    resolved = ins.describe(under, fg_hwnd_hint=fg_hwnd_hint, uia=ins._uia)
                     # The re-hit-test must land on something that actually
                     # contains the point, or we would re-adopt the very kind
                     # of near-miss the guard above just rejected — only
@@ -3313,7 +4152,7 @@ class Recorder:
                         if (isinstance(info.get("rect"), tuple)
                                 and point_in_rect(info["rect"], x, y)):
                             ins.snapshot_open_dropdown(elem, info)
-                            ins.snapshot_open_menu(elem, info)
+                            ins.snapshot_open_menu(elem, info, extra_pids=self._target_pids())
                 if light_dismiss:
                     # Still nothing usable — coordinate replay is forbidden
                     # (2026-07-10), so codegen will surface this event as an
@@ -3332,7 +4171,7 @@ class Recorder:
                     and info.get("controlType") == "Tree"):
                 row = ins.tree_item_at_row(elem, y)
                 if row is not None:
-                    row_info = ins.describe(row)
+                    row_info = ins.describe(row, fg_hwnd_hint=fg_hwnd_hint, uia=ins._uia)
                     if row_info.get("name") or row_info.get("automationId"):
                         info = row_info
                         elem = row
@@ -3349,7 +4188,7 @@ class Recorder:
                 self_hit = ins.combo_item_self(elem, info)
                 if self_hit is not None:
                     inner, idx, total = self_hit
-                    info = ins.describe(inner)
+                    info = ins.describe(inner, fg_hwnd_hint=fg_hwnd_hint, uia=ins._uia)
                     elem = inner
                     info["comboItemIndex"] = idx
                     info["comboItemCount"] = total
@@ -3365,7 +4204,7 @@ class Recorder:
                 menu_self_hit = ins.menu_item_self(elem, info)
                 if menu_self_hit is not None:
                     trigger, idx, total = menu_self_hit
-                    info = ins.describe(trigger)
+                    info = ins.describe(trigger, fg_hwnd_hint=fg_hwnd_hint, uia=ins._uia)
                     elem = trigger
                     info["menuItemIndex"] = idx
                     info["menuItemCount"] = total
@@ -3386,6 +4225,52 @@ class Recorder:
                     info["locatorValue"] = f'//*[@AutomationId="{a[0]}"]{a[1]}'
                     info["xpath"] = info["locatorValue"]
                     log(f"[inspect] anchor XPath for id/name-less element: {info['xpath']}")
+            # 부모(이름 있는 조상) + 동일 ControlType 형제 순번 셀렉터
+            # (2026-08-08, UIAInspector._ancestor_sibling_selector) —
+            # anchor_path()가 커버 못 하는 케이스(조상이 AutomationId 없이
+            # Name만 있는 경우, FileZilla 툴바 Pane처럼) 대비. anchor_path와
+            # 병행 계산 — 둘 다 채워둘 수 있음, 서로 배타적이지 않음.
+            # 2026-08-08 (FileZilla 로컬 파일목록 — blob_storage/Cache/…):
+            # automationId/className 없이 Name에 파일/폴더명을 그대로
+            # 흘려보내는 ListItem/TreeItem은 Name이 있어도 그 값이 녹화 시점
+            # 디스크 상태에 종속적이라 재생 시점엔 존재하지 않을 수 있다
+            # (TComboBoxEx의 "Name이 현재 선택값"과 같은 계열의 volatile
+            # Name 문제 — CLAUDE.md §5). automationId도 className도 없는
+            # ListItem/TreeItem은 name이 있어도 구조적(순번) 셀렉터를
+            # 우선한다. _find_sibling_by_controltype()은 target_name을
+            # 이미 타이브레이커로 지원하므로 별도 수정 불필요.
+            info_ct = info.get("controlType")
+            volatile_named_item = (
+                not info.get("automationId")
+                and not info.get("className")
+                and info_ct in ("ListItem", "TreeItem")
+            )
+            if (not light_dismiss and elem is not None
+                    and ((not info.get("automationId") and not info.get("name"))
+                         or volatile_named_item)):
+                anc = ins._ancestor_sibling_selector(
+                    elem,
+                    cached_rect=info.get("rect"),
+                    cached_ct=info.get("controlTypeId"),
+                    cached_name=info.get("name"),
+                )
+                if anc is not None:
+                    ancestor_elem, sib_idx, sib_count = anc
+                    anc_info = ins.describe(ancestor_elem, fg_hwnd_hint=fg_hwnd_hint, uia=ins._uia)
+                    info["ancestorAutomationId"] = anc_info.get("automationId", "")
+                    info["ancestorName"] = anc_info.get("name", "")
+                    info["ancestorClassName"] = anc_info.get("className", "")
+                    info["ancestorHwnd"] = anc_info.get("hwnd", 0)
+                    info["ancestorSiblingIndex"] = sib_idx
+                    info["ancestorSiblingCount"] = sib_count
+                    try:
+                        info["ancestorItemControlTypeId"] = elem.CurrentControlType
+                    except Exception:
+                        info["ancestorItemControlTypeId"] = None
+                    log(f"[inspect] ancestor+index selector for nameless element: "
+                        f"ancestor(id={anc_info.get('automationId')!r} "
+                        f"name={anc_info.get('name')!r}) sibling #{sib_idx}/{sib_count} "
+                        f"(controlType={info.get('controlType')!r})")
             # ExpandCollapsePattern 태깅 — 2026-07-13 진단(poc/diag_expandcollapse.py)으로
             # ComboBox/메뉴바 MenuItem은 일반 클릭만으로 "펼치기"가 재현 안
             # 됨을 실증했지만, **ExpandCollapsePattern "지원 여부"만으로
@@ -3428,34 +4313,156 @@ class Recorder:
         now = time.time()
         if self._pending_scroll and now - self._pending_scroll["ts"] > SCROLL_FLUSH_IDLE:
             self._flush_pending_scroll()
+        if self._pending_activation and now >= self._pending_activation["due"]:
+            self._flush_pending_activation(ins, verify=True)
 
-    def _emit_click_from_press(self, press):
+    def _emit_click_from_press(self, press, ins=None):
         """Emit click (+ doubleClick if paired) for a completed left press.
         Shared by the release handler and the stale-press flush so both
-        paths reproduce identical click/double-click semantics."""
+        paths reproduce identical click/double-click semantics. `ins` is
+        only needed to compute an activation-check snapshot (2026-08-10) —
+        callers with no live UIAInspector at hand may omit it, in which case
+        candidate clicks just skip the snapshot (their later verification
+        will find every snapshot field None and quietly not tag the
+        flag — never worse than before this feature existed)."""
         cx, cy, ts, elem = press["x"], press["y"], press["ts"], press["elem"]
-        # Every left click is recorded individually (preserves repeated
-        # presses like "9999" -> num9Button x4). A genuine fast double-click
-        # is recognised IN ADDITION, never by merging/dropping the clicks.
-        self._emit("click", elem, x=cx, y=cy, ts=ts)
+        com_elem = press.get("com_elem")
         self._last_click_xy = (cx, cy)
 
         ll = self._last_left_click
         if (ll and ts - ll["ts"] <= DOUBLE_CLICK_INTERVAL
                 and abs(cx - ll["x"]) <= DOUBLE_CLICK_RADIUS
                 and abs(cy - ll["y"]) <= DOUBLE_CLICK_RADIUS):
+            # 2026-08-09: elem은 이미 press 시점에 첫 서브클릭의 결과와
+            # 동일하게 강제돼 있다(press 핸들러의 더블클릭 재사용 로직 참고) —
+            # 여기서 다시 비교할 게 없다.
+            # 2026-08-10: 첫 서브클릭의 click 이벤트가 활성화 감지로 보류돼
+            # 있었을 수 있다(방어적 — 이 페어링 조건상 흔치 않음) — 이제
+            # doubleClick으로 확정됐으니 검증 없이 그대로 흘려보낸다. 물리
+            # 더블클릭은 실제 동작을 일으키므로 플래그가 필요 없다.
+            self._flush_pending_activation(verify=False)
+            self._emit("click", elem, x=cx, y=cy, ts=ts)
             self._emit("doubleClick", elem, x=cx, y=cy, ts=ts)
             self._last_left_click = None  # consume; avoid chaining triples
+            return
+        # 페어링되지 않은(적어도 지금까지는) 단독 클릭. 이름 없는(또는
+        # automationId/className 둘 다 없는) ListItem/TreeItem이면 즉시
+        # 방출하지 않고 실제로 뷰가 바뀌었는지(선택이 아니라 네비게이션/
+        # 펼치기) 확인할 시간을 준다 — 2026-08-10, FileZilla '..' 실측:
+        # 재생 시점엔 "선택 의도였는지 이동 의도였는지" 추측만 가능하지만,
+        # 캡처 시점엔 실제로 관측할 수 있다.
+        if self._is_activation_check_candidate(elem):
+            self._pending_activation = {
+                "elem": elem, "com_elem": com_elem, "x": cx, "y": cy, "ts": ts,
+                "due": time.time() + ACTIVATION_CHECK_DELAY,
+                "snapshot": self._activation_snapshot(ins, com_elem),
+            }
         else:
-            self._last_left_click = {"x": cx, "y": cy, "ts": ts}
+            # Every left click is recorded individually (preserves repeated
+            # presses like "9999" -> num9Button x4). A genuine fast
+            # double-click is recognised IN ADDITION, never by
+            # merging/dropping the clicks.
+            self._emit("click", elem, x=cx, y=cy, ts=ts)
+        self._last_left_click = {"x": cx, "y": cy, "ts": ts, "elem": elem, "com_elem": com_elem}
 
-    def _flush_pending_click(self):
+    @staticmethod
+    def _is_activation_check_candidate(elem):
+        """이름 없는(또는 automationId/className 둘 다 없는) ListItem/TreeItem
+        — _ancestor_sibling_selector가 구조적 셀렉터를 만드는 것과 같은
+        집합(2번 이슈의 volatile_named_item과 동일 조건, 2026-08-10). 단일
+        클릭이 실제로 뷰를 바꿨는지 검증할 가치가 있는 대상만 골라낸다 —
+        이름/ID가 있는 평범한 버튼·행은 대상에서 제외해 불필요한 지연을
+        피한다."""
+        if elem.get("controlType") not in ("ListItem", "TreeItem"):
+            return False
+        return not elem.get("automationId") and not elem.get("className")
+
+    def _activation_snapshot(self, ins, com_elem):
+        """클릭 시점 상태 스냅샷 — ExpandCollapseState와 직계 자식 개수.
+        읽기 실패한 필드는 None으로 남고, 나중에 그 필드만으로는 '변화
+        없음'을 증명하지 못할 뿐(다른 필드나 예외 감지가 대신 잡아준다)."""
+        snap = {"ecs": None, "children": None}
+        if com_elem is None:
+            return snap
+        try:
+            pattern = com_elem.GetCurrentPattern(UIA_EXPAND_COLLAPSE_PATTERN_ID)
+            if pattern:
+                snap["ecs"] = pattern.QueryInterface(
+                    ins._mod.IUIAutomationExpandCollapsePattern
+                ).CurrentExpandCollapseState
+        except Exception:
+            pass
+        try:
+            arr = com_elem.FindAll(2, ins._uia.CreateTrueCondition())  # TreeScope_Children
+            snap["children"] = arr.Length if arr else 0
+        except Exception:
+            pass
+        return snap
+
+    def _activation_changed(self, ins, com_elem, snapshot):
+        """하이브리드 검증(2026-08-10, FileZilla '..' 실측 + 사용자 리뷰
+        피드백) — 순서대로 확인:
+        ① 요소 자체가 파괴됐는가(리스트 이동처럼 행 전체가 사라지는 경우 —
+           COM 예외 자체가 100% 확실한 신호).
+        ② 살아있다면 ExpandCollapseState가 바뀌었는가(트리 노드를 펼쳐도
+           노드 자신은 안 죽고 자식만 새로 생기는 경우 — ①로는 못 잡음).
+        ③ 그것도 아니면 직계 자식 개수가 바뀌었는가(②의 패턴이 없는
+           컨트롤 대비 보조 신호).
+        단순 형제 개수 비교만으로는 우연히 같은 개수인 다른 폴더로 이동한
+        경우를 놓친다 — ①이 그 케이스(행 자체가 파괴됨)를 먼저 잡는다."""
+        if com_elem is None:
+            return False
+        try:
+            _ = com_elem.CurrentBoundingRectangle  # ① 생존 검사
+        except Exception:
+            return True
+        try:
+            pattern = com_elem.GetCurrentPattern(UIA_EXPAND_COLLAPSE_PATTERN_ID)
+            if pattern and snapshot.get("ecs") is not None:
+                now_ecs = pattern.QueryInterface(
+                    ins._mod.IUIAutomationExpandCollapsePattern
+                ).CurrentExpandCollapseState
+                if now_ecs != snapshot["ecs"]:
+                    return True
+        except Exception:
+            pass
+        try:
+            if snapshot.get("children") is not None:
+                arr = com_elem.FindAll(2, ins._uia.CreateTrueCondition())
+                now_children = arr.Length if arr else 0
+                if now_children != snapshot["children"]:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _flush_pending_activation(self, ins=None, verify=False):
+        pa, self._pending_activation = self._pending_activation, None
+        if not pa:
+            return
+        flag = False
+        if verify and ins is not None:
+            flag = self._activation_changed(ins, pa["com_elem"], pa["snapshot"])
+            if flag:
+                log(f"[activation] single click on {pa['elem'].get('controlType')!r} "
+                    f"name={pa['elem'].get('name')!r} actually changed the view — "
+                    f"tagging activatesOnSingleClick")
+        self._emit("click", pa["elem"], x=pa["x"], y=pa["y"], ts=pa["ts"],
+                    extra={"activatesOnSingleClick": True} if flag else None)
+
+    def _flush_pending_click(self, ins=None):
         # A pending left press with no release yet (e.g. focus moved before
         # button-up, or the release was lost) must not be silently dropped —
         # emit it as a plain click, same as a completed press+release would.
         if self._pending_press is not None:
             press, self._pending_press = self._pending_press, None
-            self._emit_click_from_press(press)
+            self._emit_click_from_press(press, ins)
+        # 2026-08-10: 보류 중이던 활성화-감지 클릭이 있으면(다른 이벤트가
+        # 끼어들어 확정 전에 인터럽트된 경우) 검증 없이 그대로 방출한다 —
+        # 플래그를 달려면 실제로 0.4초를 기다려야 하는데, 지금은 다른
+        # 이벤트를 처리해야 해서 더 기다릴 수 없다. 페어링돼 doubleClick이
+        # 되는 경우는 이미 위에서 처리되므로 여기 도달하지 않는다.
+        self._flush_pending_activation(verify=False)
         # Ends the open double-click window so an intervening event can't
         # pair across it.
         self._last_left_click = None
@@ -3684,29 +4691,57 @@ class Recorder:
                     # real user action from the capture — the generated test
                     # then looks complete but skips, say, the click that
                     # switched dialog panels, and every later step fails for
-                    # reasons nothing in the output explains. Keep the event,
-                    # but blank the selector: the element we hit-tested belongs
-                    # to the OTHER window, so replaying it would click a
-                    # stranger's UI. A selector-less event becomes an explicit
-                    # FAIL step in codegen (same treatment as light-dismiss
-                    # loss), which is the honest outcome.
-                    inside = tracked_window_containing(x, y, self.target_hwnds)
+                    # reasons nothing in the output explains. Keep the event.
+                    # Default to blanking the selector (the element we
+                    # hit-tested COULD belong to the OTHER window, so
+                    # replaying it might click a stranger's UI) — UNLESS we
+                    # already have independent, structural confirmation of
+                    # which window the element really belongs to (see
+                    # same_owner below), in which case blanking would throw
+                    # away a selector we already know is correct.
+                    #
+                    # 2026-08-08 (2차 수정, FileZilla 닫기 버튼 실측): 처음엔
+                    # same_owner를 tracked_window_containing(좌표 기반, margin
+                    # 튜닝 필요)의 결과와 elem.rootHwnd를 비교해서 판단했는데,
+                    # 실측: 좌표가 창 경계 한참 안쪽(마진도 필요 없는 지점)인데도
+                    # tracked_window_containing이 0을 반환하는, 원인 미상의
+                    # 사례가 나왔다(진단 로그 추가함, tracked_window_containing
+                    # 참고). elem.rootHwnd 자체가 이미 target_hwnds의 멤버인지를
+                    # **좌표 계산 없이 직접** 확인하는 쪽이 더 직접적이고
+                    # 견고하다 — UIA가 구조적으로 확인한 소유 창이 우리가 이미
+                    # 추적 중인 창이라면, 좌표가 그 창의 rect 안에 있는지는
+                    # 재확인할 필요가 없다(이미 다른 방식으로 확인된 사실이다).
+                    root_owner = elem.get("rootHwnd")
+                    same_owner = bool(root_owner) and root_owner in self.target_hwnds
+                    if same_owner:
+                        inside = root_owner
+                    else:
+                        inside = tracked_window_containing(x, y, self.target_hwnds)
                     if inside:
                         try:
                             rect = win32gui.GetWindowRect(inside)
                         except Exception:
                             rect = None
-                        log(f"[skip-contradiction] {action} at ({x},{y}) is INSIDE "
-                            f"tracked window hwnd={inside} rect={rect}, but "
-                            f"top_window_at returned {top} "
-                            f"title='{win32gui.GetWindowText(top)}' "
-                            f"(fg={foreground_top_window()}, elem_rect={elem.get('rect')}) "
-                            "— emitting a no-selector FAIL step instead of "
-                            "dropping the event")
-                        elem = dict(elem)
-                        elem["automationId"] = ""
-                        elem["name"] = ""
-                        elem["className"] = ""
+                        if same_owner:
+                            log(f"[contradiction-confirmed] {action} at ({x},{y}): "
+                                f"element's own resolved window (rootHwnd="
+                                f"{root_owner}) is already a tracked window — "
+                                "keeping the already-verified selector instead "
+                                "of blanking it (top_window_at disagreed, "
+                                f"likely window overlap: top={top} "
+                                f"title='{win32gui.GetWindowText(top)}')")
+                        else:
+                            log(f"[skip-contradiction] {action} at ({x},{y}) is INSIDE "
+                                f"tracked window hwnd={inside} rect={rect}, but "
+                                f"top_window_at returned {top} "
+                                f"title='{win32gui.GetWindowText(top)}' "
+                                f"(fg={foreground_top_window()}, elem_rect={elem.get('rect')}) "
+                                "— emitting a no-selector FAIL step instead of "
+                                "dropping the event")
+                            elem = dict(elem)
+                            elem["automationId"] = ""
+                            elem["name"] = ""
+                            elem["className"] = ""
                         contradiction = True
                     else:
                         log(f"[skip] {action} known-other-window top={top} "
@@ -3771,6 +4806,24 @@ class Recorder:
                 "locatorFallback": elem.get("locatorFallback", ""),   # NEW
                 "locatorStrategy": elem.get("locatorStrategy", ""),
                 "locatorValue": elem.get("locatorValue", ""),
+                # Which fallback (if any) scavenged "name" when standard UIA
+                # Name/AutomationId were both empty (2026-08-08,
+                # UIAInspector.describe()'s LegacyIAccessible/HelpText
+                # fallback block). "" = real UIA CurrentName. Whitelist field
+                # — same trap as comboItemIndex below: leave this out and it
+                # vanishes silently before reaching server.js.
+                "nameSource": elem.get("nameSource", ""),
+                # 부모(이름 있는 조상) + 동일 ControlType 형제 순번 (2026-08-08,
+                # UIAInspector._ancestor_sibling_selector) — comboItemIndex와
+                # 완전히 같은 화이트리스트 함정: 여기 빠뜨리면 캡처 로그엔
+                # 찍히는데 서버엔 조용히 전달 안 됨.
+                "ancestorAutomationId": elem.get("ancestorAutomationId", ""),
+                "ancestorName": elem.get("ancestorName", ""),
+                "ancestorClassName": elem.get("ancestorClassName", ""),
+                "ancestorHwnd": elem.get("ancestorHwnd", 0),
+                "ancestorSiblingIndex": elem.get("ancestorSiblingIndex"),
+                "ancestorSiblingCount": elem.get("ancestorSiblingCount"),
+                "ancestorItemControlTypeId": elem.get("ancestorItemControlTypeId"),
                 # anchor 기반 relative XPath (유니크 id/name 없는 요소 전용,
                 # 2026-07-10 지시) — codegen이 //*[@AutomationId=anchor]/path 생성.
                 "anchorId": elem.get("anchorId", ""),
@@ -3817,6 +4870,14 @@ class Recorder:
                 # dict has already sprung twice (expandCollapse 2026-07-13,
                 # comboItemIndex 2026-07-31).
                 "isWebContent": bool(elem.get("isWebContent", False)),
+                # 숫자 UIA ControlType (2026-08-10, FileZilla "C:" 트리 vs
+                # 리스트 혼동 실측) — describe()가 이미 계산해두지만
+                # (_ancestor_sibling_selector가 내부에서 씀) 여기 화이트리스트에
+                # 없어서 서버로는 안 넘어갔던 필드. automationId/className이
+                # 둘 다 없는(owner-drawn) 행에서 같은 Name이 여러 컨트롤에
+                # 걸쳐 있을 때(트리의 "C:"와 리스트의 "C:") server.js의
+                # comSafeTarget()이 이 값으로 추가 AND 조건을 걸어 구분한다.
+                "controlTypeId": elem.get("controlTypeId"),
             },
             "timestamp": time.time(),
             "app": self.session.get("appName", ""),
