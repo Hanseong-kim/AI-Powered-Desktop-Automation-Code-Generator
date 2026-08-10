@@ -1297,55 +1297,27 @@ class HeidiSQLPageByClass {
     // [W3] HeidiSQL 12.20.0.7320 - 세션 관리자 (new window)
     // ════════════════════════════════════════════════════════════
     async click3() {
-        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"ComboBox","name":""}, null, 1, 18);
-    }
-
-    async click4() {
         osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"ComboBox","name":""}, null, 4, 18);
     }
 
+    async click4() {
+        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"ComboBox","name":""}, null, 10, 18);
+    }
+
     async click5() {
-        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"ComboBox","name":""}, null, 12, 18);
+        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"ComboBox","name":""}, null, 15, 18);
     }
 
     async click6() {
-        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"TComboBox","name":""}, null, 1, 2);
-    }
-
-    async click7() {
-        await _clickScoped('HeidiSQL 12.20.0.7320 - 세션 관리자', '//TabItem[@Name="SSH 터널"]');
-    }
-
-    async click8() {
-        await _clickScoped('HeidiSQL 12.20.0.7320 - 세션 관리자', '//TabItem[@Name="고급"]');
-    }
-
-    async click9() {
-        await _clickScoped('HeidiSQL 12.20.0.7320 - 세션 관리자', '~LessButton', true);
-    }
-
-    async click10() {
-        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"TColorBox","name":""}, null, 53, 187);
-    }
-
-    async click11() {
-        await _clickScoped('HeidiSQL 12.20.0.7320 - 세션 관리자', '//TabItem[@Name="SSL"]');
-    }
-
-    async click12() {
-        await _clickScoped('HeidiSQL 12.20.0.7320 - 세션 관리자', '//TabItem[@Name="통계"]');
-    }
-
-    async click13() {
-        await _clickScoped('HeidiSQL 12.20.0.7320 - 세션 관리자', '//Button[@ClassName="TButton" and @Name="취소"]');
+        await _clickScoped('HeidiSQL 12.20.0.7320 - 세션 관리자', '//Button[@ClassName="TButton" and @Name="삭제"]');
     }
 
 
     // ════════════════════════════════════════════════════════════
     // [W4] 확인 (new window)
     // ════════════════════════════════════════════════════════════
-    async click14() {
-        await _clickScoped('확인', '//Button[@ClassName="CCPushButton" and @Name="아니요(N)"]');
+    async click7() {
+        await _clickScoped('확인', '//Button[@ClassName="CCPushButton" and @Name="예(Y)"]');
     }
 }
 
@@ -1363,7 +1335,7 @@ async function run() {
         _warmupPowerShell();
 
     _mainTitleFrag = "HeidiSQL 12.20.0.7320 - 세션 관리자";
-    _dialogRects = {"HeidiSQL 12.20.0.7320 - 세션 관리자":{"left":797,"top":144,"width":875,"height":612},"확인":{"left":722,"top":373,"width":458,"height":197}};
+    _dialogRects = {"HeidiSQL 12.20.0.7320 - 세션 관리자":{"left":797,"top":144,"width":875,"height":612},"확인":{"left":722,"top":390,"width":458,"height":164}};
     await ensureAppium();
     _rootSid = await _createSession('Root');
     console.log(`[session] Root session ${_rootSid} ready`);
@@ -1386,23 +1358,16 @@ async function run() {
     // ════════════════════════════════════════════════════════════
     // [W3] HeidiSQL 12.20.0.7320 - 세션 관리자 (new window)
     // ════════════════════════════════════════════════════════════
-            await _step('3:select item #1 (unnamed)', () => page.click3());
-            await _step('4:select item #4 (unnamed)', () => page.click4());
-            await _step('5:select item #12 (unnamed)', () => page.click5());
-            await _step('6:select item #1 sqlite3mc.dll', () => page.click6());
-            await _step('7:click SSH 터널', () => page.click7());
-            await _step('8:click 고급', () => page.click8());
-            await _step('9:doubleClick 낮게', () => page.click9());
-            await _step('10:select item #53 Aliceblue', () => page.click10());
-            await _step('11:click SSL', () => page.click11());
-            await _step('12:click 통계', () => page.click12());
-            await _step('13:click 취소', () => page.click13());
+            await _step('3:select item #4 (unnamed)', () => page.click3());
+            await _step('4:select item #10 (unnamed)', () => page.click4());
+            await _step('5:select item #15 (unnamed)', () => page.click5());
+            await _step('6:click 삭제', () => page.click6());
 
     // ════════════════════════════════════════════════════════════
     // [W4] 확인 (new window)
     // ════════════════════════════════════════════════════════════
             await _step('switch to window: 확인', async () => { await _switchWindow('확인'); osActivate('확인', _hwndCache['확인']); });
-            await _step('14:click 아니요(N)', () => page.click14());
+            await _step('7:click 예(Y)', () => page.click7());
     } finally {
 
         for (const { sid } of Object.values(_sessionIds)) {

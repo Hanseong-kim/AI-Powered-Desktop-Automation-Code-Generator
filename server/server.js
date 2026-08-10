@@ -5437,9 +5437,34 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
         );
       } else if (useSession && relTitle) {
         usesGetWindowSession = true;
-        const elSel = sel || `'//*[@Name="${escapeAttr(e.element?.name)}"]'`;
         const relTitleArg = escapeStr(relTitle);
-        pushMethod(
+        // 2026-08-10 (HeidiSQL "신규" 세션 인라인 이름 확정 Enter 실측):
+        // automationId/className/name이 전부 비어 있고 값도 순수 확정용
+        // 제어 키(Enter 등) 하나뿐이면, _typeVerified/_typeScopedOrCom을
+        // 시도해봐야 "selector has no usable fields"로 항상 실패한다 —
+        // 캡처가 대상 요소를 못 찾은 owner-drawn 인라인 편집기(예:
+        // TVirtualStringTree 이름 편집 상자, CLAUDE.md §4 Tier 3) 확정용
+        // Enter가 전형적 케이스. 이런 경우는 특정 요소를 찾을 필요가 없다
+        // — 지금 포커스에 그 키만 보내면 사용자가 실제로 한 것과 똑같이
+        // 재현된다.
+        // ⚠️ 실제 텍스트(비밀번호 등)에서 셀렉터를 못 찾은 경우까지 이
+        // 경로로 새면 화면에 떠 있는 엉뚱한 창에 그 텍스트를 그대로
+        // 흘려버릴 위험이 있다("blind typing", 사용자 리뷰 지적) — 그래서
+        // 값이 순수 제어 키 하나뿐일 때만 곧장 보내고, 그 외(진짜 텍스트)는
+        // 셀렉터가 없어도 여전히 아래의 정상 경로(시도 → 실패 시 런타임
+        // 폴백)를 그대로 탄다.
+        const hasUsableSelector = !!(e.element?.automationId || e.element?.className || e.element?.name);
+        const isControlKeyOnly = ['\n', '\r', '\t', '\x1b'].includes(e.value);
+        if (!hasUsableSelector && isControlKeyOnly) {
+          pushMethod(
+`    async type${stepNum}(value) {
+        osActivate('${relTitleArg}', _hwndCache['${relTitleArg}']);
+        osType(value);
+    }`
+          );
+        } else {
+          const elSel = sel || `'//*[@Name="${escapeAttr(e.element?.name)}"]'`;
+          pushMethod(
 `    async type${stepNum}(value) {
         const ok = await _typeVerified('${relTitleArg}', ${elSel}, value) || await _typeScopedOrCom('${relTitleArg}', ${elSel}, value);
         if (!ok) {
@@ -5448,13 +5473,26 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
             osType(value);
         }
     }`
-        );
+          );
+        }
       } else {
         // Simple mode: no title-keyed session cache (single _appSid) — same
         // sid/rootElId-generic _typeScoped session mode uses, just called
         // directly against _appSid instead of via getWindowSession().
-        const elSel = sel || `'//*[@Name="${escapeAttr(e.element?.name)}"]'`;
-        pushMethod(
+        // Same no-usable-selector / control-key-only guard as the session
+        // branch above (2026-08-10) — see its comment for the reasoning.
+        const hasUsableSelector = !!(e.element?.automationId || e.element?.className || e.element?.name);
+        const isControlKeyOnly = ['\n', '\r', '\t', '\x1b'].includes(e.value);
+        if (!hasUsableSelector && isControlKeyOnly) {
+          pushMethod(
+`    async type${stepNum}(value) {
+        osActivate('');
+        osType(value);
+    }`
+          );
+        } else {
+          const elSel = sel || `'//*[@Name="${escapeAttr(e.element?.name)}"]'`;
+          pushMethod(
 `    async type${stepNum}(value) {
         const ok = await _typeScoped(_appSid, null, ${elSel}, value);
         if (!ok) {
@@ -5469,7 +5507,8 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
             osType(value);
         }
     }`
-        );
+          );
+        }
       }
       pushStep(
 `${usesGetWindowSession ? switchWindowStep : ''}            await _step('${stepNum}:type ${escapeStr(e.value)}', () => page.type${stepNum}('${escapeStr(e.value)}'));`
