@@ -1,5 +1,7 @@
 # AI-Powered Desktop Automation Code Generator
 
+*[한국어](README.ko.md) | English*
+
 Records user interactions (clicks, typing, double-clicks, scrolls) with any
 Windows desktop application and generates runnable **WebdriverIO (JavaScript)**
 test code that replays the session — targeting every element through
@@ -28,7 +30,7 @@ required** (see §3 below for why this matters):
 | Calculator | UWP | simple mode |
 | Notepad | UWP | simple mode |
 | PuTTY | native Win32 dialog | category tree nav, ComboBox dropdowns (same-window and cross-window popup), tree +/- toggle, proxy radio buttons |
-| FileZilla | native Win32, multi-window | folder tree nav, menu bar navigation via ExpandCollapsePattern, Site Manager dialog (separate HWND session) |
+| FileZilla | native Win32, multi-window | folder tree nav, menu bar navigation via ExpandCollapsePattern, Site Manager dialog (separate HWND session), local file-list double-click navigation (including `..` to go up a level) and rapid folder-hopping — GUI-confirmed on a 100+ step recording (2026-08-10) |
 | 7-Zip | native Win32 | file list navigation, double-click into folders |
 | HeidiSQL | Delphi/VCL, multi-window | owner-drawn ComboBoxEx item selection by position (network-type combo), cross-window session-manager ↔ preferences flow. The session-list tree (`TVirtualStringTree`) exposes zero UIA children and cannot be automated — see **Known Limitations**. The "더 보기" (More) overflow menu's items are captured by position but replay doesn't select them yet (parked, see below) |
 | TeamViewer | WebView2 (Chromium), single window | first confirmed Electron/Chromium-class target — ID/password copy buttons, session-code input, "Join session", the two settings checkboxes ("Windows와 함께 TeamViewer 시작" / "이 장치에 Easy Access 권한 부여" — click the **text label**, not the checkbox glyph itself, which sits in an unnamed wrapper), and the native "빠른 연결 허용" dialog (email/password/cancel) all replay end to end (`[PASS] all steps completed`). **Requires the agent, Express bridge's spawned processes, and the generated test itself to all run from an elevated (Administrator) terminal** — TeamViewer runs elevated, and Windows' UIPI blocks a non-elevated automation client from seeing anything past the window shell (see **WebView2 / Electron apps** below). Running the generated test from a non-elevated terminal is the single most common cause of every step failing at once. |
@@ -139,7 +141,13 @@ npm run dev
    element (automationId / name / className), and the window. If a row shows
    an empty element, that step will be generated as an explicit FAIL step
    (coordinates are never used as a fallback), so consider re-doing that
-   interaction.
+   interaction. A physical double-click is always captured as three raw
+   events (click, click, doubleClick — preserves genuine repeated single
+   presses like typing "9999" on a calculator, see `agent.py`), but the
+   table **displays** them merged into one row (badge shows `×3`) when the
+   two clicks and the doubleClick share the same target within the
+   double-click time window; deleting that row deletes all three underlying
+   events.
 5. Click **Stop** when done.
 6. **Delete stray rows** (mis-clicks, taskbar clicks) by hovering a row and
    clicking `×`.
@@ -368,6 +376,24 @@ into (`generated-wdio/MockMulti/`, `generated-wdio/MockNative/`) are
 regression-gate fixtures, not real recordings — they're git-ignored and safe
 to delete; re-running the gate recreates them.
 
+### Catching a false PASS on `type` steps
+
+`mock_events.py` checks the *generated code*, not what actually happened on
+screen during a real replay. `agent/verify_replay.py` closes that gap for
+typing: it runs a generated `<App>TestById.js` normally, and while it runs,
+independently re-reads the **live UIA value** of each `type` step's target
+field via COM — the same stack `agent.py`/`osScopedInvoke.py` use — and
+compares it against what the recording expected. This exists because
+WinAppDriver's `element/value` can report success while the field was never
+actually filled (measured on FileZilla's Site Manager, 2026-08-06) — a
+"success" from the replay script's own exit code is not proof the keystrokes
+landed.
+
+```powershell
+python agent/verify_replay.py --app FileZilla
+python agent/verify_replay.py --app FileZilla --strategy byclass
+```
+
 ---
 
 ## Troubleshooting
@@ -434,6 +460,17 @@ to delete; re-running the gate recreates them.
   carry. A dropdown-arrow element is always resolved by its AutomationId
   (`~DropDown`), never by a bare `//Button[@Name="닫기"]`, so it can never
   accidentally match window chrome.
+- **Clicking a dialog's titlebar is captured but not replayed as its own
+  step** — like a click on the top-level window itself, it's dropped
+  entirely (no code generated, not even a FAIL step) rather than attempted,
+  because a `TitleBar` element is OS-drawn window chrome with no stable UIA
+  identity across sessions (Name-based selectors built from it always fail
+  at replay: `target not found` / `ElementFromHandle failed`, measured
+  2026-08-10). **Known trade-off**: this also silently drops a genuine
+  titlebar double-click-to-maximize gesture, since the decision is made on
+  `controlType` alone. Dragging a window by its titlebar is a separate,
+  already out-of-scope case (drag events are captured for diagnostics but
+  never replayed — see §2 above).
 - **.NET managed UIA (`System.Windows.Automation`) cannot see legacy Win32
   controls** (list rows, toolbar buttons, `SysTreeView32` tree items) — every
   replay helper that needs to reach those controls uses COM `IUIAutomation`
@@ -448,12 +485,26 @@ to delete; re-running the gate recreates them.
   `TVirtualStringTree` is the confirmed case — expose *zero* items to UI
   Automation even though the control itself is visible and populated
   (verified directly against the live UIA tree: `FindAll`/tree-walk all
-  agree on the same node count with no rows present). No selector, anchor,
-  or COM-based search can reach an individual row — **recording a click on
-  such a list is not currently possible**. Record a flow that avoids the
-  list instead (e.g. HeidiSQL's "New" button creates and auto-selects a
-  session, so the tabs beneath it become directly clickable without ever
-  touching the list).
+  agree on the same node count with no rows present). This isn't a missing
+  permission or a search that gives up too early — no code anywhere in the
+  system can hand back a UIA element representing an individual row, because
+  this control class was never wired to a UIA provider at that granularity
+  in the first place. No selector, anchor, or COM-based search can reach an
+  individual row — **recording a click on such a list is not currently
+  possible**. Record a flow that avoids the list instead (e.g. HeidiSQL's
+  "New" button creates and auto-selects a session, so the tabs beneath it
+  become directly clickable without ever touching the list).
+  - The inline rename box that "New" opens on top of that same tree has the
+    same problem — Enter (or a click elsewhere) to confirm the name used to
+    be captured with a completely empty selector and **always** fail replay
+    (`selector has no usable fields`). Fixed 2026-08-10: when a `type` event
+    has no usable selector fields at all *and* its value is a single control
+    key (`\n`/`\r`/`\t`/`\x1b`, i.e. it's a confirm/dismiss keystroke, not
+    real text), codegen sends it straight through OS-level SendKeys to
+    whatever currently has focus instead of attempting (and always failing)
+    an element search. A genuine text field that transiently lost its
+    selector still goes through the normal element-search-then-fallback
+    path, so this can never blind-type real text into an unrelated window.
 - **Dropdowns: the hard part is naming them, not opening them.** Measured
   2026-07-31 with `poc/diag_dropdowns.py` — this corrects an earlier claim
   that HeidiSQL's combos expose no items:
@@ -490,7 +541,8 @@ to delete; re-running the gate recreates them.
 ## Project Layout
 
 ```
-agent/          Python capture agent + mock_events.py regression gate
+agent/          Python capture agent + mock_events.py regression gate +
+                verify_replay.py (live post-replay value verification)
 server/         Express bridge + template-based code generator
 ui/             React dashboard (Vite)
 generated-wdio/ Generated test suites (one folder per app) + shared npm deps
