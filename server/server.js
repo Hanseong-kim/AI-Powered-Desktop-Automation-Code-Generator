@@ -2651,6 +2651,16 @@ function stripWindowFillingContainers(events, winRect) {
     // 타이틀바 UIA 개체는 애초에 세션 간 안정적으로 재조회되는 대상이
     // 아니기 때문. 면적 체크와 무관하게 Window와 동일한 "스텝 건너뛰기"로
     // 처리한다.
+    //
+    // KNOWN TRADE-OFF (사용자 리뷰 지적, 2026-08-10): 이 드롭은
+    // controlType 하나로만 판단하므로, 타이틀바에서 일어나는 다른 제스처도
+    // 전부 같이 사라진다 — 창을 다른 위치로 끌어다 놓는 드래그(이건 이미
+    // CLAUDE.md §3 "Event scope: Click, Type, DoubleClick, Scroll. Drag is
+    // out of scope"로 별도 제외 대상이라 영향 없음), 그리고 **타이틀바
+    // 더블클릭으로 창을 최대화하는 동작**은 scope 안의 doubleClick인데도
+    // 이 필터에 걸려 녹화에서 사라진다. 지금 목표가 창 이동/최대화까지
+    // 자동화하는 게 아니라서 의도적으로 그대로 두지만, "창 최대화한 게 왜
+    // 녹화 안 되냐"는 리포트가 오면 이 트레이드오프부터 확인할 것.
     if (el?.controlType === 'TitleBar') {
       console.log(`[container] ${e.action} resolved to the dialog's TitleBar `
         + `— treating as a focus/activation click that replay already `

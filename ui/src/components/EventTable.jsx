@@ -45,23 +45,45 @@ function sameTarget(a, b) {
   return (a.element?.name || '') === (b.element?.name || '');
 }
 
+// 2026-08-10 (사용자 리뷰): 원래는 events[i]/[i+1]/[i+2]가 배열에서 물리적으로
+// 붙어 있어야만 묶었는데, 더블클릭 도중 마우스가 미세하게 흔들리면 그 사이에
+// scroll 등 다른 이벤트가 끼어들 수 있어 그 조건이 쉽게 깨진다. 대신
+// doubleClick을 만날 때마다 그 지점에서 역방향으로 DOUBLE_CLICK_INTERVAL
+// 이내의 매칭되는 click 2개를 찾는 방식으로 바꿔, 사이에 다른 이벤트가 껴도
+// 병합이 깨지지 않는다. 2-pass인 이유: click 쪽 행은 배열에서 doubleClick보다
+// 먼저 나오므로, 정방향 렌더링 도중에는 그 click이 나중에 병합 대상이 될지
+// 아직 알 수 없다 — 먼저 전체를 훑어 흡수될 인덱스를 확정한 뒤에 렌더링한다.
 function groupEvents(events) {
+  const consumed = new Set();
+  const mergedInto = new Map(); // doubleClick 인덱스 -> 흡수된 click 인덱스(오름차순)
+
+  for (let i = 0; i < events.length; i++) {
+    if (events[i].action !== 'doubleClick') continue;
+    const dbl = events[i];
+    const matches = [];
+    for (let j = i - 1; j >= 0 && matches.length < 2; j--) {
+      if (consumed.has(j)) continue;
+      const cand = events[j];
+      if (
+        typeof dbl.timestamp === 'number' && typeof cand.timestamp === 'number' &&
+        dbl.timestamp - cand.timestamp > DOUBLE_CLICK_INTERVAL
+      ) break; // 이 이상 과거는 시간창 밖 — 더 뒤져봐야 없음
+      if (cand.action === 'click' && sameTarget(cand, dbl)) matches.push(j);
+    }
+    if (matches.length === 2) {
+      matches.reverse().forEach((idx) => consumed.add(idx));
+      mergedInto.set(i, matches);
+    }
+  }
+
   const groups = [];
-  let i = 0;
-  while (i < events.length) {
-    const a = events[i], b = events[i + 1], c = events[i + 2];
-    if (
-      a && b && c &&
-      a.action === 'click' && b.action === 'click' && c.action === 'doubleClick' &&
-      typeof a.timestamp === 'number' && typeof c.timestamp === 'number' &&
-      c.timestamp - a.timestamp <= DOUBLE_CLICK_INTERVAL &&
-      sameTarget(a, b) && sameTarget(b, c)
-    ) {
-      groups.push({ display: c, arrayIndices: [i, i + 1, i + 2], mergedCount: 3 });
-      i += 3;
+  for (let i = 0; i < events.length; i++) {
+    if (consumed.has(i)) continue;
+    if (mergedInto.has(i)) {
+      const absorbed = mergedInto.get(i);
+      groups.push({ display: events[i], arrayIndices: [...absorbed, i], mergedCount: absorbed.length + 1 });
     } else {
-      groups.push({ display: a, arrayIndices: [i], mergedCount: 1 });
-      i += 1;
+      groups.push({ display: events[i], arrayIndices: [i], mergedCount: 1 });
     }
   }
   return groups;
