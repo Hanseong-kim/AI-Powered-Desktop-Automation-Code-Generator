@@ -50,6 +50,14 @@ EXPRESS_EVENTS_URL = "http://localhost:3002/api/events"
 
 DOUBLE_CLICK_INTERVAL = 0.50   # seconds
 DOUBLE_CLICK_RADIUS = 6        # pixels
+# 2026-08-11 (FileZilla "새 북마크" 체크박스 실측, STEP27): how long a failed
+# snapshot_open_menu() (menu-close/dialog-open capture race) stays "fresh"
+# enough to flag the NEXT self-healed click as ambiguous. The observed lag
+# was 1.4-1.5s (worker-thread inspection catching up after the OS had already
+# closed the menu and opened the dialog); this must expire quickly or a
+# single stale failure would mislabel every unrelated click for the rest of
+# the recording (2026-08-11 review feedback) — not a session-wide counter.
+AMBIGUOUS_SELF_HEAL_WINDOW_S = 2.0   # seconds
 DRAG_MIN_DIST = 10             # pixels — press-to-release distance above which
                                 # a left click is recorded as a drag instead
                                 # (deliberately above DOUBLE_CLICK_RADIUS so a
@@ -267,6 +275,15 @@ class UIAInspector:
         # once, but sharing one cache would still couple two independent
         # state machines for no reason.
         self._menu_cache = None
+        # Timestamp of the most recent snapshot_open_menu() failure ("Expanded
+        # but no Menu container with items was found") — a signal that the
+        # popup-menu detection lost a timing race. Read (and expired after
+        # AMBIGUOUS_SELF_HEAL_WINDOW_S) by _inspect()'s self-heal branch to
+        # flag a suspiciously-timed click instead of silently trusting it —
+        # see ambiguousCapture below. Must expire quickly: without a TTL, one
+        # stale failure would mislabel every unrelated click for the rest of
+        # the session (2026-08-11 review feedback).
+        self._menu_snapshot_fail_ts = None
         # DIAGNOSTIC: element_at()'s decision path for the most recent call,
         # read back by _inspect() to emit one [trace] line. Observation
         # only — nothing downstream reads this dict, so it cannot change
@@ -1863,6 +1880,7 @@ class UIAInspector:
                 f"Expanded but no Menu container with items was found — "
                 f"searched: {tried or 'no root resolved'}")
             self._menu_cache = None
+            self._menu_snapshot_fail_ts = time.time()
             return
         self._menu_cache = {"trigger": elem, "rows": rows, "ts": time.time()}
         log(f"[inspect] popup menu opened — cached geometry of {len(rows)} items "
@@ -3646,6 +3664,11 @@ class Recorder:
             "itself (rect/controlType) is kept as-is.")
 
     def _inspect(self, ins, x, y, fg_hwnd_hint=None):
+        # 2026-08-11 (FileZilla 체크박스 / Notepad 탭닫기 실측, 이전 클릭
+        # 15~45ms 뒤): info를 참조하는 except 블록보다 먼저 예외가 나면
+        # (info가 3719/3736행 등에서 아직 한 번도 할당되기 전) except에서
+        # `info`를 그냥 읽으면 UnboundLocalError가 난다 — 항상 바인딩되게.
+        info = None
         try:
             # 2026-08-05 (TeamViewer "세션 코드가 만료되었습니다" 대화상자
             # 실측): watcher가 감지한 새 web-host 창은 여기서 소비한다 —
@@ -3763,6 +3786,14 @@ class Recorder:
             except Exception as e:
                 log(f"[trace] failed: {e}")
             light_dismiss = info.get("automationId") == "Light Dismiss"
+            # 2026-08-11 (FileZilla "새 북마크" 체크박스 실측, STEP27): set
+            # below when THIS click's self-heal is accepted while a recent
+            # snapshot_open_menu() failure (menu-close/dialog-open capture
+            # race) is still fresh — read later when building the
+            # ancestor+index selector to flag the event as ambiguous instead
+            # of silently emitting a selector that can resolve to the wrong
+            # sibling. One-shot, consumed at the end of this call.
+            ambiguous_self_heal = False
             # NOTE: the dropdown/menu item cache is consulted at the TOP of
             # this function now (see the comment there) — an item click is
             # typically hwnd==0 (UIA-only sub-element) like its trigger, so
@@ -3862,6 +3893,21 @@ class Recorder:
                         log(f"[inspect] self-heal hwnd={elem_hwnd} "
                             f"(name={info.get('name')!r}) — accepted "
                             "(pre-empts 0.5s watcher poll; PID or same install dir)")
+                        # 2026-08-12 (FileZilla STEP2/STEP3 불일치 실측): 이
+                        # 값은 UIAInspector(ins)에서 초기화/기록되는데
+                        # (286/1883행), 여기서 self(=Recorder)를 읽고 있었다
+                        # — Recorder엔 이 속성이 아예 없어 self-heal될 때마다
+                        # AttributeError가 났고, 그 예외가 (Fix A 덕에)
+                        # 조용히 삼켜지면서 이 클릭의 ancestor+index 계산이
+                        # 통째로 스킵돼 이름 기반 셀렉터로 강등되고 있었다.
+                        if (ins._menu_snapshot_fail_ts is not None
+                                and time.time() - ins._menu_snapshot_fail_ts
+                                <= AMBIGUOUS_SELF_HEAL_WINDOW_S):
+                            ambiguous_self_heal = True
+                            log(f"[inspect] self-heal hwnd={elem_hwnd} landed "
+                                f"{time.time() - ins._menu_snapshot_fail_ts:.2f}s "
+                                "after a failed popup-menu snapshot — flagging as "
+                                "ambiguous capture (menu-close/dialog-open race)")
                     else:
                         log(f"[inspect] element hwnd={elem_hwnd} not a tracked "
                             f"window (name={info.get('name')!r} "
@@ -4271,6 +4317,19 @@ class Recorder:
                         f"ancestor(id={anc_info.get('automationId')!r} "
                         f"name={anc_info.get('name')!r}) sibling #{sib_idx}/{sib_count} "
                         f"(controlType={info.get('controlType')!r})")
+                    if ambiguous_self_heal:
+                        # This click itself was accepted via a self-heal that
+                        # landed suspiciously soon after a failed popup-menu
+                        # snapshot — the ancestor+index selector we just built
+                        # may point at the wrong window's element entirely
+                        # (§CLAUDE.md hard rule: no silent coordinate/guess
+                        # fallback). Keep the fields above for diagnostics but
+                        # let codegen turn this into an explicit FAIL step
+                        # instead of a fragile osAncestorInvoke() call.
+                        info["ambiguousCapture"] = True
+                        log("[inspect] ancestor+index selector marked "
+                            "ambiguousCapture — codegen will emit an explicit "
+                            "FAIL step instead of replaying it")
             # ExpandCollapsePattern 태깅 — 2026-07-13 진단(poc/diag_expandcollapse.py)으로
             # ComboBox/메뉴바 MenuItem은 일반 클릭만으로 "펼치기"가 재현 안
             # 됨을 실증했지만, **ExpandCollapsePattern "지원 여부"만으로
@@ -4302,6 +4361,31 @@ class Recorder:
                 info["locatorFallback"] = ""
             return info
         except Exception:
+            # 2026-08-11 (FileZilla 체크박스 / Notepad 탭닫기→저장하지 않음
+            # 실측): 이 블록은 예외를 완전히 삼키고 항상 빈 dict를
+            # 반환해왔다 — self-heal 로그(위 3888행 부근, info.get('name')
+            # 사용)가 이미 실측한 정상 name/rect를 찍은 바로 다음, 어딘가의
+            # 라이브 재조회가 던진 예외 때문에 그 값이 통째로 버려지고
+            # 있었다(로그에 예외 자체가 안 찍혀 원인 호출부를 특정 못 했던
+            # 이유이기도 하다). light-dismiss 복구(위 4055~4084행 부근,
+            # "FIRST read caught it alive")와 같은 원칙 — 이미 확보한 관측을
+            # 버리지 않는다. 단, name/automationId만 보고 판단하지 않는다:
+            # rect가 아직 안 채워졌거나 형태가 깨진 반쪽짜리 info를 내보내면
+            # rect를 기대하는 다른 코드(_ancestor_sibling_selector의
+            # cached_rect, _flush_type_buffer의 좌표 계산 등)가 새로운
+            # 방식으로 죽을 수 있으므로, rect가 정상 4-tuple/리스트일 때만
+            # 신뢰하고 그 외엔 기존처럼 좌표 폴백 빈 dict로 떨어진다.
+            rect = info.get("rect") if info else None
+            has_valid_rect = isinstance(rect, (tuple, list)) and len(rect) == 4
+            if info and (info.get("name") or info.get("automationId")) and has_valid_rect:
+                log(f"[inspect] exception after info was already resolved "
+                    f"(name={info.get('name')!r} automationId="
+                    f"{info.get('automationId')!r}) — keeping the earlier "
+                    "read instead of blanking it:")
+                traceback.print_exc()
+                info.setdefault("locatorFallback",
+                                 "" if info.get("locatorStrategy") != "coordinate" else "coordinate")
+                return info
             return {"automationId": "", "className": "", "name": "",
                     "controlType": "", "windowTitle": "", "xpath": "",
                     "hwnd": 0, "rootHwnd": 0,
@@ -4834,6 +4918,11 @@ class Recorder:
                 "ancestorSiblingIndex": elem.get("ancestorSiblingIndex"),
                 "ancestorSiblingCount": elem.get("ancestorSiblingCount"),
                 "ancestorItemControlTypeId": elem.get("ancestorItemControlTypeId"),
+                # 2026-08-11: 이 ancestor+index가 의심스러운 self-heal 직후에
+                # 만들어졌다는 표시(§CLAUDE.md 하드룰: 조용한 좌표/추측 폴백
+                # 대신 명시적 FAIL) — 같은 화이트리스트 함정, 빠뜨리면
+                # server.js가 항상 False로 보고 정상 셀렉터처럼 재생해버린다.
+                "ambiguousCapture": elem.get("ambiguousCapture", False),
                 # anchor 기반 relative XPath (유니크 id/name 없는 요소 전용,
                 # 2026-07-10 지시) — codegen이 //*[@AutomationId=anchor]/path 생성.
                 "anchorId": elem.get("anchorId", ""),

@@ -42,6 +42,11 @@ generated-wdio/MockMenuIndexNotATrigger/
 generated-wdio/MockPostNavTitle/
 generated-wdio/MockAmbiguousCrossWindow/
 generated-wdio/MockAncestorIndex/
+generated-wdio/MockAncestorCrossWindow/
+generated-wdio/MockAncestorAmbiguousCapture/
+generated-wdio/MockTypeNewline/
+generated-wdio/MockTypeMerge/
+generated-wdio/MockWinFragContamination/
 generated-wdio/MyApp/
 generated-wdio/MockGoldenCalculator/
 generated-wdio/MockGoldenFileZilla/
@@ -86,6 +91,11 @@ generated-wdio/_debug-helpers/MockMenuIndexNotATrigger/
 generated-wdio/_debug-helpers/MockPostNavTitle/
 generated-wdio/_debug-helpers/MockAmbiguousCrossWindow/
 generated-wdio/_debug-helpers/MockAncestorIndex/
+generated-wdio/_debug-helpers/MockAncestorCrossWindow/
+generated-wdio/_debug-helpers/MockAncestorAmbiguousCapture/
+generated-wdio/_debug-helpers/MockTypeNewline/
+generated-wdio/_debug-helpers/MockTypeMerge/
+generated-wdio/_debug-helpers/MockWinFragContamination/
 generated-wdio/_debug-helpers/MyApp/
 generated-wdio/_debug-helpers/MockGoldenCalculator/
 generated-wdio/_debug-helpers/MockGoldenFileZilla/

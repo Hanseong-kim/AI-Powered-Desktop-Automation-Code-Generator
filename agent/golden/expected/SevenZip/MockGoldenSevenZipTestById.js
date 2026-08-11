@@ -718,239 +718,29 @@ class MockGoldenSevenZipPageById {
     // [W1] 7-Zip (main window)
     // ════════════════════════════════════════════════════════════
     async type1(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="컴퓨터"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type1] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
+        osActivate('');
+        osType(value);
     }
 
-    async type2(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="컴퓨터"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type2] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
-    }
-
-    async type3(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="컴퓨터"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type3] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
-    }
-
-    async type4(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="컴퓨터"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type4] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
-    }
-
-    async type5(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="컴퓨터"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type5] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
-    }
-
-    async click6() {
+    async click2() {
         osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"컴퓨터"});
     }
 
-    async type7(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="C:"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type7] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
+    async type3(value) {
+        osActivate('');
+        osType(value);
     }
 
-    async click8() {
+    async click4() {
         osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"C:"});
     }
 
-    async type9(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="$Recycle.Bin"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type9] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
+    async type5(value) {
+        osActivate('');
+        osType(value);
     }
 
-    async type10(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="$Recycle.Bin"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type10] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
-    }
-
-    async type11(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="$Recycle.Bin"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type11] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
-    }
-
-    async type12(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="$Recycle.Bin"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type12] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
-    }
-
-    async type13(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="$Recycle.Bin"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type13] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
-    }
-
-    async type14(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="$Recycle.Bin"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type14] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
-    }
-
-    async type15(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="$Recycle.Bin"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type15] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
-    }
-
-    async type16(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="$Recycle.Bin"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type16] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
-    }
-
-    async type17(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="$Recycle.Bin"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type17] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
-    }
-
-    async scroll18() {
+    async scroll6() {
         osScrollEl(_appHwnd, {"automationId":"","className":"","name":""}, -3);
     }
 
@@ -958,337 +748,157 @@ class MockGoldenSevenZipPageById {
     // ════════════════════════════════════════════════════════════
     // [W2] 7-Zip (new window)
     // ════════════════════════════════════════════════════════════
-    async click19() {
+    async click7() {
         await _clickBySid(_appSid, null, '~1002', true);
     }
 
-    async click20() {
+    async click8() {
         await _clickBySid(_appSid, null, '~1002');
     }
 
-    async type21(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="C:"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type21] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
+    async type9(value) {
+        osActivate('');
+        osType(value);
     }
 
-    async click22() {
+    async click10() {
         await _clickBySid(_appSid, null, '~1002');
     }
 
-    async click23() {
+    async click11() {
         await _clickBySid(_appSid, null, '~1001');
     }
 
-    async type24(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="컴퓨터"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type24] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
+    async type12(value) {
+        osActivate('');
+        osType(value);
     }
 
-    async click25() {
+    async click13() {
         osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"C:"});
     }
 
-    async click26() {
+    async click14() {
         osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"C:"}, null, null, null, null, true);
     }
 
-    async click27() {
+    async click15() {
         await _clickBySid(_appSid, null, '~1001');
     }
 
-    async click28() {
+    async click16() {
         await _clickBySid(_appSid, null, '~1001');
     }
 
-    async click29() {
+    async click17() {
         await _clickBySid(_appSid, null, '~1002');
     }
 
-    async click30() {
+    async click18() {
         await _clickBySid(_appSid, null, '~1001');
     }
 
-    async click31() {
+    async click19() {
         osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"컴퓨터"});
     }
 
-    async click32() {
+    async click20() {
         osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"C:"}, null, null, null, null, true);
     }
 
-    async click33() {
+    async click21() {
         await _clickBySid(_appSid, null, '~1001');
     }
 
-    async click34() {
+    async click22() {
         await _clickBySid(_appSid, null, '~1001');
     }
 
-    async type35(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="C:"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type35] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
+    async type23(value) {
+        osActivate('');
+        osType(value);
     }
 
-    async scroll36() {
+    async scroll24() {
         osScrollEl(_appHwnd, {"automationId":"","className":"","name":""}, 7);
     }
 
-    async scroll37() {
+    async scroll25() {
         osScrollEl(_appHwnd, {"automationId":"","className":"","name":""}, -2);
     }
 
-    async scroll38() {
+    async scroll26() {
         osScrollEl(_appHwnd, {"automationId":"","className":"","name":""}, -3);
     }
 
-    async scroll39() {
+    async scroll27() {
         osScrollEl(_appHwnd, {"automationId":"","className":"","name":""}, -2);
     }
 
-    async scroll44() {
+    async scroll32() {
         osScrollEl(_appHwnd, {"automationId":"","className":"","name":""}, -1);
     }
 
-    async scroll47() {
+    async scroll35() {
         osScrollEl(_appHwnd, {"automationId":"Console Window","className":"ConsoleWindowClass","name":"선택 관리자: Windows PowerShell"}, 16);
     }
 
-    async scroll48() {
+    async scroll36() {
         osScrollEl(_appHwnd, {"automationId":"","className":"","name":""}, 1);
     }
 
-    async click51() {
+    async click39() {
         await _clickBySid(_appSid, null, '~1002');
     }
 
-    async type52(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="C:"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type52] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
+    async type40(value) {
+        osActivate('');
+        osType(value);
     }
 
-    async click53() {
+    async click41() {
         await _clickBySid(_appSid, null, '~1002');
     }
 
-    async click54() {
+    async click42() {
         await _clickBySid(_appSid, null, '~1001');
     }
 
-    async type55(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="컴퓨터"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type55] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
+    async type43(value) {
+        osActivate('');
+        osType(value);
     }
 
-    async type56(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="컴퓨터"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type56] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
-    }
-
-    async type57(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="컴퓨터"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type57] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
-    }
-
-    async type58(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="컴퓨터"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type58] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
-    }
-
-    async type59(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="컴퓨터"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type59] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
-    }
-
-    async type60(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="컴퓨터"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type60] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
-    }
-
-    async type61(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="컴퓨터"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type61] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
-    }
-
-    async click62() {
+    async click44() {
         osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"C:"}, null, null, null, null, true);
     }
 
-    async click63() {
+    async click45() {
         osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"$Recycle.Bin"}, null, null, null, null, true);
     }
 
-    async type64(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="$Recycle.Bin"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type64] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
+    async type46(value) {
+        osActivate('');
+        osType(value);
     }
 
-    async type65(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="$Recycle.Bin"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type65] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
-    }
-
-    async type66(value) {
-        const ok = await _typeScoped(_appSid, null, '//ListItem[@Name="$Recycle.Bin"]', value);
-        if (!ok) {
-            // WinAppDriver's element/value endpoint rejects some native edit
-            // controls outright (confirmed 2026-07-08: Win11 Notepad's
-            // RichEditD2DPT Document control returns "unknown error" in
-            // ~15ms, even after waitForExist/elementClear succeeded) — no
-            // amount of retrying helps, so fall back to real OS-level key
-            // injection instead of failing the step.
-            console.warn('[type66] element sendKeys failed — falling back to OS-level typing');
-            osActivate('');
-            osType(value);
-        }
-    }
-
-    async scroll67() {
+    async scroll47() {
         osScrollEl(_appHwnd, {"automationId":"","className":"","name":""}, -3);
     }
 
-    async scroll68() {
+    async scroll48() {
         osScrollEl(_appHwnd, {"automationId":"","className":"","name":""}, -23);
     }
 
-    async click69() {
+    async click49() {
         await _clickBySid(_appSid, null, '~1002', true);
     }
 
-    async click70() {
+    async click50() {
         await _clickBySid(_appSid, null, '~1002');
     }
 
-    async click71() {
+    async click51() {
         await _clickBySid(_appSid, null, '~1001');
     }
 }
@@ -1323,88 +933,68 @@ async function run() {
     // ════════════════════════════════════════════════════════════
     // [W1] 7-Zip (main window)
     // ════════════════════════════════════════════════════════════
-            await _step('1:type \n', () => page.type1('\n'));
-            await _step('2:type \n', () => page.type2('\n'));
+            await _step('1:type \n\n\n\n\n', () => page.type1('\n\n\n\n\n'));
+            await _step('2:click 컴퓨터', () => page.click2());
             await _step('3:type \n', () => page.type3('\n'));
-            await _step('4:type \n', () => page.type4('\n'));
-            await _step('5:type \n', () => page.type5('\n'));
-            await _step('6:click 컴퓨터', () => page.click6());
-            await _step('7:type \n', () => page.type7('\n'));
-            await _step('8:click C:', () => page.click8());
-            await _step('9:type \n', () => page.type9('\n'));
-            await _step('10:type \n', () => page.type10('\n'));
-            await _step('11:type \n', () => page.type11('\n'));
-            await _step('12:type \n', () => page.type12('\n'));
-            await _step('13:type \n', () => page.type13('\n'));
-            await _step('14:type \n', () => page.type14('\n'));
-            await _step('15:type \n', () => page.type15('\n'));
-            await _step('16:type \n', () => page.type16('\n'));
-            await _step('17:type \n', () => page.type17('\n'));
-            await _step('18:scroll delta=-3', () => page.scroll18());
+            await _step('4:click C:', () => page.click4());
+            await _step('5:type \n\n\n\n\n\n\n\n\n', () => page.type5('\n\n\n\n\n\n\n\n\n'));
+            await _step('6:scroll delta=-3', () => page.scroll6());
 
     // ════════════════════════════════════════════════════════════
     // [W2] 7-Zip (new window)
     // ════════════════════════════════════════════════════════════
-            await _step('19:doubleClick ', () => page.click19());
-            await _step('20:click ', () => page.click20());
-            await _step('21:type \n', () => page.type21('\n'));
+            await _step('7:doubleClick ', () => page.click7());
+            await _step('8:click ', () => page.click8());
+            await _step('9:type \n', () => page.type9('\n'));
+            await _step('10:click ', () => page.click10());
+            await _step('11:click ', () => page.click11());
+            await _step('12:type \n', () => page.type12('\n'));
+            await _step('13:click C:', () => page.click13());
+            await _step('14:doubleClick C:', () => page.click14());
+            await _step('15:click ', () => page.click15());
+            await _step('16:click ', () => page.click16());
+            await _step('17:click ', () => page.click17());
+            await _step('18:click ', () => page.click18());
+            await _step('19:click 컴퓨터', () => page.click19());
+            await _step('20:doubleClick C:', () => page.click20());
+            await _step('21:click ', () => page.click21());
             await _step('22:click ', () => page.click22());
-            await _step('23:click ', () => page.click23());
-            await _step('24:type \n', () => page.type24('\n'));
-            await _step('25:click C:', () => page.click25());
-            await _step('26:doubleClick C:', () => page.click26());
-            await _step('27:click ', () => page.click27());
-            await _step('28:click ', () => page.click28());
-            await _step('29:click ', () => page.click29());
-            await _step('30:click ', () => page.click30());
-            await _step('31:click 컴퓨터', () => page.click31());
-            await _step('32:doubleClick C:', () => page.click32());
-            await _step('33:click ', () => page.click33());
-            await _step('34:click ', () => page.click34());
-            await _step('35:type \n', () => page.type35('\n'));
-            await _step('36:scroll delta=7', () => page.scroll36());
-            await _step('37:scroll delta=-2', () => page.scroll37());
-            await _step('38:scroll delta=-3', () => page.scroll38());
-            await _step('39:scroll delta=-2', () => page.scroll39());
-            // [STEP 40] drag scope-out — replay skipped (event scope: Click/Type/DoubleClick/Scroll, 2026-07-10)
-            // [STEP 41] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
-            _failures.push('41:click:no-selector');
-            // [STEP 42] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
-            _failures.push('42:click:no-selector');
-            // [STEP 43] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
-            _failures.push('43:click:no-selector');
-            await _step('44:scroll delta=-1', () => page.scroll44());
-            // [STEP 45] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
-            _failures.push('45:click:no-selector');
-            // [STEP 46] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
-            _failures.push('46:click:no-selector');
-            await _step('47:scroll delta=16', () => page.scroll47());
-            await _step('48:scroll delta=1', () => page.scroll48());
-            // [STEP 49] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
-            _failures.push('49:click:no-selector');
-            // [STEP 50] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
-            _failures.push('50:click:no-selector');
+            await _step('23:type \n', () => page.type23('\n'));
+            await _step('24:scroll delta=7', () => page.scroll24());
+            await _step('25:scroll delta=-2', () => page.scroll25());
+            await _step('26:scroll delta=-3', () => page.scroll26());
+            await _step('27:scroll delta=-2', () => page.scroll27());
+            // [STEP 28] drag scope-out — replay skipped (event scope: Click/Type/DoubleClick/Scroll, 2026-07-10)
+            // [STEP 29] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
+            _failures.push('29:click:no-selector');
+            // [STEP 30] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
+            _failures.push('30:click:no-selector');
+            // [STEP 31] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
+            _failures.push('31:click:no-selector');
+            await _step('32:scroll delta=-1', () => page.scroll32());
+            // [STEP 33] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
+            _failures.push('33:click:no-selector');
+            // [STEP 34] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
+            _failures.push('34:click:no-selector');
+            await _step('35:scroll delta=16', () => page.scroll35());
+            await _step('36:scroll delta=1', () => page.scroll36());
+            // [STEP 37] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
+            _failures.push('37:click:no-selector');
+            // [STEP 38] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
+            _failures.push('38:click:no-selector');
+            await _step('39:click ', () => page.click39());
+            await _step('40:type \n', () => page.type40('\n'));
+            await _step('41:click ', () => page.click41());
+            await _step('42:click ', () => page.click42());
+            await _step('43:type \n\n\n\n\n\n\n', () => page.type43('\n\n\n\n\n\n\n'));
+            await _step('44:doubleClick C:', () => page.click44());
+            await _step('45:doubleClick $Recycle.Bin', () => page.click45());
+            await _step('46:type \n\n\n', () => page.type46('\n\n\n'));
+            await _step('47:scroll delta=-3', () => page.scroll47());
+            await _step('48:scroll delta=-23', () => page.scroll48());
+            await _step('49:doubleClick ', () => page.click49());
+            await _step('50:click ', () => page.click50());
             await _step('51:click ', () => page.click51());
-            await _step('52:type \n', () => page.type52('\n'));
-            await _step('53:click ', () => page.click53());
-            await _step('54:click ', () => page.click54());
-            await _step('55:type \n', () => page.type55('\n'));
-            await _step('56:type \n', () => page.type56('\n'));
-            await _step('57:type \n', () => page.type57('\n'));
-            await _step('58:type \n', () => page.type58('\n'));
-            await _step('59:type \n', () => page.type59('\n'));
-            await _step('60:type \n', () => page.type60('\n'));
-            await _step('61:type \n', () => page.type61('\n'));
-            await _step('62:doubleClick C:', () => page.click62());
-            await _step('63:doubleClick $Recycle.Bin', () => page.click63());
-            await _step('64:type \n', () => page.type64('\n'));
-            await _step('65:type \n', () => page.type65('\n'));
-            await _step('66:type \n', () => page.type66('\n'));
-            await _step('67:scroll delta=-3', () => page.scroll67());
-            await _step('68:scroll delta=-23', () => page.scroll68());
-            await _step('69:doubleClick ', () => page.click69());
-            await _step('70:click ', () => page.click70());
-            await _step('71:click ', () => page.click71());
     } finally {
 
         if (_appSid) { try { await _appiumFetch(`/session/${_appSid}`, { method: 'DELETE' }, 5000); } catch {} }

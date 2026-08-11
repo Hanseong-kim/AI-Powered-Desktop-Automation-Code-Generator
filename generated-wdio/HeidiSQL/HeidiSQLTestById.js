@@ -1268,7 +1268,10 @@ async function _step(label, fn) {
 //   [W1] "HeidiSQL 12.20.0.7320 - 세션 관리자" (main)
 //   [W2] "HeidiSQL 12.20.0.7320 - 세션 관리자" (opened during recording)
 //   [W3] "HeidiSQL 12.20.0.7320 - 세션 관리자" (opened during recording)
-//   [W4] "확인" (opened during recording)
+//   [W4] "HeidiSQL 12.20.0.7320 - 세션 관리자" (opened during recording)
+//   [W5] "HeidiSQL 12.20.0.7320 - 세션 관리자" (opened during recording)
+//   [W6] "HeidiSQL 12.20.0.7320 - 세션 관리자" (opened during recording)
+//   [W7] "HeidiSQL 12.20.0.7320 - 세션 관리자" (opened during recording)
 
 class HeidiSQLPageById {
 
@@ -1284,12 +1287,8 @@ class HeidiSQLPageById {
     // [W2] HeidiSQL 12.20.0.7320 - 세션 관리자 (new window)
     // ════════════════════════════════════════════════════════════
     async type2(value) {
-        const ok = await _typeVerified('HeidiSQL 12.20.0.7320 - 세션 관리자', '//*[@Name=""]', value) || await _typeScopedOrCom('HeidiSQL 12.20.0.7320 - 세션 관리자', '//*[@Name=""]', value);
-        if (!ok) {
-            console.warn('[type2] scoped sendKeys failed — falling back to OS-level typing');
-            osActivate('HeidiSQL 12.20.0.7320 - 세션 관리자', _hwndCache['HeidiSQL 12.20.0.7320 - 세션 관리자']);
-            osType(value);
-        }
+        osActivate('HeidiSQL 12.20.0.7320 - 세션 관리자', _hwndCache['HeidiSQL 12.20.0.7320 - 세션 관리자']);
+        osType(value);
     }
 
 
@@ -1300,24 +1299,28 @@ class HeidiSQLPageById {
         osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"ComboBox","name":""}, null, 4, 18);
     }
 
-    async click4() {
-        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"ComboBox","name":""}, null, 10, 18);
+    async scroll4() {
+        osScrollEl(_scrollHwnd('HeidiSQL 12.20.0.7320 - 세션 관리자'), {"automationId":"","className":"ComboLBox","name":""}, -2);
     }
 
     async click5() {
-        osExpandCollapse(_hwndCache[_mainTitleFrag], {"automationId":"","className":"ComboBox","name":""}, null, 15, 18);
-    }
-
-    async click6() {
-        await _clickScoped('HeidiSQL 12.20.0.7320 - 세션 관리자', '//Button[@Name="삭제"]');
+        osScopedInvoke(_hwndCache[_mainTitleFrag], {"automationId":"","className":"TComboBoxEx","name":""}, null, 111);
     }
 
 
     // ════════════════════════════════════════════════════════════
-    // [W4] 확인 (new window)
+    // [W5] HeidiSQL 12.20.0.7320 - 세션 관리자 (new window)
     // ════════════════════════════════════════════════════════════
-    async click7() {
-        await _clickScoped('확인', '~CommandButton_6');
+    async scroll7() {
+        osScrollEl(_scrollHwnd('HeidiSQL 12.20.0.7320 - 세션 관리자'), {"automationId":"","className":"ComboLBox","name":""}, 6);
+    }
+
+
+    // ════════════════════════════════════════════════════════════
+    // [W7] HeidiSQL 12.20.0.7320 - 세션 관리자 (new window)
+    // ════════════════════════════════════════════════════════════
+    async click9() {
+        await _clickScoped('HeidiSQL 12.20.0.7320 - 세션 관리자', '//Button[@Name="취소"]');
     }
 }
 
@@ -1335,7 +1338,7 @@ async function run() {
         _warmupPowerShell();
 
     _mainTitleFrag = "HeidiSQL 12.20.0.7320 - 세션 관리자";
-    _dialogRects = {"HeidiSQL 12.20.0.7320 - 세션 관리자":{"left":797,"top":144,"width":875,"height":612},"확인":{"left":722,"top":390,"width":458,"height":164}};
+    _dialogRects = {"HeidiSQL 12.20.0.7320 - 세션 관리자":{"left":797,"top":144,"width":875,"height":612}};
     await ensureAppium();
     _rootSid = await _createSession('Root');
     console.log(`[session] Root session ${_rootSid} ready`);
@@ -1359,15 +1362,33 @@ async function run() {
     // [W3] HeidiSQL 12.20.0.7320 - 세션 관리자 (new window)
     // ════════════════════════════════════════════════════════════
             await _step('3:select item #4 (unnamed)', () => page.click3());
-            await _step('4:select item #10 (unnamed)', () => page.click4());
-            await _step('5:select item #15 (unnamed)', () => page.click5());
-            await _step('6:click 삭제', () => page.click6());
+            await _step('4:scroll delta=-2', () => page.scroll4());
+            await _step('5:click SQLite', () => page.click5());
 
     // ════════════════════════════════════════════════════════════
-    // [W4] 확인 (new window)
+    // [W4] HeidiSQL 12.20.0.7320 - 세션 관리자 (new window)
     // ════════════════════════════════════════════════════════════
-            await _step('switch to window: 확인', async () => { await _switchWindow('확인'); osActivate('확인', _hwndCache['확인']); });
-            await _step('7:click 예(Y)', () => page.click7());
+            // [STEP 6] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
+            console.log('[STEP] switch to window: HeidiSQL 12.20.0.7320 - 세션 관리자 (skipped — no selector for this step)');
+            _failures.push('6:click:no-selector');
+
+    // ════════════════════════════════════════════════════════════
+    // [W5] HeidiSQL 12.20.0.7320 - 세션 관리자 (new window)
+    // ════════════════════════════════════════════════════════════
+            await _step('7:scroll delta=6', () => page.scroll7());
+
+    // ════════════════════════════════════════════════════════════
+    // [W6] HeidiSQL 12.20.0.7320 - 세션 관리자 (new window)
+    // ════════════════════════════════════════════════════════════
+            // [STEP 8] click: no selector/anchor captured — coordinate replay is forbidden (2026-07-10)
+            console.log('[STEP] switch to window: HeidiSQL 12.20.0.7320 - 세션 관리자 (skipped — no selector for this step)');
+            _failures.push('8:click:no-selector');
+
+    // ════════════════════════════════════════════════════════════
+    // [W7] HeidiSQL 12.20.0.7320 - 세션 관리자 (new window)
+    // ════════════════════════════════════════════════════════════
+            await _step('switch to window: HeidiSQL 12.20.0.7320 - 세션 관리자', async () => { await _switchWindow('HeidiSQL 12.20.0.7320 - 세션 관리자'); osActivate('HeidiSQL 12.20.0.7320 - 세션 관리자', _hwndCache['HeidiSQL 12.20.0.7320 - 세션 관리자']); });
+            await _step('9:click 취소', () => page.click9());
     } finally {
 
         for (const { sid } of Object.values(_sessionIds)) {

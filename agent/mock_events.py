@@ -50,6 +50,20 @@ def check(label, ok, detail=""):
     _results.append(ok)
 
 
+def method_body(content, method_name):
+    """Extract one generated stepN() method's body text — checking a whole
+    file for a substring like "osAncestorInvoke(" or "_typeScoped(" is a trap
+    (2026-08-11): both also appear as part of their own function/wrapper
+    DEFINITION (always present in the shared preamble), so a naive
+    "not in content" check can never fail even when a step wrongly calls
+    them. Scoping the check to just the one step's method body avoids that."""
+    m = re.search(
+        r"async " + re.escape(method_name) + r"\([^)]*\)\s*\{(.*?)\n    \}",
+        content, re.DOTALL,
+    )
+    return m.group(1) if m else ""
+
+
 import re
 
 # 2026-07-27: generalized regression gate for the "call site added, definition
@@ -984,6 +998,378 @@ def step_wdio_generate_ancestor_index():
             "ancestor-sibling #2/8" in content,
             "a bare '1:click' step label gives no diagnostic signal when "
             "this kind of step fails at replay",
+        )
+
+
+# Cross-window ancestor+index scenario (2026-08-11, FileZilla "새 북마크"
+# checkbox STEP27 real repro): the toolbar-button shape above
+# (ANCESTOR_INDEX_EVENTS) never exercises the hwnd-scope bug because it never
+# leaves the main window. Here the ancestor is recorded INSIDE a dialog
+# ("새 북마크") whose winLeft/winTop/winWidth/winHeight (and rootHwndHex)
+# differ from the main window's recordedRect. Before the 2026-08-11 fix,
+# hwndArg was unconditionally `_appHwnd`/`_hwndCache[_mainTitleFrag]` — the
+# ancestor+index search ran in the WRONG window's subtree, and a reused
+# automationId there could resolve to a totally unrelated element (measured
+# live: sibling #6/8 landed on a button named '?'). The fix must resolve a
+# LIVE hwnd for the dialog's own title via _listWindowHwnds(), preferring
+# whichever match is currently foreground (osForegroundHwnd()) over just the
+# first EnumWindows hit (2026-08-11 review feedback — multiple same-titled
+# windows are possible).
+ANCESTOR_XWIN_APP = "MockAncestorCrossWindow"
+ANCESTOR_XWIN_EVENTS = [
+    make_event("click", name="Bookmarks", automation_id="bookmarksBtn",
+               class_name="Button", control_type="Button",
+               app_name=ANCESTOR_XWIN_APP, index=1,
+               winLeft=100, winTop=100, winWidth=600, winHeight=400),
+    make_event("click", name="", automation_id="", class_name="",
+               control_type="CheckBox", window_title="새 북마크",
+               app_name=ANCESTOR_XWIN_APP, index=2,
+               winLeft=200, winTop=200, winWidth=300, winHeight=200,
+               rootHwndHex="BBBB"),
+]
+ANCESTOR_XWIN_EVENTS[1]["element"]["ancestorAutomationId"] = "5999"
+ANCESTOR_XWIN_EVENTS[1]["element"]["ancestorName"] = ""
+ANCESTOR_XWIN_EVENTS[1]["element"]["ancestorClassName"] = ""
+ANCESTOR_XWIN_EVENTS[1]["element"]["ancestorHwnd"] = 396214
+ANCESTOR_XWIN_EVENTS[1]["element"]["ancestorSiblingIndex"] = 6
+ANCESTOR_XWIN_EVENTS[1]["element"]["ancestorSiblingCount"] = 8
+ANCESTOR_XWIN_EVENTS[1]["element"]["ancestorItemControlTypeId"] = 50002  # UIA_CheckBoxControlTypeId
+ANCESTOR_XWIN_SESSION_META = {
+    "action": "session_meta",
+    "app": ANCESTOR_XWIN_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
+
+def step_wdio_generate_ancestor_index_crosswindow():
+    print("\n[21] an ancestor+index selector recorded in a dialog resolves against that dialog's live hwnd, not the main window (FileZilla '새 북마크' checkbox STEP27, 2026-08-11)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", ANCESTOR_XWIN_SESSION_META)
+    for ev in ANCESTOR_XWIN_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": ANCESTOR_XWIN_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (ancestor cross-window) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped ancestor cross-window checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname, content = f.get("filename", ""), f.get("content", "")
+        check(
+            f"  {fname} re-resolves a live hwnd for the dialog by title before invoking",
+            "_listWindowHwnds('새 북마크')" in content,
+            "the recorded hwnd (ancestorHwnd) is stale on every replay — a "
+            "fresh window is created each run — so the dialog must be "
+            "re-found by title at replay time, the same pattern the "
+            "existing cross-window type branch already uses",
+        )
+        check(
+            f"  {fname} prefers the foreground match among same-titled windows",
+            "osForegroundHwnd()" in content,
+            "EnumWindows can return more than one window matching the same "
+            "title fragment — blindly taking the first is fragile "
+            "(2026-08-11 review feedback)",
+        )
+        check(
+            f"  {fname} does not pass the main window hwnd to this ancestor invoke",
+            "osAncestorInvoke(_appHwnd," not in content
+            and "osAncestorInvoke(_hwndCache[_mainTitleFrag]," not in content,
+            "before the fix this call always searched the MAIN window's "
+            "subtree even though the ancestor was recorded inside a "
+            "separate dialog — a reused automationId there can resolve to "
+            "a completely unrelated element (measured live: sibling #6/8 "
+            "landed on a button named '?')",
+        )
+
+
+# ambiguousCapture scenario (2026-08-11, same FileZilla STEP27 repro): agent.py
+# flags an ancestor+index selector as ambiguous when its self-heal landed
+# suspiciously soon after a failed popup-menu snapshot (menu-close/dialog-open
+# capture race). Codegen must refuse to guess — emit an explicit FAIL step
+# instead of an osAncestorInvoke() call that might resolve to the wrong
+# element (§3 No false PASS / no silent coordinate-or-guess fallback).
+ANCESTOR_AMBIGUOUS_APP = "MockAncestorAmbiguousCapture"
+ANCESTOR_AMBIGUOUS_EVENTS = [
+    make_event("click", name="", automation_id="", class_name="",
+               control_type="CheckBox", app_name=ANCESTOR_AMBIGUOUS_APP, index=1),
+]
+ANCESTOR_AMBIGUOUS_EVENTS[0]["element"]["ancestorAutomationId"] = "5999"
+ANCESTOR_AMBIGUOUS_EVENTS[0]["element"]["ancestorName"] = ""
+ANCESTOR_AMBIGUOUS_EVENTS[0]["element"]["ancestorClassName"] = ""
+ANCESTOR_AMBIGUOUS_EVENTS[0]["element"]["ancestorHwnd"] = 396214
+ANCESTOR_AMBIGUOUS_EVENTS[0]["element"]["ancestorSiblingIndex"] = 6
+ANCESTOR_AMBIGUOUS_EVENTS[0]["element"]["ancestorSiblingCount"] = 8
+ANCESTOR_AMBIGUOUS_EVENTS[0]["element"]["ancestorItemControlTypeId"] = 50002
+ANCESTOR_AMBIGUOUS_EVENTS[0]["element"]["ambiguousCapture"] = True
+ANCESTOR_AMBIGUOUS_SESSION_META = {
+    "action": "session_meta",
+    "app": ANCESTOR_AMBIGUOUS_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
+
+def step_wdio_generate_ancestor_ambiguous_capture():
+    print("\n[22] an ancestor+index selector flagged ambiguousCapture by agent.py becomes an explicit FAIL step, not a guessed click (2026-08-11)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", ANCESTOR_AMBIGUOUS_SESSION_META)
+    for ev in ANCESTOR_AMBIGUOUS_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": ANCESTOR_AMBIGUOUS_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (ancestor ambiguous capture) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped ancestor ambiguous-capture checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname, content = f.get("filename", ""), f.get("content", "")
+        click1_body = method_body(content, "click1")
+        check(
+            f"  {fname} does not emit osAncestorInvoke() for an ambiguousCapture step",
+            "osAncestorInvoke(" not in click1_body,
+            "the self-heal that produced this selector landed right after a "
+            "failed popup-menu snapshot — it may point at the wrong "
+            "window's element entirely, so guessing is not acceptable "
+            "(checked inside click1()'s own body — osAncestorInvoke's shared "
+            "DEFINITION always contains this substring too)",
+        )
+        check(
+            f"  {fname} fails the step explicitly instead",
+            "ambiguous-capture" in content,
+            "a silently-dropped or silently-guessed step is a false PASS "
+            "risk (§3) — the step must show up as an explicit failure",
+        )
+
+
+# Embedded-newline typing scenario (2026-08-11, real Win11 Notepad repro):
+# WinAppDriver's element/value REST endpoint (ValuePattern.SetValue under the
+# hood) inserts the whole string as one shot with no real key events — a
+# literal '\n' inside it does not become an Enter keypress in Notepad's
+# RichEditD2DPT Document control, yet the REST call reports success (no
+# exception), so the existing `if (!ok)` fallback to osType() (which DOES
+# convert '\n' to a real {ENTER} via SendKeys, see OS_TYPE_PS1) never fires.
+# The fix must skip the REST attempt entirely whenever the value carries an
+# embedded newline and go straight to the real-keystroke path.
+TYPE_NEWLINE_APP = "MockTypeNewline"
+TYPE_NEWLINE_EVENTS = [
+    make_event("click", name="텍스트 편집기", automation_id="1",
+               class_name="RichEditD2DPT", control_type="Document",
+               app_name=TYPE_NEWLINE_APP, index=1),
+    make_event("type", name="텍스트 편집기", automation_id="1",
+               class_name="RichEditD2DPT", control_type="Document",
+               app_name=TYPE_NEWLINE_APP, value="hello\nworld", index=2),
+]
+TYPE_NEWLINE_SESSION_META = {
+    "action": "session_meta",
+    "app": TYPE_NEWLINE_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
+
+def step_wdio_generate_type_embedded_newline():
+    print("\n[23] a typed value containing an embedded newline skips WAD REST and goes straight to real keystrokes (Win11 Notepad Enter-key loss, 2026-08-11)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", TYPE_NEWLINE_SESSION_META)
+    for ev in TYPE_NEWLINE_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": TYPE_NEWLINE_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (type embedded newline) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped type embedded-newline checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname, content = f.get("filename", ""), f.get("content", "")
+        type2_body = method_body(content, "type2")
+        check(
+            f"  {fname} never routes this multi-line value through the WAD REST typing helpers",
+            "_typeScoped(" not in type2_body
+            and "_typeVerified(" not in type2_body
+            and "_typeScopedOrCom(" not in type2_body,
+            "WAD's element/value inserts the string in one shot with no "
+            "real key events — a literal newline inside it does not become "
+            "an Enter keypress, and the call reports success anyway "
+            "(measured live: Win11 Notepad RichEditD2DPT), so the existing "
+            "'if (!ok)' fallback to real keystrokes never fires (checked "
+            "inside type2()'s own body — these helpers' shared DEFINITIONS "
+            "always contain these substrings too)",
+        )
+        check(
+            f"  {fname} types this value via the real-keystroke path (osType)",
+            "osType(value)" in type2_body,
+            "OS_TYPE_PS1 explicitly converts '\\n' to {ENTER} via SendKeys "
+            "— this is the only path that reproduces a real Enter keypress",
+        )
+
+
+# Consecutive same-target type-merge scenario (2026-08-11, real Notepad
+# repro): agent.py splits one continuous typing burst into a separate `type`
+# event per Enter keypress. Once embedded-newline values route straight to
+# osType() (which unconditionally Ctrl+A's before typing, OS_TYPE_PS1), each
+# of those fragments independently wiped out everything typed before it —
+# only the last fragment survived. Codegen must merge consecutive `type`
+# events aimed at the SAME control into one before emitting steps.
+#
+# 2026-08-12 (real repro follow-up): the FIRST event here deliberately carries
+# a different windowTitle ("제목 없음 - 메모장") than the rest ("*제목 없음 -
+# 메모장") — Win11 Notepad's title gains a "*" dirty-flag prefix the instant
+# the first character is typed, so the merge condition must NOT require
+# windowTitle equality (it must still merge across this exact title flip) —
+# this is what the "hello" -erased-on-Enter bug actually was.
+TYPE_MERGE_APP = "MockTypeMerge"
+_TYPE_MERGE_RECT = [100, 100, 500, 300]
+TYPE_MERGE_EVENTS = [
+    make_event("click", name="텍스트 편집기", automation_id="1",
+               class_name="RichEditD2DPT", control_type="Document",
+               app_name=TYPE_MERGE_APP, index=1,
+               window_title="제목 없음 - 메모장"),
+    make_event("type", name="텍스트 편집기", automation_id="1",
+               class_name="RichEditD2DPT", control_type="Document",
+               app_name=TYPE_MERGE_APP, value="hello\n", index=2,
+               window_title="제목 없음 - 메모장"),
+    make_event("type", name="텍스트 편집기", automation_id="1",
+               class_name="RichEditD2DPT", control_type="Document",
+               app_name=TYPE_MERGE_APP, value="\n", index=3,
+               window_title="*제목 없음 - 메모장"),
+    make_event("type", name="텍스트 편집기", automation_id="1",
+               class_name="RichEditD2DPT", control_type="Document",
+               app_name=TYPE_MERGE_APP, value="world\n", index=4,
+               window_title="*제목 없음 - 메모장"),
+]
+for _ev in TYPE_MERGE_EVENTS:
+    _ev["element"]["rect"] = _TYPE_MERGE_RECT
+TYPE_MERGE_SESSION_META = {
+    "action": "session_meta",
+    "app": TYPE_MERGE_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
+
+def step_wdio_generate_type_merge():
+    print("\n[24] consecutive type events aimed at the same control merge into one instead of each wiping the last (Notepad multi-line typing, 2026-08-11)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", TYPE_MERGE_SESSION_META)
+    for ev in TYPE_MERGE_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": TYPE_MERGE_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (type merge) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped type-merge checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname, content = f.get("filename", ""), f.get("content", "")
+        check(
+            f"  {fname} collapses the 3 same-target type events into a single step",
+            "async type2(value)" in content and "async type3(value)" not in content,
+            "each fragment independently calling osType() (which always "
+            "Ctrl+A's first) would wipe out everything typed by the "
+            "previous fragment — there must be exactly one type step for "
+            "this whole burst, not three",
+        )
+        check(
+            f"  {fname} carries the full concatenated multi-line value into that one step",
+            "hello\\n\\nworld\\n" in content,
+            "merging must concatenate values in order (each already ends "
+            "in a recorded newline) — losing a fragment here would mean "
+            "losing a line of the user's actual typed text",
+        )
+
+
+# winFrag contamination scenario (2026-08-12, real Notepad repro): a stray
+# click that lands on the recording tool's OWN Chrome tab (e.g. the user
+# missed the "Stop recording" button by a few pixels) gets isElectron=True
+# from agent.py's _is_electron() (it only checks for the Chrome_WidgetWin
+# window class, which real Chrome/Edge windows share too — not exclusive to
+# actual Electron apps). If this is the ONLY isElectron-tagged event in the
+# whole recording, _elecTitles ends up with exactly one string, and
+# longestCommonSubstringAll of a single string returns that string whole —
+# so launchFrag becomes the CHROME TAB'S title instead of the real app's.
+# Measured live: launchApp then searched for "Desktop Automation Code
+# Generator - Chrome", timed out ("window not detected within timeout"), and
+# _hwndCache[_mainTitleFrag] stayed empty, cascading into
+# 'no window hwnd'/click-not-found failures on every later step. The fix
+# excludes locatorStrategy="coordinate" events (no real selector at all —
+# exactly what agent.py emits for this stray-click case) from _elecTitles.
+WINFRAG_CONTAM_APP = "MockWinFragContamination"
+WINFRAG_CONTAM_EVENTS = [
+    make_event("click", name="텍스트 편집기", automation_id="1",
+               class_name="RichEditD2DPT", control_type="Document",
+               app_name=WINFRAG_CONTAM_APP, window_title="제목 없음 - 메모장",
+               index=1, rootHwndHex="AAAA"),
+    make_event("type", name="텍스트 편집기", automation_id="1",
+               class_name="RichEditD2DPT", control_type="Document",
+               app_name=WINFRAG_CONTAM_APP, window_title="제목 없음 - 메모장",
+               value="hi\n", index=2, rootHwndHex="AAAA"),
+    make_event("click", name="", automation_id="", class_name="",
+               app_name=WINFRAG_CONTAM_APP,
+               window_title="Desktop Automation Code Generator - Chrome",
+               index=3, rootHwndHex="BBBB", isElectron=True),
+]
+WINFRAG_CONTAM_EVENTS[2]["element"]["locatorStrategy"] = "coordinate"
+WINFRAG_CONTAM_SESSION_META = {
+    "action": "session_meta",
+    "app": WINFRAG_CONTAM_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
+
+def step_wdio_generate_winfrag_contamination():
+    print("\n[25] a stray coordinate-only click on the recording tool's own Chrome tab does not hijack launchFrag (Notepad launch-timeout repro, 2026-08-12)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", WINFRAG_CONTAM_SESSION_META)
+    for ev in WINFRAG_CONTAM_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": WINFRAG_CONTAM_APP,
+        "platform": PLATFORM,
+        "exePath": "C:\\Windows\\System32\\notepad.exe",
+    }, timeout=30)
+    check("POST /api/generate (winFrag contamination) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped winFrag contamination checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname, content = f.get("filename", ""), f.get("content", "")
+        m = re.search(r"await launchApp\(([^;]*)\);", content)
+        launch_args = m.group(1) if m else ""
+        check(
+            f"  {fname} does not pass the stray Chrome tab's title to launchApp()",
+            "Desktop Automation Code Generator - Chrome" not in launch_args,
+            "a single locatorStrategy=coordinate event tagged isElectron=True "
+            "must not become the sole input to the common-substring anchor — "
+            "it has no real selector at all and isn't even part of the app "
+            "under test (the Chrome tab's title may still appear elsewhere, "
+            "e.g. a dropped-step comment — only the launchApp() call itself "
+            "matters here)",
+        )
+        check(
+            f"  {fname} passes the real app window's title to launchApp() instead",
+            '"제목 없음 - 메모장"' in launch_args,
+            "the real first event's windowTitle must still be used once the "
+            "contaminating event is excluded",
         )
 
 
@@ -3493,6 +3879,8 @@ def step_output_folders_isolated():
         NESTED_DROPDOWN_APP, SIMPLE_ROOTHWND_APP, TITLE_COLLISION_DIALOGRECT_APP,
         WEB_APP, DBLROW_APP, WINCLICK_APP, VOLATILE_MENUITEM_APP,
         MENU_INDEX_TRIGGER_APP,
+        ANCESTOR_XWIN_APP, ANCESTOR_AMBIGUOUS_APP, TYPE_NEWLINE_APP, TYPE_MERGE_APP,
+        WINFRAG_CONTAM_APP,
         "SevenZipStateReset",
         "MockGoldenCalculator", "MockGoldenFileZilla", "MockGoldenHeidiSQL",
         "MockGoldenPuTTY", "MockGoldenSevenZip", "MockGoldenTeamViewer",
@@ -3555,6 +3943,11 @@ def main():
     step_wdio_generate_dup_dropdown_position_disambiguation()
     step_wdio_generate_ambiguous_id_crosswindow_keeps_name()
     step_wdio_generate_ancestor_index()
+    step_wdio_generate_ancestor_index_crosswindow()
+    step_wdio_generate_ancestor_ambiguous_capture()
+    step_wdio_generate_type_embedded_newline()
+    step_wdio_generate_type_merge()
+    step_wdio_generate_winfrag_contamination()
     step_com_sendinput_helpers()
     step_esc_recovery_guards()
     step_wad_boundary_intact()

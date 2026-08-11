@@ -18,7 +18,12 @@ UIA_SelectionItemPatternId = 10010
 UIA_LegacyIAccessiblePatternId = 10018
 UIA_SELECTIONFLAG_TAKESELECTION = 1
 UIA_ScrollPatternId = 10004
+UIA_ControlTypeProperty = 30003
+UIA_ListItem = 50007
+UIA_MenuItem = 50011
+TreeScope_Children = 2
 TreeScope_Descendants = 4
+TreeScope_Subtree = 7
 ExpandCollapseState_Expanded = 1
 
 user32 = ctypes.windll.user32
@@ -53,6 +58,43 @@ class _INPUTUNION(ctypes.Union):
 class INPUT(ctypes.Structure):
     _anonymous_ = ("u",)
     _fields_ = [("type", wintypes.DWORD), ("u", _INPUTUNION)]
+
+
+def force_foreground(hwnd):
+    """AttachThreadInput 트릭으로 포그라운드 잠금을 우회해 hwnd를 실제 OS
+    포그라운드/활성 창으로 올린다 — SIMPLE_HEADER의 osActivate.ps1
+    (WinActivate.Force)과 같은 로직이지만, 별도 프로세스를 띄우고 그 프로세스가
+    끝나길 기다리는 대신 이 프로세스 안에서 곧바로 이어지는 Expand()/Invoke()
+    호출과 같은 프로세스 수명 안에서 실행된다.
+    2026-08-08 실측(FileZilla "도움말(H)" 메뉴, launchApp 직후 첫 액션):
+    launchApp()이 별도 PowerShell 프로세스(osActivate)로 창을 활성화했는데도
+    Expand()가 매번 state=0(펼쳐지지 않음), 새 팝업 0개로 실패했다 — PowerShell
+    프로세스가 활성화 직후 종료되면 Windows가 포그라운드를 그 부모(터미널)에게
+    돌려주는 것으로 보여, 별도 프로세스가 끝나는 순간 활성화 효과가 사라진다.
+    실제 화면 클릭(COM-SendInput)을 거치는 스텝들은 클릭 좌표 아래 창이 자연히
+    포그라운드가 되므로 이 레이스를 겪지 않는다 — Expand()처럼 시각적 동작이
+    없는 패턴 API만 문제다.
+    """
+    if not hwnd:
+        return
+    try:
+        SW_RESTORE = 9
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        fg = user32.GetForegroundWindow()
+        fg_tid = user32.GetWindowThreadProcessId(fg, None)
+        me_tid = ctypes.windll.kernel32.GetCurrentThreadId()
+        attached = False
+        if fg_tid and fg_tid != me_tid:
+            attached = bool(user32.AttachThreadInput(me_tid, fg_tid, True))
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0003)   # HWND_TOPMOST, NOMOVE|NOSIZE
+        user32.SetWindowPos(hwnd, -2, 0, 0, 0, 0, 0x0003)   # HWND_NOTOPMOST
+        if attached:
+            user32.AttachThreadInput(me_tid, fg_tid, False)
+        time.sleep(0.15)
+    except Exception:
+        pass
 
 
 def enable_per_monitor_dpi():
@@ -96,6 +138,49 @@ def clickable_point(el):
     return None
 
 
+def listitem_label_point(uia, el):
+    """리포트 뷰 행에서 실제로 항목을 여는 지점 — 이름(첫 컬럼) 셀의 중심.
+
+    실측 2026-08-04 (7-Zip SysListView32, poc 프로브):
+        행(ListItem) rect = (797, 267, 1405, 286)   중심 x=1101
+        이름 셀(Edit)  rect = (800, 267,  833, 286)  중심 x=816
+        중심(1101) 더블클릭 -> 제목/행 목록 전부 불변 (아무 일도 안 일어남)
+        이름 셀(816) 더블클릭 -> 즉시 진입, 행 1개에서 25개로
+
+    행 rect는 모든 컬럼을 가로지르므로 그 중심은 "수정한 날짜/크기" 컬럼의
+    빈 공간이다. 선택(단일 클릭)은 full-row select라 어디를 눌러도 되지만
+    활성화(더블클릭)는 이름 셀에서만 일어난다 — 그래서 단일 클릭 스텝은
+    멀쩡했고 폴더 진입만 조용히 실패했다.
+
+    좌표를 저장하지 않는다: 재생 시점에 살아 있는 자식 요소의 rect에서
+    계산한다(§3의 dynamic ClickablePoint 규칙 그대로). 자식이 없는 행이면
+    None을 돌려 기존 clickable_point() 동작을 그대로 쓴다.
+    """
+    TS_CHILDREN = 2
+    UIA_ListItem = 50007
+    try:
+        if el.CurrentControlType != UIA_ListItem:
+            return None
+    except Exception:
+        return None
+    try:
+        arr = el.FindAll(TS_CHILDREN, uia.CreateTrueCondition())
+    except Exception:
+        return None
+    best = None
+    for i in range(arr.Length if arr else 0):
+        try:
+            r = arr.GetElement(i).CurrentBoundingRectangle
+        except Exception:
+            continue
+        if r.right <= r.left or r.bottom <= r.top:
+            continue
+        # 가장 왼쪽 셀 = 이름 컬럼. 아이콘+라벨이 여기 있다.
+        if best is None or r.left < best[0]:
+            best = (r.left, (r.left + r.right) // 2, (r.top + r.bottom) // 2)
+    return (best[1], best[2]) if best else None
+
+
 def _same_or_descendant(uia, ancestor, el, max_up=6):
     cur = el
     try:
@@ -119,7 +204,7 @@ def _same_or_descendant(uia, ancestor, el, max_up=6):
     return False
 
 
-def send_input_click(uia, el, tag):
+def send_input_click(uia, el, tag, double=False):
     """UIA로 방금 찾은 요소를 실제 마우스 입력으로 클릭한다.
 
     안전 검증을 하나라도 통과 못 하면 사유를 남기고 False — 호출자는 기존
@@ -147,7 +232,9 @@ def send_input_click(uia, el, tag):
     except Exception:
         label = "?"
 
-    pt = clickable_point(el)
+    # 리포트 뷰 행은 rect 중심이 빈 컬럼이라 더블클릭이 안 먹는다 —
+    # listitem_label_point() 참고 (2026-08-04 실측).
+    pt = listitem_label_point(uia, el) or clickable_point(el)
     if not pt:
         return bail("no-clickable-point")
     x, y = pt
@@ -198,9 +285,110 @@ def send_input_click(uia, el, tag):
     time.sleep(0.04)
     send(MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)
 
-    print("[COM-SendInput] " + tag + " clicked '" + label + "' at (%d,%d)" % (x, y))
+    # 두 번째 누름/뗌 — 시스템 더블클릭 간격(기본 500ms) 안에 보내야 앱이
+    # 더블클릭으로 인식한다. 여기 간격 합은 ~90ms.
+    #
+    # 2026-08-04: 이 분기가 없어서 녹화된 더블클릭이 앱에는 단일 클릭으로
+    # 도달했다. 네이티브 리스트 행에서 단일 클릭은 "선택"이지 "열기"가 아니다.
+    # 원래 설계는 InvokePattern.Invoke()(=기본 동작=열기)에 기대고 있었는데
+    # (server.js ListItem 분기 주석, 2026-07-15 실측), 2026-07-24에
+    # send_input_click()이 invoke_item() 체인 맨 앞에 붙으면서
+    # "if send_input_click(...): return True"가 되어 그 Invoke()가 도달 불가능한
+    # 죽은 코드가 됐다. 결과: 7-Zip에서 "3:doubleClick 컴퓨터"가 성공으로
+    # 보고되지만 폴더는 안 열리고, "4:doubleClick C:"부터 전부 무너진다
+    # (2026-08-04 두 번 연속 동일 재현).
+    if double:
+        time.sleep(0.05)
+        send(MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)
+        time.sleep(0.04)
+        send(MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)
+
+    verb = " double-clicked '" if double else " clicked '"
+    print("[COM-SendInput] " + tag + verb + label + "' at (%d,%d)" % (x, y))
     time.sleep(0.05)
     return True
+
+
+# ── TogglePattern (2026-07-31) ─────────────────────────────────────────────
+# 실측(TeamViewer 15.79 WebView2, poc/diag_teamviewer_a11y_wakeup.py [D]):
+# 체크박스 2종의 지원 패턴은 정확히 {Toggle, Legacy}뿐 — Invoke도
+# SelectionItem도 없다. 기존 클릭 체인(Invoke → SelectionItem → Legacy)에는
+# Toggle이 아예 없어서 앞의 둘이 연달아 예외로 떨어진 뒤
+# Legacy.Select(TAKESELECTION)이 예외 없이 통과하며 True를 반환했다. 그런데
+# 체크박스에서 "셀렉션"은 체크 상태를 바꾸지 않으므로, 재생은 성공으로
+# 보고되는데 화면에서는 아무 일도 일어나지 않는다 — 그 체크박스가 띄우는
+# 확인 다이얼로그도 당연히 안 뜬다(2026-07-31 클라이언트 피드백 증상 그대로).
+# Legacy 폴백보다 앞서 Toggle을 시도하되, ToggleState가 실제로 바뀐 경우에만
+# 성공으로 인정한다(거짓 PASS 방지 — 2026-07-13 3차 교훈과 같은 원칙).
+UIA_TogglePatternId = 10015
+
+
+def toggle_item(mod, el, tag):
+    try:
+        tp = el.GetCurrentPattern(UIA_TogglePatternId).QueryInterface(
+            mod.IUIAutomationTogglePattern)
+    except Exception:
+        return False
+    try:
+        before = tp.CurrentToggleState
+        tp.Toggle()
+        time.sleep(0.05)
+        after = tp.CurrentToggleState
+    except Exception as e:
+        print("[" + tag + "] TogglePattern.Toggle() raised: %s" % e, file=sys.stderr)
+        return False
+    if after != before:
+        print("[" + tag + "] TogglePattern.Toggle() %d -> %d" % (before, after))
+        return True
+    print("[" + tag + "] TogglePattern.Toggle() left ToggleState unchanged (%d)"
+          " - falling through to the remaining patterns" % before, file=sys.stderr)
+    return False
+
+
+# ── checkbox 값-변경 검증 (2026-08-04) ───────────────────────────────────────
+# 위 toggle_item()은 invoke_item()의 체인 맨 끝(Legacy 폴백보다 앞)에서만
+# 쓰인다 — invoke_item()이 맨 앞에서 시도하는 send_input_click()(실제 화면
+# 클릭)이 성공하면 그 자리에서 곧바로 True를 반환하므로(§6 "재생은 시각적으로
+# 확인 가능해야 한다"는 요구를 만족하는 기본 경로), 대다수 체크박스 클릭은
+# toggle_item()까지 내려가지도 않는다. 그 결과 "클릭 자체는 에러 없이 끝났다"만
+# 보고 실제로 체크 상태가 바뀌었는지는 아무도 확인하지 않는다 — TeamViewer
+# WebView2 토글에서 실측된 것과 같은 종류의 거짓 PASS 위험이 CheckBox
+# controlType 전반에 구조적으로 남아 있다(HeidiSQL/PuTTY의 TCheckBox·Button
+# 스타일 체크박스도 이 경로를 그대로 탄다 — 2026-08-04 점검 시점엔 아직 실제
+# 재생 실패로 드러난 적은 없지만, 다음에 체크박스가 있는 녹화를 재생하면 언제든
+# 조용히 터질 수 있는 잠재적 구멍). 시각적 클릭은 그대로 유지하면서(§6), 클릭
+# 전후 ToggleState를 비교해 실제로 바뀌었는지만 추가로 검증한다 — 안 바뀌었으면
+# toggle_item()의 직접 Toggle() 호출로 한 번 더 보정 시도하고, 그래도 안 바뀌면
+# 정직하게 실패로 보고한다(호출부가 exit code로 판단해 _failures에 기록).
+def verified_toggle_click(uia, mod, el, tag="osScopedInvoke", double=False):
+    try:
+        tp = el.GetCurrentPattern(UIA_TogglePatternId).QueryInterface(
+            mod.IUIAutomationTogglePattern)
+    except Exception:
+        # TogglePattern이 없다 = 이 컨트롤은 애초에 체크박스가 아니다(예:
+        # CheckBox로 잘못 태깅됐거나 캡처 시점 이후 컨트롤이 바뀐 경우) —
+        # 검증할 상태 자체가 없으므로 평범한 클릭으로 폴백한다. 없는 걸
+        # 있다고 우기며 거짓 실패를 만들지 않는다.
+        return invoke_item(uia, mod, el, double)
+    try:
+        before = tp.CurrentToggleState
+    except Exception:
+        return invoke_item(uia, mod, el, double)
+    if not invoke_item(uia, mod, el, double):
+        return False
+    time.sleep(0.05)
+    try:
+        after = tp.CurrentToggleState
+    except Exception as e:
+        print(f"[{tag}] click succeeded but ToggleState could not be "
+              f"re-read afterward ({e}) — cannot verify, trusting the click", file=sys.stderr)
+        return True
+    if after != before:
+        print(f"[{tag}] checkbox toggled {before} -> {after} (verified)")
+        return True
+    print(f"[{tag}] click reported success but ToggleState stayed {before} "
+          "unchanged — retrying via TogglePattern.Toggle() directly", file=sys.stderr)
+    return toggle_item(mod, el, tag)
 
 
 def top_windows():
@@ -268,6 +456,13 @@ def field_conds(uia, sel):
         conds.append(uia.CreatePropertyCondition(UIA_NameProperty, sel["name"]))
     if sel.get("className"):
         conds.append(uia.CreatePropertyCondition(UIA_ClassNameProperty, sel["className"]))
+    # 2026-08-10 (FileZilla "C:" 트리 vs 리스트 혼동 실측, osScopedInvoke.py의
+    # resolve_cond()와 같은 이유로 동시 적용 — 사용자 리뷰 지적): 같은 화면에
+    # 같은 Name의 owner-drawn 컨트롤이 둘 이상(TreeItem/ListItem) 있을 때
+    # FindFirst가 아무거나 먼저 걸리는 걸 막는 추가 AND 조건.
+    if sel.get("controlTypeId") is not None:
+        conds.append(uia.CreatePropertyCondition(
+            UIA_ControlTypeProperty, int(sel["controlTypeId"])))
     return conds
 
 
@@ -299,7 +494,7 @@ def resolve_target(uia, root, sel):
     return None
 
 
-def invoke_item(uia, mod, el):
+def invoke_item(uia, mod, el, double=False):
     ensure_visible(uia, mod, el)
     try:
         el.SetFocus()
@@ -307,13 +502,18 @@ def invoke_item(uia, mod, el):
         pass
     # 시각적 재생 우선(2026-07-24, §6) — 성공하면 반드시 여기서 반환한다.
     # 이어서 Invoke()까지 부르면 같은 동작이 두 번 실행된다.
-    if send_input_click(uia, el, "osExpandCollapse"):
+    # 2026-08-09: double=True면 두 번 누른다(OS_SCOPEDINVOKE_PY의 로컬
+    # invoke_item 재정의와 동일한 의미) — 이 공유 버전은 OS_EXPANDCOLLAPSE_PY의
+    # --ancestor-sel-b64 경로에서 그대로 쓰인다.
+    if send_input_click(uia, el, "osExpandCollapse", double):
         return True
     try:
         el.GetCurrentPattern(UIA_InvokePatternId).QueryInterface(mod.IUIAutomationInvokePattern).Invoke()
         return True
     except Exception:
         pass
+    if toggle_item(mod, el, "osExpandCollapse"):
+        return True
     try:
         el.GetCurrentPattern(UIA_SelectionItemPatternId).QueryInterface(mod.IUIAutomationSelectionItemPattern).Select()
         return True
@@ -335,12 +535,36 @@ def invoke_item(uia, mod, el):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hwnd", type=int, required=True)
-    ap.add_argument("--sel-b64", required=True)
+    # 2026-08-08: --ancestor-sel-b64 경로는 트리거 셀렉터(--sel-b64) 없이
+    # 조상 셀렉터만으로 동작하므로 더는 무조건 필수가 아니다 — 아래에서
+    # 어느 한쪽은 반드시 있어야 함을 직접 검증한다.
+    ap.add_argument("--sel-b64", default=None)
     ap.add_argument("--item-name-b64", default=None)
+    # 2026-07-31: ComboBoxEx(HeidiSQL 네트워크 유형)처럼 항목 Name이 전부 빈
+    # owner-drawn 드롭다운은 이름으로 지목할 수 없다. 목록 안에서의 순서로만
+    # 구별 가능하므로 인덱스를 받는다(좌표가 아니라 구조적 순서 —
+    # ListItem/TreeItem/DataItem 슬롯 인덱스와 같은 원리).
+    ap.add_argument("--item-index", type=int, default=None)
+    ap.add_argument("--item-count", type=int, default=None)
+    # 2026-08-08: 이름 없는 요소를 "가까운 이름 있는 조상 + 동일 ControlType
+    # 형제 순번"으로 재탐색하는 경로 (agent.py의 _ancestor_sibling_selector가
+    # 기록). 팝업/콤보를 여는 게 아니라 이미 화면에 떠 있는 형제(툴바 버튼 등)를
+    # 고르는 것이므로, 아래 ecp/Expand() 로직 전체와는 무관한 별도 분기다.
+    ap.add_argument("--ancestor-sel-b64", default=None)
+    ap.add_argument("--ancestor-item-ctrltype", type=int, default=None)
+    # 2026-08-09: --ancestor-sel-b64 경로에서도 더블클릭이 필요해졌다
+    # (agent.py가 doubleClick 이벤트에도 ancestorSiblingIndex를 채우는
+    # 로컬 파일목록/트리 항목). 이 스크립트 자신의 argparser에는 이 플래그가
+    # 없었다 — 다른 임베드 스크립트(server.js 안의 별개 main())에서 본
+    # --double을 이 스크립트도 이미 가진 것으로 착각한 실수, 회귀로 드러남.
+    ap.add_argument("--double", action="store_true")
     args = ap.parse_args()
 
     if not args.hwnd:
         print("osExpandCollapse: --hwnd is required", file=sys.stderr)
+        sys.exit(2)
+    if not args.sel_b64 and not args.ancestor_sel_b64:
+        print("osExpandCollapse: either --sel-b64 or --ancestor-sel-b64 is required", file=sys.stderr)
         sys.exit(2)
 
     enable_per_monitor_dpi()
@@ -375,8 +599,82 @@ def main():
         print("osExpandCollapse: ElementFromHandle failed", file=sys.stderr)
         sys.exit(2)
 
+    # 2026-08-08: 조상+형제인덱스 경로 — 트리거를 열 필요가 없는(이미 화면에
+    # 떠 있는) 이름 없는 요소를 재탐색한다. --sel-b64는 이 모드에서는
+    # 조상 자체의 셀렉터로 재사용된다(field_conds가 그대로 통함 — automationId/
+    # name/className 조합 매칭은 대상이 트리거든 조상이든 동일한 로직).
+    if args.ancestor_sel_b64:
+        anc_sel = json.loads(base64.b64decode(args.ancestor_sel_b64).decode("utf-8"))
+        if args.item_index is None or args.ancestor_item_ctrltype is None:
+            print("osExpandCollapse: --item-index and --ancestor-item-ctrltype "
+                  "are required with --ancestor-sel-b64", file=sys.stderr)
+            sys.exit(2)
+        ancestor = None
+        for attempt in range(10):   # 기존 target 재탐색과 같은 예산(10회, 300ms)
+            if attempt > 0:
+                time.sleep(0.3)
+            ancestor = resolve_target(uia, root, anc_sel)
+            if ancestor:
+                break
+        if not ancestor:
+            print(f"osExpandCollapse: ancestor not found (sel={args.ancestor_sel_b64})",
+                  file=sys.stderr)
+            sys.exit(2)
+        cond = uia.CreatePropertyCondition(UIA_ControlTypeProperty, args.ancestor_item_ctrltype)
+        # 2026-08-09/10 (형제 개수 널뛰기 조사, poc/probe_ancestor_chain.py
+        # --sample 실측): 폴더 진입/트리 펼치기 직후 조상의 자식 개수가 실제
+        # 값으로 안정되기까지 트리는 0.6~0.9s, 리스트(폴더 진입)는 최대 1.8s
+        # 걸리는 걸 직접 재현 확인(project→code-generator, 정확히 1800ms에서
+        # 수렴) — 캡처 시점 개수와 처음 한 번의 조회가 다르다고 바로 "tree
+        # drifted"로 포기하지 않고, agent.py의 _find_sibling_by_controltype()
+        # 과 동일한 예산(10회, 0.3s 간격 = 2.7s, 실측 1.8s에 여유를 둠)으로
+        # 재시도한다.
+        items = None
+        actual_count = 0
+        for attempt in range(10):
+            if attempt > 0:
+                time.sleep(0.3)
+            try:
+                items = ancestor.FindAll(TreeScope_Children, cond)  # agent.py와 스코프 일치 필수
+            except Exception as e:
+                print(f"osExpandCollapse: FindAll under ancestor failed: {e}", file=sys.stderr)
+                sys.exit(2)
+            actual_count = items.Length if items else 0
+            if not args.item_count or actual_count == args.item_count:
+                break
+        if args.item_count and actual_count != args.item_count:
+            print(f"osExpandCollapse: {actual_count} matching siblings but the "
+                  f"recording saw {args.item_count} — refusing to pick by position "
+                  "(tree drifted since capture)", file=sys.stderr)
+            sys.exit(2)
+        if not items or args.item_index >= items.Length:
+            print(f"osExpandCollapse: sibling index {args.item_index} out of range "
+                  f"(0..{actual_count - 1})", file=sys.stderr)
+            sys.exit(2)
+        target = items.GetElement(args.item_index)
+        if invoke_item(uia, mod, target, args.double):
+            print(f"[osExpandCollapse] ancestor+index: invoked sibling "
+                  f"#{args.item_index}/{actual_count}")
+            sys.exit(0)
+        print("osExpandCollapse: invoke_item failed on ancestor+index target", file=sys.stderr)
+        sys.exit(2)
+
     sel = json.loads(base64.b64decode(args.sel_b64).decode("utf-8"))
-    target = resolve_target(uia, root, sel)
+    # 2026-08-04 실측(HeidiSQL "환경 설정" -> "파일 및 탭" 탭 전환 직후 콤보
+    # 검색): 탭 클릭(osScopedInvoke, 별도 프로세스) 자체는 성공으로 보고되는데,
+    # 그 직후 이 프로세스가 즉시 자식 트리를 검색하면 그 탭의 컨트롤(TComboBox
+    # 등)이 아직 UIA 트리에 올라오지 않아 매번 "target element not found"였다
+    # — osScopedInvoke.py가 렌더링 레이스에 대해 이미 갖고 있는 재시도 예산
+    # (2026-07-17/24, "새 사이트(N)" 인라인 이름변경 상자와 같은 근거)을 이
+    # 헬퍼의 resolve_target()은 여태 갖고 있지 않았다. 클릭과 같은 예산(10회,
+    # 300ms 간격, 최대 ~2.7초)을 그대로 맞춘다.
+    target = None
+    for attempt in range(10):
+        if attempt > 0:
+            time.sleep(0.3)
+        target = resolve_target(uia, root, sel)
+        if target:
+            break
     if not target:
         print(f"osExpandCollapse: target element not found (sel={args.sel_b64})", file=sys.stderr)
         sys.exit(2)
@@ -398,35 +696,169 @@ def main():
     # 창-경계 가드가 이제 이런 리프 커맨드를 트리거로 병합하지 않으므로
     # 여기까지 오지 않는다 — 그 경로는 기존처럼 실패로 남겨 무엇이 잘못됐는지
     # 숨기지 않는다.
+    # 2026-08-05 (FileZilla 도움말(H) 메뉴 실측 — 2026-08-04 HeidiSQL "더 보기"로
+    # 이미 기록됐던 백로그 항목이 그대로 재현): 아래 두 폴백의 조건이
+    # "not item_name"뿐이라, **인덱스로 항목을 고르는 이벤트**(item_name이 항상
+    # None — 이름이 아니라 위치로 고르는 게 그 방식의 정의다)까지 "이건 서브메뉴가
+    # 없는 리프 커맨드였다"로 오판했다. 그 결과 args.item_index가 버젓이 있는데도
+    # 그 값을 한 번도 안 보고 트리거만 다시 클릭한 뒤 exit 0으로 "성공" 보고 —
+    # 실측 로그: "3:select item #4 FileZilla 정보(A)..." 스텝이
+    # "clicked 도움말(H)" + "invoked as a plain command instead"로 끝나고,
+    # 정작 "FileZilla 정보"는 눌리지 않았다(§3 거짓 성공).
+    #
+    # item_index가 있으면 이 폴백을 타면 안 된다. 그런데 단순히 실패시키는 것도
+    # 답이 아니다 — 패턴이 없을 뿐 **트리거를 클릭하면 메뉴는 실제로 열린다**
+    # (invoke_item이 하는 일이 바로 그것이고, 위 오판 케이스에서 메뉴가 열렸다는
+    # 사실 자체가 그 증거다). 그러니 클릭으로 메뉴를 연 뒤 아래 인덱스 기반
+    # pool 검색으로 이어가면 원래 의도대로 동작한다.
+    ecp = None
     try:
         ecp = target.GetCurrentPattern(UIA_ExpandCollapsePatternId).QueryInterface(
             mod.IUIAutomationExpandCollapsePattern)
     except Exception:
-        if not item_name and invoke_item(uia, mod, target):
-            print("[osExpandCollapse] ExpandCollapsePattern unavailable — invoked as a plain command instead")
-            sys.exit(0)
-        print("osExpandCollapse: ExpandCollapsePattern not supported on target", file=sys.stderr)
-        sys.exit(2)
+        if args.item_index is None:
+            if not item_name and invoke_item(uia, mod, target):
+                print("[osExpandCollapse] ExpandCollapsePattern unavailable — invoked as a plain command instead")
+                sys.exit(0)
+            print("osExpandCollapse: ExpandCollapsePattern not supported on target", file=sys.stderr)
+            sys.exit(2)
+
+    # 네이티브 메뉴바 Expand()는 대상 창이 실제 OS 포그라운드여야 팝업을 연다
+    # (2026-08-08 실측 — force_foreground() 정의부 주석 참고). 클릭 없이 도는
+    # 패턴 API라 launchApp()의 별도-프로세스 활성화가 이미 끝난 뒤에는 그
+    # 효과가 사라져 있을 수 있으므로, 이 프로세스 안에서 바로 다시 강제한다.
+    force_foreground(args.hwnd)
 
     # 새 팝업 창(네이티브 TrackPopupMenu 등) 감지용 베이스라인은 Expand() 전에
     # 찍는다 — FileZilla 메뉴바처럼 하위 항목이 그 팝업 서브트리에만 생기는 경우.
     baseline = set(top_windows())
 
-    try:
-        if ecp.CurrentExpandCollapseState != ExpandCollapseState_Expanded:
-            ecp.Expand()
-        else:
-            ecp.Collapse()
-            time.sleep(0.2)
-            ecp.Expand()
-    except Exception as e:
-        if not item_name and invoke_item(uia, mod, target):
-            print("[osExpandCollapse] Expand() failed — invoked as a plain command instead")
-            sys.exit(0)
-        print(f"osExpandCollapse: Expand() failed: {e}", file=sys.stderr)
+    if ecp is None:
+        # 패턴 없음 + 인덱스 있음: 트리거를 클릭해 메뉴를 열고 pool 검색으로 간다.
+        if not invoke_item(uia, mod, target):
+            print("osExpandCollapse: ExpandCollapsePattern unavailable and the "
+                  "trigger could not be clicked either — cannot open the list",
+                  file=sys.stderr)
+            sys.exit(2)
+        print("[osExpandCollapse] ExpandCollapsePattern unavailable — opened the "
+              "list by clicking the trigger instead (index-based pick follows)")
+        time.sleep(0.4)
+    else:
+        try:
+            if ecp.CurrentExpandCollapseState != ExpandCollapseState_Expanded:
+                ecp.Expand()
+            else:
+                ecp.Collapse()
+                time.sleep(0.2)
+                ecp.Expand()
+        except Exception as e:
+            if args.item_index is None and not item_name and invoke_item(uia, mod, target):
+                print("[osExpandCollapse] Expand() failed — invoked as a plain command instead")
+                sys.exit(0)
+            if args.item_index is None:
+                print(f"osExpandCollapse: Expand() failed: {e}", file=sys.stderr)
+                sys.exit(2)
+            # 인덱스 기반 선택은 위와 같은 이유로 여기서 포기하지 않는다.
+            if not invoke_item(uia, mod, target):
+                print(f"osExpandCollapse: Expand() failed ({e}) and the trigger "
+                      "could not be clicked either", file=sys.stderr)
+                sys.exit(2)
+            print(f"[osExpandCollapse] Expand() failed ({e}) — opened the list by "
+                  "clicking the trigger instead (index-based pick follows)")
+        time.sleep(0.4)
+        try:
+            state = ecp.CurrentExpandCollapseState
+        except Exception:
+            state = None
+        print(f"[osExpandCollapse] state after Expand() = {state}")
+        # 2026-08-08 실측(FileZilla "도움말(H)" 메뉴, launchApp 직후 첫 액션):
+        # Expand()가 예외 없이 리턴했는데도 실제로는 펼쳐지지 않는 경우가 있었다
+        # (state 그대로 0, 새 팝업도 0개) — 네이티브 메뉴바가 막 뜬 창에서
+        # 프로그래매틱 Expand()에 응답하지 않는 것으로 보인다(포그라운드를
+        # 강제해도 재현됨 — force_foreground()로도 못 고침, 첫 액션 이후에는
+        # 재현되지 않음). 반면 같은 트리거를 물리 클릭(COM-SendInput)하면 이
+        # 시점에도 매번 열렸다 — Expand()가 "에러 없음"을 "성공"으로 오인하지
+        # 않도록, 실제 상태가 Expanded가 아니면 invoke_item()(물리 클릭 우선,
+        # 실패 시 Invoke/Select/Legacy 폴백)으로 한 번 더 열어본다.
+        if state != ExpandCollapseState_Expanded:
+            if invoke_item(uia, mod, target):
+                time.sleep(0.3)
+                try:
+                    state = ecp.CurrentExpandCollapseState
+                except Exception:
+                    pass
+                print(f"[osExpandCollapse] Expand() reported no error but did not "
+                      f"actually expand — retried via physical click, state now = {state}")
+
+    # ── 인덱스로 항목 선택 (2026-07-31, owner-drawn ComboBoxEx;
+    #    2026-08-04 확장: owner-drawn 팝업 메뉴, HeidiSQL "더 보기") ────────
+    # 항목 Name이 전부 빈 드롭다운/메뉴는 이름 조건으로 못 찾는다. 펼친 뒤
+    # 보이는 ListItem(콤보) 또는 MenuItem(팝업 메뉴)을 트리 순서대로 모아
+    # N번째를 실행한다. 창 서브트리와 새로 뜬 팝업 창을 모두 훑는다(Win32
+    # 콤보는 목록을 별도 ComboLBox 창에 그리기도 한다). 어느 컨트롤 타입인지
+    # 알려주는 별도 플래그는 없다 — 그 시점에 실제로 열려 있는 게 콤보든
+    # 메뉴든 둘 중 하나뿐이므로, 두 타입 다 후보 풀에 넣고 기존 루프가
+    # item_count 일치 여부로 걸러내게 둔다. 좌표는 쓰지 않는다.
+    if args.item_index is not None:
+        time.sleep(0.2)
+        li_cond = uia.CreatePropertyCondition(UIA_ControlTypeProperty, UIA_ListItem)
+        mi_cond = uia.CreatePropertyCondition(UIA_ControlTypeProperty, UIA_MenuItem)
+        pools = []
+        for cond, kind in ((li_cond, "ListItem"), (mi_cond, "MenuItem")):
+            try:
+                pools.append((f"main window ({kind})", root.FindAll(TreeScope_Subtree, cond)))
+            except Exception:
+                pass
+        # 2026-08-05 진단(FileZilla 도움말 메뉴 실측): STEP 1에서 pool이
+        # "main window" 두 건만 잡히고 popup 항목이 하나도 안 나왔다 —
+        # 즉 Expand() 뒤에도 baseline에 없던 새 최상위 창이 발견되지 않았다.
+        # 그게 (a) 팝업이 아예 안 열려서인지 (b) 이미 baseline에 있던
+        # 창이라 걸러진 건지 로그만으로 구분이 안 돼서, 후보 수를 남긴다.
+        _seen_new, _skipped_baseline = 0, 0
+        for h in top_windows():
+            if h in baseline:
+                _skipped_baseline += 1
+                continue
+            _seen_new += 1
+            try:
+                pr = uia.ElementFromHandle(h)
+            except Exception:
+                continue
+            if not pr:
+                continue
+            for cond, kind in ((li_cond, "ListItem"), (mi_cond, "MenuItem")):
+                try:
+                    pools.append((f"popup hwnd={h} ({kind})", pr.FindAll(TreeScope_Subtree, cond)))
+                except Exception:
+                    continue
+        print(f"[osExpandCollapse] popup scan: {_seen_new} new top-level window(s) "
+              f"after opening, {_skipped_baseline} pre-existing skipped")
+        for where, arr in pools:
+            if not arr or not arr.Length:
+                continue
+            if args.item_count and arr.Length != args.item_count:
+                print(f"[osExpandCollapse] {where}: {arr.Length} items but the "
+                      f"recording saw {args.item_count} — the list changed since "
+                      "capture; refusing to pick by position", file=sys.stderr)
+                continue
+            if args.item_index >= arr.Length:
+                print(f"[osExpandCollapse] {where}: index {args.item_index} out of "
+                      f"range ({arr.Length} items)", file=sys.stderr)
+                continue
+            item = arr.GetElement(args.item_index)
+            label = ""
+            try:
+                label = item.CurrentName or ""
+            except Exception:
+                pass
+            if invoke_item(uia, mod, item):
+                print(f"[osExpandCollapse] selected item #{args.item_index} of "
+                      f"{arr.Length} in {where}"
+                      + (f" (name={label!r})" if label else " (unnamed item)"))
+                sys.exit(0)
+        print(f"osExpandCollapse: could not select item #{args.item_index} in any "
+              "open list", file=sys.stderr)
         sys.exit(2)
-    time.sleep(0.4)
-    print(f"[osExpandCollapse] state after Expand() = {ecp.CurrentExpandCollapseState}")
 
     if not item_name:
         # 항목 선택 없이 펼치기/접기 자체가 목적인 이벤트(예: 트리 +- 토글).

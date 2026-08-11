@@ -2878,6 +2878,66 @@ function mergeExpandCollapseClicks(events) {
   return out;
 }
 
+// 같은 대상에 대한 연속 type 이벤트를 하나로 합친다 (2026-08-11, Notepad
+// "hello\n" / "\n" / "my name is hansung\n" ... 실측). agent.py는 Enter
+// 키를 누를 때마다 지금까지 쌓인 타이핑 버퍼를 즉시 flush해 별도의 type
+// 이벤트로 emit한다(오래된 의도적 설계 — 연속 빈 줄 처리를 위해 2026-07-12에
+// 더 정교해짐) — 한 번의 연속 타이핑이 여러 개의 조각난 type 이벤트로
+// 쪼개져 캡처된다는 뜻이다. 개행이 포함된 값은 REST 대신 osType()로
+// 직행하는데(hasEmbeddedNewline 분기, 아래), OS_TYPE_PS1은 매 호출마다
+// 무조건 Ctrl+A(전체 선택) 후 타이핑한다 — 조각난 이벤트 각각이 독립적인
+// type 스텝으로 재생되면, 스텝마다 전체 선택+덮어쓰기가 반복돼 마지막
+// 조각만 남고 이전 줄이 전부 지워진다(실측 확인). 캡처 시점에는 못 합친다
+// — agent.py가 이벤트를 만들자마자 바로 POST해버려 지역 버퍼가 없다
+// (즉시 전송 구조를 건드리는 건 훨씬 위험도가 큼) — 그래서 이 병합은
+// mergeExpandCollapseClicks와 같은 자리(코드생성 직전)에서 한다.
+function mergeConsecutiveTypeEvents(events) {
+  const out = [];
+  for (let i = 0; i < events.length; i++) {
+    const e = events[i];
+    if (e.action !== 'type') { out.push(e); continue; }
+    let merged = { ...e };
+    let j = i + 1;
+    while (j < events.length) {
+      const next = events[j];
+      if (next.action !== 'type') break;
+      // automationId/className/name이 전부 같아도 그것만으론 "진짜 같은
+      // 컨트롤"이라고 확신할 수 없다(리뷰 지적) — 예: 대충 지어진 웹폼에서
+      // 아이디 칸과 비밀번호 칸이 같은 className/자동생성 id를 공유할 수
+      // 있고, 그러면 Tab으로 이동해 서로 다른 칸에 입력한 값이 하나로
+      // 뭉쳐져 엉뚱한 필드에 긴 텍스트가 그대로 들어가는 사고가 난다. rect
+      // 일치(sameRect, 2612행 — mergeExpandCollapseClicks가 트리거 짝짓기에
+      // 쓰는 것과 동일한 오차 허용 비교)를 추가 필수 조건으로 걸어, 클릭
+      // 좌표가 실질적으로 같은 자리일 때만 병합한다. 어느 한쪽이라도 rect가
+      // 없으면 안전한 쪽(병합 안 함)으로 fall back.
+      //
+      // windowTitle은 일부러 비교에서 뺐다(2026-08-12, 실측 Notepad "hello"
+      // 소실 버그): Win11 메모장은 글자를 한 개라도 치면 창 제목이 "제목
+      // 없음 - 메모장" → "*제목 없음 - 메모장"으로 바로 바뀐다 — 같은
+      // 컨트롤에 계속 타이핑 중인데도 첫 조각과 그다음 조각 사이에서
+      // windowTitle이 달라져 병합이 끊기고, 각 조각이 osType()을 독립
+      // 호출하면서 그 안의 무조건 Ctrl+A가 앞서 입력한 "hello"까지 통째로
+      // 선택해 지워버렸다(실측 확인). automationId+className+name+rect
+      // 조합이 이미 충분히 엄격해서(특히 rect) windowTitle 없이도 다른
+      // 컨트롤과 혼동될 위험은 낮다.
+      const sameTarget =
+        (merged.element?.automationId || '') === (next.element?.automationId || '')
+        && (merged.element?.className || '') === (next.element?.className || '')
+        && (merged.element?.name || '') === (next.element?.name || '')
+        && sameRect(merged.element?.rect, next.element?.rect);
+      if (!sameTarget) break;
+      merged = { ...merged, value: (merged.value || '') + (next.value || '') };
+      j++;
+    }
+    if (j > i + 1) {
+      console.log(`[type-merge] merged ${j - i} consecutive type events into one (target='${merged.element?.name || merged.element?.automationId}') — avoids each fragment re-selecting the whole field and wiping earlier ones`);
+    }
+    out.push(merged);
+    i = j - 1;
+  }
+  return out;
+}
+
 // 이벤트가 캡처된 창 크기/위치가 앱의 메인 창(recordedRect)과 다른가 —
 // 다르면 그 요소는 클릭 시점에 별도로 뜬 최상위 창(팝업/드롭다운 목록)
 // 안에 있었다는 뜻(2026-07-13, PuTTY "Remote character set:" 콤보박스
@@ -5125,7 +5185,7 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
   const _mainWindowTitleForDialogRects = _rectEvent?.element?.windowTitle || '';
 
   const filtered     = stripWindowFillingContainers(
-    mergeCrossWindowTriggerClicks(mergeExpandCollapseClicks(_deduped), recordedRect),
+    mergeCrossWindowTriggerClicks(mergeExpandCollapseClicks(mergeConsecutiveTypeEvents(_deduped)), recordedRect),
     recordedRect);
   const pageMethods  = [];
   const testSteps    = [];
@@ -5150,7 +5210,24 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
   })();
 
   // Electron 창 rect 앵커: 모든 Electron 이벤트 타이틀의 공통 부분문자열.
-  const _elecTitles = filtered.filter(e => e.isElectron === true)
+  // 2026-08-12 (Notepad 실측: launchFrag가 "Desktop Automation Code
+  // Generator - Chrome"으로 오염돼 launchApp이 20초 타임아웃 → 이후 모든
+  // 스텝이 'no window hwnd'/click-not-found로 무너짐): agent.py의
+  // _is_electron()은 클래스명에 'Chrome_WidgetWin'이 있으면 무조건 True를
+  // 반환한다 — 이 도구 자신의 Chrome 탭도 같은 클래스라, 녹화를 마치려고
+  // 누른 "정지" 버튼이 실수로 그 탭에 떨어지면 그 클릭도 isElectron=true로
+  // 잡힌다. 이 클릭은 (agent.py의 [skip-contradiction] 경로가 남기는)
+  // locatorStrategy="coordinate"(§3 좌표 실행 금지 — 실제 셀렉터가 전혀
+  // 없다는 뜻, xpath는 무의미한 '//*[@Name="Stop"]')이므로, 애초에 재생
+  // 불가능한 이벤트다. 이런 이벤트 단 하나만 있어도
+  // longestCommonSubstringAll이 그 이벤트의 windowTitle 전체를 그대로
+  // 돌려주므로(원소가 하나면 공통부분문자열=자기 자신), 진짜 Electron 앱
+  // 이벤트가 하나도 없어도 winFragOk가 true가 돼버린다. 좌표 전용 이벤트는
+  // 애초에 신뢰할 selector가 없으므로 이 앵커 계산에서도 제외한다 — 실제
+  // Electron 콘텐츠 클릭은 automationId/name이 없어도 anchorXPath 등 다른
+  // locatorStrategy를 갖는 게 보통이라 이 제외로 영향받지 않는다.
+  const _elecTitles = filtered.filter(e => e.isElectron === true
+                                        && e.element?.locatorStrategy !== 'coordinate')
                               .map(e => e.element?.windowTitle || '').filter(Boolean);
   const winFrag   = longestCommonSubstringAll(_elecTitles).replace(/["']/g, '');
   const winFragOk = winFrag.length >= 3;
@@ -5455,7 +5532,17 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
         // 폴백)를 그대로 탄다.
         const hasUsableSelector = !!(e.element?.automationId || e.element?.className || e.element?.name);
         const isControlKeyOnly = ['\n', '\r', '\t', '\x1b'].includes(e.value);
-        if (!hasUsableSelector && isControlKeyOnly) {
+        // 2026-08-11 (Notepad "줄바꿈이 안 먹음" 실측): WinAppDriver REST의
+        // element/value(ValuePattern.SetValue와 동급)는 문자열을 통째로
+        // 밀어넣을 뿐 키 이벤트를 만들지 않는다 — 값 안의 개행 문자가
+        // RichEditD2DPT(Notepad Document 컨트롤)에서 실제 줄바꿈으로
+        // 해석되지 않고, 그런데도 예외 없이 "성공"을 보고해서(바로 아래
+        // 폴백 조건 `!ok`가 안 걸림) osType(개행을 {ENTER}로 정확히 변환,
+        // OS_TYPE_PS1)으로의 폴백이 아예 실행되지 않았다. 여러 줄 값은
+        // REST 시도 자체를 건너뛰고 곧장 실키입력으로 보낸다 — 단일 줄
+        // 값은 지금도 REST가 잘 동작하므로 건드리지 않는다.
+        const hasEmbeddedNewline = /\n/.test(e.value || '');
+        if ((!hasUsableSelector && isControlKeyOnly) || hasEmbeddedNewline) {
           pushMethod(
 `    async type${stepNum}(value) {
         osActivate('${relTitleArg}', _hwndCache['${relTitleArg}']);
@@ -5483,7 +5570,11 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
         // branch above (2026-08-10) — see its comment for the reasoning.
         const hasUsableSelector = !!(e.element?.automationId || e.element?.className || e.element?.name);
         const isControlKeyOnly = ['\n', '\r', '\t', '\x1b'].includes(e.value);
-        if (!hasUsableSelector && isControlKeyOnly) {
+        // 2026-08-11 (Notepad "줄바꿈이 안 먹음" 실측) — 세션 모드 분기와
+        // 동일한 이유(위 주석 참고): 개행이 포함된 값은 REST를 건너뛰고
+        // 곧장 실키입력으로 보낸다.
+        const hasEmbeddedNewline = /\n/.test(e.value || '');
+        if ((!hasUsableSelector && isControlKeyOnly) || hasEmbeddedNewline) {
           pushMethod(
 `    async type${stepNum}(value) {
         osActivate('');
@@ -5600,6 +5691,23 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       // ancestorSiblingIndex를 정상적으로 캡처해도)는 여기 절대 못 들어오고
       // bare Name 셀렉터로 떨어졌다(`click-not-found://TreeItem[@Name=...]`,
       // 실측 확인). doubleClick도 같은 구조적 셀렉터를 쓰도록 포함.
+      // 2026-08-11 (FileZilla "새 북마크" 체크박스 실측, STEP27): agent.py가
+      // 이 클릭의 self-heal이 메뉴-닫힘/다이얼로그-열림 캡처 레이스 직후에
+      // 일어났다고 표시(ambiguousCapture — 최근 snapshot_open_menu 실패,
+      // 2초 이내)한 경우, 이 ancestor+index 셀렉터는 엉뚱한 조상/형제를
+      // 가리킬 위험이 있다(hwnd 스코프를 고쳐도 같은 창 안에서 id가 재사용될
+      // 여지는 여전히 있음). §3 "No false PASS / 조용한 좌표 폴백 금지"와
+      // 같은 원칙으로, 추측성 셀렉터를 만드는 대신 명시적 FAIL로 떨어뜨린다.
+      if (e.element?.ambiguousCapture) {
+        pushStep(
+`            // [STEP ${stepNum}] ${e.action}: self-heal landed right after a failed
+            // popup-menu snapshot (menu-close/dialog-open race) — the
+            // ancestor+index selector this would produce is unreliable, so
+            // this step is failed explicitly instead of guessing (2026-08-11)
+            _failures.push('${stepNum}:${e.action}:ambiguous-capture');`
+        );
+        return;
+      }
       const ancestorTarget = comSafeTarget({
         automationId: e.element.ancestorAutomationId,
         className: e.element.ancestorClassName,
@@ -5607,7 +5715,29 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
         hwnd: e.element.ancestorHwnd,
         isWebContent: e.element.isWebContent,
       });
-      const hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
+      // 2026-08-11 (FileZilla "새 북마크" 체크박스 실측, STEP27): 조상이
+      // 메인 창이 아니라 다이얼로그(예: "새 북마크") 안에서 캡처된 경우인데도
+      // hwndArg가 항상 메인 창 hwnd였다 — automationId(예: "5999")가 메인
+      // 창에도 재사용돼서, 완전히 다른 창의 엉뚱한 조상/형제가 매칭돼버렸다
+      // (PuTTY류 id 재사용 문제와 같은 클래스, 다만 창 자체가 틀렸다는 점이
+      // 다름). field_conds()/resolve_target()은 hwnd를 아예 안 보므로(1330~
+      // 1345행), 애초에 올바른 창의 서브트리 안에서만 찾게 만들어야 한다.
+      // 녹화 시점 hwnd(e.element.ancestorHwnd)는 재생마다 창이 새로
+      // 생성되므로 그대로 못 쓴다 — relTitle로 라이브 재탐색.
+      // 동일 제목 창이 여러 개일 수 있어(리뷰 지적) 무조건 첫 번째를 집지
+      // 않고, 그 중 지금 포그라운드인 것을 우선한다(osForegroundHwnd, 두
+      // 헤더 모두에 정의돼 있음) — 못 찾으면 기존처럼 메인 창 hwnd로 폴백.
+      const isAncestorXWin = isCrossWindowEvent(e, recordedRect);
+      let hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
+      let hwndPreamble = '';
+      if (isAncestorXWin) {
+        const relTitleArg = escapeStr(relTitle);
+        hwndPreamble =
+`        const _ancHs${stepNum} = _listWindowHwnds('${relTitleArg}');
+        const _ancHwnd${stepNum} = _ancHs${stepNum}.find(h => h === osForegroundHwnd()) || _ancHs${stepNum}[0] || ${hwndArg};
+`;
+        hwndArg = `_ancHwnd${stepNum}`;
+      }
       const sibIdx = e.element.ancestorSiblingIndex;
       const sibCnt = Number.isInteger(e.element.ancestorSiblingCount) ? e.element.ancestorSiblingCount : null;
       const ctrlTypeId = e.element.ancestorItemControlTypeId;
@@ -5622,7 +5752,7 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       const isDbl = e.action === 'doubleClick' || !!e.activatesOnSingleClick;
       pushMethod(
 `    async click${stepNum}() {
-        osAncestorInvoke(${hwndArg}, ${JSON.stringify(ancestorTarget)}, ${sibIdx}, ${sibCnt === null ? 'null' : sibCnt}, ${ctrlTypeId}${isDbl ? ', true' : ''});
+${hwndPreamble}        osAncestorInvoke(${hwndArg}, ${JSON.stringify(ancestorTarget)}, ${sibIdx}, ${sibCnt === null ? 'null' : sibCnt}, ${ctrlTypeId}${isDbl ? ', true' : ''});
     }`
       );
       pushStep(
