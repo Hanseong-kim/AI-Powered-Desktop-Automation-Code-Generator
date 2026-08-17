@@ -22,6 +22,7 @@ generated-wdio/MockNative/
 generated-wdio/MockCollision/
 generated-wdio/MockDelayedHwnd/
 generated-wdio/MockExpandRedundant/
+generated-wdio/MockComboOpenClose/
 generated-wdio/SevenZipStateReset/
 generated-wdio/MockAnimSettle/
 generated-wdio/MockNestedDropdown/
@@ -71,6 +72,7 @@ generated-wdio/_debug-helpers/MockNative/
 generated-wdio/_debug-helpers/MockCollision/
 generated-wdio/_debug-helpers/MockDelayedHwnd/
 generated-wdio/_debug-helpers/MockExpandRedundant/
+generated-wdio/_debug-helpers/MockComboOpenClose/
 generated-wdio/_debug-helpers/SevenZipStateReset/
 generated-wdio/_debug-helpers/MockAnimSettle/
 generated-wdio/_debug-helpers/MockNestedDropdown/

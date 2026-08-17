@@ -21,7 +21,7 @@ async function _typeVerified(title, selector, text) {
 }
 
 const _H = {
-    'osWindowRect.ps1': "param([string]$titleLike, [string]$hwnd, [switch]$listOnly, [switch]$ownerOnly, [string]$siblingOf, [switch]$pidOf, [string]$siblingOfPid)\nAdd-Type @\"\nusing System;\nusing System.Text;\nusing System.Collections.Generic;\nusing System.Runtime.InteropServices;\npublic class WinEnum {\n  public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);\n  [DllImport(\"user32.dll\")] public static extern bool EnumWindows(EnumProc proc, IntPtr lParam);\n  [DllImport(\"user32.dll\")] public static extern bool IsWindowVisible(IntPtr hWnd);\n  [DllImport(\"user32.dll\")] public static extern bool IsIconic(IntPtr hWnd);\n  [DllImport(\"user32.dll\")] public static extern int GetWindowTextLength(IntPtr hWnd);\n  [DllImport(\"user32.dll\", CharSet = CharSet.Auto)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder sb, int max);\n  [DllImport(\"user32.dll\")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT r);\n  [DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow();\n  [DllImport(\"user32.dll\")] public static extern IntPtr GetWindow(IntPtr hWnd, uint cmd);\n  [DllImport(\"user32.dll\")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);\n  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }\n  public static List<IntPtr> Find(string titleLike) {\n    var found = new List<IntPtr>();\n    EnumWindows((hWnd, lParam) => {\n      if (!IsWindowVisible(hWnd) || IsIconic(hWnd)) return true;\n      int len = GetWindowTextLength(hWnd);\n      if (len == 0) return true;\n      var sb = new StringBuilder(len + 1);\n      GetWindowText(hWnd, sb, sb.Capacity);\n      if (sb.ToString().Contains(titleLike)) found.Add(hWnd);\n      return true;\n    }, IntPtr.Zero);\n    return found;\n  }\n  // Sibling top-level windows of the same process as hwndOf, excluding\n  // hwndOf itself, restricted to ones with a real (non-zero) rect. Used to\n  // recover from WinAppDriver/OS binding the \"main\" window to a hidden 0x0\n  // helper window instead of the app's actual visible form (observed with\n  // HeidiSQL's Delphi/VCL 'TApplication' window).\n  public static List<IntPtr> FindSizedSiblings(IntPtr hwndOf) {\n    var found = new List<IntPtr>();\n    uint pid;\n    GetWindowThreadProcessId(hwndOf, out pid);\n    if (pid == 0) return found;\n    return FindSizedSiblingsByPid(pid, hwndOf);\n  }\n  // 2026-08-14 (VS splash-window race): FindSizedSiblings derives the PID\n  // from hwndOf via GetWindowThreadProcessId, which fails (returns 0) once\n  // hwndOf has already been destroyed -- no good for recovering from a\n  // window that died between being grabbed and being used. Callers that\n  // captured the PID earlier, while the window was still alive, can search\n  // directly by PID instead, sidestepping that dead-handle lookup entirely.\n  public static List<IntPtr> FindSizedSiblingsByPid(uint pid, IntPtr exclude) {\n    var found = new List<IntPtr>();\n    if (pid == 0) return found;\n    EnumWindows((hWnd, lParam) => {\n      if (hWnd == exclude || !IsWindowVisible(hWnd)) return true;\n      uint wpid;\n      GetWindowThreadProcessId(hWnd, out wpid);\n      if (wpid != pid) return true;\n      RECT r;\n      if (GetWindowRect(hWnd, out r) && (r.Right - r.Left) > 0 && (r.Bottom - r.Top) > 0) {\n        found.Add(hWnd);\n      }\n      return true;\n    }, IntPtr.Zero);\n    return found;\n  }\n}\n\"@ -ErrorAction SilentlyContinue\nif ($siblingOf) {\n  $sibs = [WinEnum]::FindSizedSiblings([IntPtr]([int64]$siblingOf))\n  if ($sibs.Count -gt 0) { Write-Output ([int64]$sibs[0]) }\n  exit\n}\n# 2026-08-14: search by an already-captured PID instead of re-deriving it\n# from a (possibly by-now-destroyed) hwnd -- see FindSizedSiblingsByPid.\nif ($siblingOfPid) {\n  $sibs = [WinEnum]::FindSizedSiblingsByPid([uint32]$siblingOfPid, [IntPtr]::Zero)\n  if ($sibs.Count -gt 0) { Write-Output ([int64]$sibs[0]) }\n  exit\n}\n# -hwnd targets one specific window directly, bypassing title matching entirely.\n# Title matching alone is ambiguous whenever more than one window shares a\n# substring (e.g. every VS Code window's title ends in \"Visual Studio Code\") —\n# callers that already know their window's handle MUST use -hwnd so replay\n# never drifts onto an unrelated window (see launchApp's hwnd tracking).\nif ($hwnd) {\n  $h = [IntPtr]([int64]$hwnd)\n  if ($ownerOnly) {\n    # GW_OWNER=4 — nonzero means an owned (dialog-style) window, which\n    # WinAppDriver's appTopLevelWindow rejects outright (\"not a top level\n    # window handle\"), so callers skip the scoped-session attempt entirely.\n    Write-Output ([int64][WinEnum]::GetWindow($h, 4))\n    exit\n  }\n  if ($pidOf) {\n    # 2026-08-14 (VS splash-window race): capture the PID while the window\n    # is still known-alive, so a later liveness check that finds it gone can\n    # still search for a replacement via -siblingOfPid (GetWindowThreadProcessId\n    # fails on an already-destroyed handle, so this must happen up front).\n    [uint32]$capturedPid = 0\n    [WinEnum]::GetWindowThreadProcessId($h, [ref]$capturedPid) | Out-Null\n    if ($capturedPid) { Write-Output $capturedPid }\n    exit\n  }\n  $r = New-Object WinEnum+RECT\n  if ([WinEnum]::GetWindowRect($h, [ref]$r)) {\n    Write-Output (\"{0} {1} {2} {3}\" -f $r.Left, $r.Top, ($r.Right - $r.Left), ($r.Bottom - $r.Top))\n  }\n  exit\n}\n$matches = [WinEnum]::Find($titleLike)\nif ($listOnly) {\n  foreach ($h in $matches) { Write-Output ([int64]$h) }\n  exit\n}\nif ($matches.Count -gt 0) {\n  $fg = [WinEnum]::GetForegroundWindow()\n  $hWnd = $matches[0]\n  foreach ($h in $matches) { if ($h -eq $fg) { $hWnd = $h; break } }\n  $r = New-Object WinEnum+RECT\n  [WinEnum]::GetWindowRect($hWnd, [ref]$r) | Out-Null\n  Write-Output (\"{0} {1} {2} {3}\" -f $r.Left, $r.Top, ($r.Right - $r.Left), ($r.Bottom - $r.Top))\n}\n",
+    'osWindowRect.ps1': "param([string]$titleLike, [string]$hwnd, [switch]$listOnly, [switch]$ownerOnly, [string]$siblingOf, [switch]$pidOf, [string]$siblingOfPid, [string]$pidByImage)\nAdd-Type @\"\nusing System;\nusing System.Text;\nusing System.Collections.Generic;\nusing System.Runtime.InteropServices;\npublic class WinEnum {\n  public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);\n  [DllImport(\"user32.dll\")] public static extern bool EnumWindows(EnumProc proc, IntPtr lParam);\n  [DllImport(\"user32.dll\")] public static extern bool IsWindowVisible(IntPtr hWnd);\n  [DllImport(\"user32.dll\")] public static extern bool IsIconic(IntPtr hWnd);\n  [DllImport(\"user32.dll\")] public static extern int GetWindowTextLength(IntPtr hWnd);\n  [DllImport(\"user32.dll\", CharSet = CharSet.Auto)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder sb, int max);\n  [DllImport(\"user32.dll\")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT r);\n  [DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow();\n  [DllImport(\"user32.dll\")] public static extern IntPtr GetWindow(IntPtr hWnd, uint cmd);\n  [DllImport(\"user32.dll\")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);\n  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }\n  public static List<IntPtr> Find(string titleLike) {\n    var found = new List<IntPtr>();\n    EnumWindows((hWnd, lParam) => {\n      if (!IsWindowVisible(hWnd) || IsIconic(hWnd)) return true;\n      int len = GetWindowTextLength(hWnd);\n      if (len == 0) return true;\n      var sb = new StringBuilder(len + 1);\n      GetWindowText(hWnd, sb, sb.Capacity);\n      if (sb.ToString().Contains(titleLike)) found.Add(hWnd);\n      return true;\n    }, IntPtr.Zero);\n    return found;\n  }\n  // Sibling top-level windows of the same process as hwndOf, excluding\n  // hwndOf itself, restricted to ones with a real (non-zero) rect. Used to\n  // recover from WinAppDriver/OS binding the \"main\" window to a hidden 0x0\n  // helper window instead of the app's actual visible form (observed with\n  // HeidiSQL's Delphi/VCL 'TApplication' window).\n  public static List<IntPtr> FindSizedSiblings(IntPtr hwndOf) {\n    var found = new List<IntPtr>();\n    uint pid;\n    GetWindowThreadProcessId(hwndOf, out pid);\n    if (pid == 0) return found;\n    return FindSizedSiblingsByPid(pid, hwndOf);\n  }\n  // 2026-08-14 (VS splash-window race): FindSizedSiblings derives the PID\n  // from hwndOf via GetWindowThreadProcessId, which fails (returns 0) once\n  // hwndOf has already been destroyed -- no good for recovering from a\n  // window that died between being grabbed and being used. Callers that\n  // captured the PID earlier, while the window was still alive, can search\n  // directly by PID instead, sidestepping that dead-handle lookup entirely.\n  public static List<IntPtr> FindSizedSiblingsByPid(uint pid, IntPtr exclude) {\n    var found = new List<IntPtr>();\n    if (pid == 0) return found;\n    EnumWindows((hWnd, lParam) => {\n      if (hWnd == exclude || !IsWindowVisible(hWnd)) return true;\n      uint wpid;\n      GetWindowThreadProcessId(hWnd, out wpid);\n      if (wpid != pid) return true;\n      RECT r;\n      if (GetWindowRect(hWnd, out r) && (r.Right - r.Left) > 0 && (r.Bottom - r.Top) > 0) {\n        found.Add(hWnd);\n      }\n      return true;\n    }, IntPtr.Zero);\n    return found;\n  }\n}\n\"@ -ErrorAction SilentlyContinue\n# 2026-08-17 (VS splash race, real GUI re-run): -pidOf derives the PID from\n# the CURRENT session hwnd via GetWindowThreadProcessId, which needs that\n# hwnd to still be alive at call time. Measured live: it can already be gone\n# by the very first call after session creation (pidOut came back empty,\n# GetWindowThreadProcessId returned 0) — the splash can die faster than this\n# script can even ask for its owner. Resolve by PROCESS IMAGE NAME instead,\n# which needs nothing about any particular window's lifetime — the process\n# itself is guaranteed alive (it just launched) — whatever window it\n# currently owns still belongs to it.\nif ($pidByImage) {\n  $procName = [System.IO.Path]::GetFileNameWithoutExtension($pidByImage)\n  $p = Get-Process -Name $procName -ErrorAction SilentlyContinue | Select-Object -First 1\n  if ($p) { Write-Output $p.Id }\n  exit\n}\nif ($siblingOf) {\n  $sibs = [WinEnum]::FindSizedSiblings([IntPtr]([int64]$siblingOf))\n  if ($sibs.Count -gt 0) { Write-Output ([int64]$sibs[0]) }\n  exit\n}\n# 2026-08-14: search by an already-captured PID instead of re-deriving it\n# from a (possibly by-now-destroyed) hwnd -- see FindSizedSiblingsByPid.\nif ($siblingOfPid) {\n  $sibs = [WinEnum]::FindSizedSiblingsByPid([uint32]$siblingOfPid, [IntPtr]::Zero)\n  if ($sibs.Count -gt 0) { Write-Output ([int64]$sibs[0]) }\n  exit\n}\n# -hwnd targets one specific window directly, bypassing title matching entirely.\n# Title matching alone is ambiguous whenever more than one window shares a\n# substring (e.g. every VS Code window's title ends in \"Visual Studio Code\") —\n# callers that already know their window's handle MUST use -hwnd so replay\n# never drifts onto an unrelated window (see launchApp's hwnd tracking).\nif ($hwnd) {\n  $h = [IntPtr]([int64]$hwnd)\n  if ($ownerOnly) {\n    # GW_OWNER=4 — nonzero means an owned (dialog-style) window, which\n    # WinAppDriver's appTopLevelWindow rejects outright (\"not a top level\n    # window handle\"), so callers skip the scoped-session attempt entirely.\n    Write-Output ([int64][WinEnum]::GetWindow($h, 4))\n    exit\n  }\n  if ($pidOf) {\n    # 2026-08-14 (VS splash-window race): capture the PID while the window\n    # is still known-alive, so a later liveness check that finds it gone can\n    # still search for a replacement via -siblingOfPid (GetWindowThreadProcessId\n    # fails on an already-destroyed handle, so this must happen up front).\n    [uint32]$capturedPid = 0\n    [WinEnum]::GetWindowThreadProcessId($h, [ref]$capturedPid) | Out-Null\n    if ($capturedPid) { Write-Output $capturedPid }\n    exit\n  }\n  $r = New-Object WinEnum+RECT\n  if ([WinEnum]::GetWindowRect($h, [ref]$r)) {\n    Write-Output (\"{0} {1} {2} {3}\" -f $r.Left, $r.Top, ($r.Right - $r.Left), ($r.Bottom - $r.Top))\n  }\n  exit\n}\n$matches = [WinEnum]::Find($titleLike)\nif ($listOnly) {\n  foreach ($h in $matches) { Write-Output ([int64]$h) }\n  exit\n}\nif ($matches.Count -gt 0) {\n  $fg = [WinEnum]::GetForegroundWindow()\n  $hWnd = $matches[0]\n  foreach ($h in $matches) { if ($h -eq $fg) { $hWnd = $h; break } }\n  $r = New-Object WinEnum+RECT\n  [WinEnum]::GetWindowRect($hWnd, [ref]$r) | Out-Null\n  Write-Output (\"{0} {1} {2} {3}\" -f $r.Left, $r.Top, ($r.Right - $r.Left), ($r.Bottom - $r.Top))\n}\n",
     'osMoveWindow.ps1': "param([string]$titleLike, [string]$hwnd, [int]$left, [int]$top, [int]$width, [int]$height)\nAdd-Type @\"\nusing System;\nusing System.Text;\nusing System.Collections.Generic;\nusing System.Runtime.InteropServices;\npublic class WinMove {\n  public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);\n  [DllImport(\"user32.dll\")] public static extern bool EnumWindows(EnumProc proc, IntPtr lParam);\n  [DllImport(\"user32.dll\")] public static extern bool IsWindowVisible(IntPtr hWnd);\n  [DllImport(\"user32.dll\")] public static extern bool IsIconic(IntPtr hWnd);\n  [DllImport(\"user32.dll\")] public static extern int GetWindowTextLength(IntPtr hWnd);\n  [DllImport(\"user32.dll\", CharSet = CharSet.Auto)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder sb, int max);\n  [DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow();\n  [DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);\n  [DllImport(\"user32.dll\")] public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);\n  [DllImport(\"user32.dll\")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT r);\n  [DllImport(\"user32.dll\")] public static extern bool IsZoomed(IntPtr hWnd);\n  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }\n  public static List<IntPtr> Find(string titleLike) {\n    var found = new List<IntPtr>();\n    EnumWindows((hWnd, lParam) => {\n      if (!IsWindowVisible(hWnd) || IsIconic(hWnd)) return true;\n      int len = GetWindowTextLength(hWnd);\n      if (len == 0) return true;\n      var sb = new StringBuilder(len + 1);\n      GetWindowText(hWnd, sb, sb.Capacity);\n      if (sb.ToString().Contains(titleLike)) found.Add(hWnd);\n      return true;\n    }, IntPtr.Zero);\n    return found;\n  }\n}\n\"@ -ErrorAction SilentlyContinue\n# -hwnd bypasses title matching — see OS_WINRECT_PS1 for why ambiguous title\n# substrings (e.g. any two VS Code windows) are unsafe to move/resize by.\nif ($hwnd) {\n  $hWnd = [IntPtr]([int64]$hwnd)\n} else {\n  $matches = [WinMove]::Find($titleLike)\n  $hWnd = [IntPtr]::Zero\n  if ($matches.Count -gt 0) {\n    $fg = [WinMove]::GetForegroundWindow()\n    $hWnd = $matches[0]\n    foreach ($h in $matches) { if ($h -eq $fg) { $hWnd = $h; break } }\n  }\n}\nif ($hWnd -ne [IntPtr]::Zero) {\n  # Idempotency fast-path: if the window is already at the target geometry\n  # (and not maximized), skip ShowWindow(RESTORE)+MoveWindow entirely — avoids\n  # a visible restore-then-resize flicker when replay finds the window already\n  # in the recorded position (e.g. the \"already maximized\" case reported\n  # 2026-07-07: recorded flow assumes a maximize step is needed, but the\n  # window is already there).\n  $already = New-Object WinMove+RECT\n  [WinMove]::GetWindowRect($hWnd, [ref]$already) | Out-Null\n  $sameW = [math]::Abs(($already.Right - $already.Left) - $width) -le 2\n  $sameH = [math]::Abs(($already.Bottom - $already.Top) - $height) -le 2\n  $sameL = [math]::Abs($already.Left - $left) -le 2\n  $sameT = [math]::Abs($already.Top - $top) -le 2\n  if (-not [WinMove]::IsZoomed($hWnd) -and $sameW -and $sameH -and $sameL -and $sameT) {\n    exit\n  }\n  [WinMove]::ShowWindow($hWnd, 9) | Out-Null\n  Start-Sleep -Milliseconds 300\n  $candW = $width\n  $candH = $height\n  for ($i = 0; $i -lt 3; $i++) {\n    [WinMove]::MoveWindow($hWnd, $left, $top, $candW, $candH, $true) | Out-Null\n    Start-Sleep -Milliseconds 300\n    $r = New-Object WinMove+RECT\n    [WinMove]::GetWindowRect($hWnd, [ref]$r) | Out-Null\n    $actualW = $r.Right - $r.Left\n    $actualH = $r.Bottom - $r.Top\n    if ([math]::Abs($actualW - $width) -le 2 -and [math]::Abs($actualH - $height) -le 2) { break }\n    if ($actualW -le 0 -or $actualH -le 0) { break }\n    $candW = [int]([math]::Round(($width * $candW) / [double]$actualW))\n    $candH = [int]([math]::Round(($height * $candH) / [double]$actualH))\n  }\n}\n",
     'osType.ps1': "param([string]$b64)\nAdd-Type -AssemblyName System.Windows.Forms\n$text = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($b64))\n$special = '+^%~(){}[]'\nStart-Sleep -Milliseconds 200\n[System.Windows.Forms.SendKeys]::SendWait(\"^a\")\nStart-Sleep -Milliseconds 30\nforeach ($ch in $text.ToCharArray()) {\n  if ($ch -eq \"`n\") { [System.Windows.Forms.SendKeys]::SendWait(\"{ENTER}\"); Start-Sleep -Milliseconds 15; continue }\n  if ($ch -eq \"`r\") { continue }\n  $s = [string]$ch\n  if ($special.IndexOf($ch) -ge 0) { $s = \"{$ch}\" }\n  [System.Windows.Forms.SendKeys]::SendWait($s)\n  Start-Sleep -Milliseconds 15\n}\n",
     'osEscape.ps1': "Add-Type -AssemblyName System.Windows.Forms\nStart-Sleep -Milliseconds 100\n[System.Windows.Forms.SendKeys]::SendWait(\"{ESC}\")\n",
@@ -251,7 +251,27 @@ async function _findElement(sid, rootElId, selector) {
 // coordinates anywhere. Used by simple mode (single _appSid, no title
 // cache needed); session mode uses the title-keyed _clickScoped instead.
 async function _clickBySid(sid, rootElId, selector, dbl = false) {
-    const elId = await _findElement(sid, rootElId, selector);
+    // 2026-08-17 (VS cold-launch STEP-1 FATAL, real GUI run): _findElement()
+    // is one WAD REST call with no retry at all — unlike session mode's
+    // osScopedInvoke.py (~2.7s COM retry) and the session-mode element-search
+    // loop's own 1s-interval REST polling until a deadline. VS's Start Window
+    // ("새 프로젝트 만들기") renders asynchronously after a cold launch; a
+    // click landing in that narrow unready window failed instantly, and
+    // _step()'s ESC recovery then closed the whole app (VS's Start Window
+    // treats ESC as Cancel). Retry here at the SAME order of magnitude as
+    // osScopedInvoke.py's budget — a value already validated against this
+    // exact class of race — rather than inside _findElement() itself, which
+    // is also called by that session-mode loop (already retries; wrapping
+    // would multiply it) and by the window-title lookup (single-shot,
+    // ~15-20s fixed REST cost per call — retrying there multiplies a cost
+    // that's already expensive by design, see that call site's own comment).
+    let elId = null;
+    for (let attempt = 0; attempt < 10; attempt++) {
+        if (_sessionDead) break;
+        elId = await _findElement(sid, rootElId, selector);
+        if (elId) break;
+        if (attempt < 9) await new Promise(r => setTimeout(r, 300));
+    }
     if (!elId) {
         _failures.push('click-not-found:' + String(selector).substring(0, 60));
         return;
@@ -502,7 +522,7 @@ function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY, ownerTit
 // no title ambiguity — so every OS-level lookup below prefers it once known.
 let _appHwnd = 0;
 
-async function initAppHwnd() {
+async function initAppHwnd(imageName) {
     try {
         const r = await _appiumFetch(`/session/${_appSid}/window`);
         const j = await r.json();
@@ -549,40 +569,50 @@ async function initAppHwnd() {
         // above only catches a hidden 0x0 helper window — a splash screen
         // has a perfectly normal, non-zero rect at this point, so it
         // passes that check, yet gets destroyed and replaced by the app's
-        // real main window within about a second. "session" mode's
-        // launchApp() already solves this correctly by polling a freshly
-        // launched window's title until it settles (server.js, ~5060+) —
-        // "simple" mode never got the same treatment because it doesn't
-        // launch by title match, it inherits whatever window WinAppDriver's
-        // own appium:app capability happened to attach the session to.
+        // real main window shortly after. "session" mode's launchApp()
+        // already solves this correctly by polling a freshly launched
+        // window's title until it settles (server.js, ~5060+) — "simple"
+        // mode never got the same treatment because it doesn't launch by
+        // title match, it inherits whatever window WinAppDriver's own
+        // appium:app capability happened to attach the session to.
         //
-        // Capture the owning PID now, while the window is still known-alive
-        // (GetWindowThreadProcessId fails on an already-destroyed handle,
-        // so this can't be deferred until after a liveness check finds it
-        // gone), then poll briefly. If it dies, reuse the exact same
-        // sibling-rescoping recovery as the zero-size case above — just
-        // searching by the captured PID instead of by the (by-then-invalid)
-        // original hwnd.
+        // 2026-08-17 (VS re-run, real GUI): the first version of this fix
+        // captured the owning PID via -pidOf (GetWindowThreadProcessId on
+        // the CURRENT _appHwnd), reasoning that the window was "still
+        // known-alive" at that point since it had just been read from the
+        // session. Live-measured that assumption is false — pidOut came
+        // back EMPTY on the very first call, meaning the splash had already
+        // died before this script could even ask for its owning PID, let
+        // alone poll its liveness. No fixed check budget can fix a race
+        // that can already be lost before the first check runs.
+        //
+        // Resolve the PID by PROCESS IMAGE NAME instead (-pidByImage) —
+        // this needs nothing about any particular window's lifetime, only
+        // that the process itself is alive, which is guaranteed (it just
+        // launched). Always available, not contingent on capturing it from
+        // a window that may already be gone.
         let pidOut = '';
         try {
             pidOut = execSync(
-                `powershell -NoProfile -File "${_helperFile('osWindowRect.ps1')}" -hwnd ${_appHwnd} -pidOf`,
+                `powershell -NoProfile -File "${_helperFile('osWindowRect.ps1')}" -pidByImage "${imageName}"`,
                 { stdio: 'pipe', timeout: 15000 }
             ).toString().trim();
         } catch (e) {
-            console.warn('[hwnd] pidOf lookup failed — skipping splash-race settle check:', String(e.message || e).substring(0, 100));
+            console.warn('[hwnd] pidByImage lookup failed — skipping splash-race settle check:', String(e.message || e).substring(0, 100));
         }
         const appPid = parseInt(pidOut, 10);
         if (appPid) {
             // Fixed small number of checks, not a wall-clock deadline — a
             // deadline-based loop burns its ENTIRE budget every time the
             // window is already stable (the common case), adding several
-            // seconds of pure latency to every simple-mode launch. The
-            // splash-race window observed live was under ~1s; 3 checks
-            // 300ms apart (~900ms worst case) is enough margin without
-            // taxing the happy path.
+            // seconds of pure latency to every simple-mode launch. The loop
+            // still breaks the instant a check finds the window gone, so
+            // this only costs the full budget on the genuinely-stable path.
+            // Budget matches osScopedInvoke.py's ~2.7s click-search retry
+            // (2026-07-17/24) — the same order of magnitude already
+            // validated for this exact class of race elsewhere.
             let stillAlive = true;
-            for (let i = 0; i < 3; i++) {
+            for (let i = 0; i < 9; i++) {
                 await new Promise(res => setTimeout(res, 300));
                 const liveRect = _resolveWinRect('');
                 if (!liveRect || (liveRect.width === 0 && liveRect.height === 0)) {
@@ -854,7 +884,7 @@ async function run() {
     await ensureAppium();
     _appSid = await _createSession("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App");
     console.log(`[session] app session ${_appSid} ready`);
-    await initAppHwnd();
+    await initAppHwnd("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App");
     normalizeWindowSimple({"left":2915,"top":209,"width":418,"height":666});
 
         const page = new MockGoldenCalculatorPageByClass();

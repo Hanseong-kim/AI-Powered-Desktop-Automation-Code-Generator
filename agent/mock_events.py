@@ -350,6 +350,46 @@ EXPAND_REDUNDANT_EVENTS = [
                expand_collapse=True, index=6),
 ]
 
+# Open-then-CLOSE ComboBox re-click scenario (2026-08-16, real Visual Studio
+# GUI run — "언어 필터" combo clicked twice ~0.45s apart at the identical
+# point: click #1 opened the dropdown, click #2 closed it again, no item was
+# ever picked). mergeExpandCollapseClicks' redundant-reclick loop (added
+# 2026-07-17 for EXPAND_REDUNDANT_APP above) assumes every reclick before a
+# real item is a FAILED open attempt and silently discards all but the last
+# one — it has no concept of a reclick that toggles the dropdown CLOSED.
+# Discarding it here left the generated replay with only an
+# osExpandCollapse() that opens the combo and never closes it, so the next
+# recorded click (physically on the "뒤로" button, VS coordinates
+# (3157,795,3205,815) vs the combo's (2816,268,3001,298) — the exact rects
+# that made VS's own 2026-08-14 looksTooFarOrMisaligned guard reject the
+# item-merge) actually landed on the still-open dropdown's light-dismiss
+# overlay at replay time, closing the list and touching nothing else. The
+# physical click still "succeeded" (send_input_click has no state
+# verification — a separate, not-yet-fixed false-PASS class), so the failure
+# only surfaced two steps later when the real "뒤로" target was never found.
+COMBO_OPEN_CLOSE_APP = "MockComboOpenClose"
+COMBO_OPEN_CLOSE_EVENTS = [
+    make_event("click", name="Language Filter", automation_id="cmbFilter",
+               class_name="ComboBox", control_type="ComboBox",
+               app_name=COMBO_OPEN_CLOSE_APP, expand_collapse=True, index=1),
+    make_event("click", name="Language Filter", automation_id="cmbFilter",
+               class_name="ComboBox", control_type="ComboBox",
+               app_name=COMBO_OPEN_CLOSE_APP, expand_collapse=True, index=2),
+    make_event("click", name="Back", automation_id="btnBack", class_name="Button",
+               control_type="Button", app_name=COMBO_OPEN_CLOSE_APP, index=3),
+]
+COMBO_OPEN_CLOSE_EVENTS[0]["element"]["rect"] = [100, 50, 300, 80]
+COMBO_OPEN_CLOSE_EVENTS[1]["element"]["rect"] = [100, 50, 300, 80]
+COMBO_OPEN_CLOSE_EVENTS[2]["element"]["rect"] = [100, 600, 200, 630]
+COMBO_OPEN_CLOSE_SESSION_META = {
+    "action": "session_meta",
+    "app": COMBO_OPEN_CLOSE_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
 # Native Win32 dialog scenario (2026-07-13, PuTTY GUI failure follow-up) —
 # exercises the SLOT_INDEX_CONTROL_TYPES carve-out in wdioSelectorById/
 # wdioSelectorByClass: numeric AutomationIds are STABLE resource IDs on
@@ -2744,6 +2784,68 @@ def step_wdio_generate_expand_redundant_trigger():
         )
 
 
+def step_wdio_generate_combo_open_close():
+    print("\n[9c2] ComboBox re-click that CLOSES the dropdown, not just a "
+          "failed re-open (2026-08-16 Visual Studio GUI finding)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", COMBO_OPEN_CLOSE_SESSION_META)
+    for ev in COMBO_OPEN_CLOSE_EVENTS:
+        request("POST", "/api/events", ev)
+
+    status, body = request("POST", "/api/generate", {
+        "appName": COMBO_OPEN_CLOSE_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (combo-open-close) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped combo-open-close checks)", False, body.get("message", ""))
+        return
+    files = body.get("files", [])
+    for f in files:
+        fname = f.get("filename", "")
+        content = f.get("content", "")
+        if "ById" not in fname:
+            continue
+        expand_calls = content.count("osExpandCollapse(_appHwnd")
+        check(
+            f"  {fname} calls osExpandCollapse exactly once (open only, no fake item)",
+            expand_calls == 1,
+            f"got {expand_calls} — the two reclicks should still collapse into "
+            "ONE open call (unchanged from the redundant-reclick merge), not "
+            "zero and not duplicated",
+        )
+        step_count = content.count("_step('")
+        check(
+            f"  {fname} emits 3 steps (open + the discarded reclick restored as "
+            "a plain closing click + the unrelated Back click)",
+            step_count == 3,
+            f"got {step_count} — before the fix this was 2: the second "
+            "(closing) reclick was silently discarded by the redundant-reclick "
+            "loop instead of being restored as a plain click, so replay left "
+            "the dropdown open and the following 'Back' click landed on its "
+            "light-dismiss overlay instead of the Back button",
+        )
+        check(
+            f"  {fname} restores the discarded reclick as a plain (non-expandCollapse) "
+            "click on the same ComboBox, not a fake dropdown item",
+            '"automationId":"cmbFilter"' in content and "'~cmbFilter'" in content,
+            "expected the ComboBox's selector to appear both in the "
+            "osExpandCollapse open call (full JSON selector) and in a plain "
+            "click step that closes it (bare '~automationId' shorthand,  "
+            "wdioSelectorById's own encoding) — missing either means the "
+            "closing click never made it into the generated code at all",
+        )
+        check(
+            f"  {fname} never invents a fake dropdown item out of the far-away "
+            "'Back' click",
+            'osExpandCollapse(_appHwnd, {"automationId":"cmbFilter","className":"ComboBox","name":"Language Filter"}, "Back"' not in content,
+            "the far-away/misaligned guard (looksTooFarOrMisaligned) must still "
+            "reject merging 'Back' as if it were a dropdown item — this "
+            "assertion pins that the fix for the discarded-reclick bug didn't "
+            "loosen that unrelated guard",
+        )
+
+
 def step_wdio_generate_postnav_title_keeps_trigger_window():
     print("\n[9d] A dropped trigger must not take the main window's title with it "
           "(2026-08-05 FileZilla 파일 -> 사이트 관리자 launch timeout)")
@@ -3874,7 +3976,7 @@ def step_output_folders_isolated():
 
     targets = sorted({
         APP_NAME, SESSION_APP, COLLISION_APP, DELAYED_HWND_APP,
-        EXPAND_REDUNDANT_APP, NATIVE_APP, VCL_APP, TRIGGER_EXPAND_APP,
+        EXPAND_REDUNDANT_APP, COMBO_OPEN_CLOSE_APP, NATIVE_APP, VCL_APP, TRIGGER_EXPAND_APP,
         NAMELESS_ITEM_APP, HWND_TRIGGER_APP, DUP_DROPDOWN_APP, ANIM_APP,
         NESTED_DROPDOWN_APP, SIMPLE_ROOTHWND_APP, TITLE_COLLISION_DIALOGRECT_APP,
         WEB_APP, DBLROW_APP, WINCLICK_APP, VOLATILE_MENUITEM_APP,
@@ -3927,6 +4029,7 @@ def main():
     step_wdio_generate_window_collision()
     step_wdio_generate_delayed_hwnd()
     step_wdio_generate_expand_redundant_trigger()
+    step_wdio_generate_combo_open_close()
     step_wdio_generate_postnav_title_keeps_trigger_window()
     step_wdio_generate_native()
     step_wdio_generate_vcl_hwnd_id()

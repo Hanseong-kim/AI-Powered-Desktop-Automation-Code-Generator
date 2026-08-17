@@ -404,7 +404,7 @@ if __name__ == "__main__":
 // NOTE: no SetProcessDPIAware call here — agent.py capture and osClick.ps1 are
 // both DPI-unaware, and adding awareness here would skew coordinates by the
 // DPI scale factor (verified: unaware rect matches agent-captured winLeft).
-const OS_WINRECT_PS1 = `param([string]$titleLike, [string]$hwnd, [switch]$listOnly, [switch]$ownerOnly, [string]$siblingOf, [switch]$pidOf, [string]$siblingOfPid)
+const OS_WINRECT_PS1 = `param([string]$titleLike, [string]$hwnd, [switch]$listOnly, [switch]$ownerOnly, [string]$siblingOf, [switch]$pidOf, [string]$siblingOfPid, [string]$pidByImage)
 Add-Type @"
 using System;
 using System.Text;
@@ -471,6 +471,21 @@ public class WinEnum {
   }
 }
 "@ -ErrorAction SilentlyContinue
+# 2026-08-17 (VS splash race, real GUI re-run): -pidOf derives the PID from
+# the CURRENT session hwnd via GetWindowThreadProcessId, which needs that
+# hwnd to still be alive at call time. Measured live: it can already be gone
+# by the very first call after session creation (pidOut came back empty,
+# GetWindowThreadProcessId returned 0) — the splash can die faster than this
+# script can even ask for its owner. Resolve by PROCESS IMAGE NAME instead,
+# which needs nothing about any particular window's lifetime — the process
+# itself is guaranteed alive (it just launched) — whatever window it
+# currently owns still belongs to it.
+if ($pidByImage) {
+  $procName = [System.IO.Path]::GetFileNameWithoutExtension($pidByImage)
+  $p = Get-Process -Name $procName -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($p) { Write-Output $p.Id }
+  exit
+}
 if ($siblingOf) {
   $sibs = [WinEnum]::FindSizedSiblings([IntPtr]([int64]$siblingOf))
   if ($sibs.Count -gt 0) { Write-Output ([int64]$sibs[0]) }
@@ -2740,6 +2755,11 @@ function mergeExpandCollapseClicks(events) {
   const out = [];
   for (let i = 0; i < events.length; i++) {
     let e = events[i];
+    // 2026-08-16: 아래 expandCollapse 재클릭 병합이 버린 재클릭 개수를
+    // 폴스루 경로(파일 하단 out.push(e) 직전)에서 복원하는 데 쓴다 —
+    // if 블록 안의 const로는 그 지점에서 스코프를 벗어나므로 루프 최상단에
+    // 선언해둔다.
+    let reclickCount = 0;
     // 항목 선택 이벤트(comboItemIndex)는 그 자체가 "이 콤보를 펼친 뒤
     // N번째 항목" — 펼치기를 이미 포함한다. 그 바로 앞의 "콤보를 여는
     // 클릭"까지 그대로 재생하면 목록이 두 번 열린다: 리터럴 클릭 한 번,
@@ -2832,6 +2852,18 @@ function mergeExpandCollapseClicks(events) {
       ) {
         j++;
       }
+      // 2026-08-16 (VS "언어 필터" 콤보 실측): j - i개의 재클릭 중 마지막 것만
+      // 남기고 나머지는 그냥 버려왔다 — "재클릭 = 못 열려서 다시 시도"라는
+      // 2026-07-17 가정(바로 위 주석) 때문. 그런데 실제로 콤보가 열려 있는
+      // 상태에서 같은 트리거를 다시 클릭하면 물리적으로 "닫는" 동작이라,
+      // 버려진 재클릭 개수가 홀수/짝수인가에 따라 최종 상태가 열림/닫힘으로
+      // 갈린다. VS 실측: 재클릭 1개(닫기) → 다음 스텝이 닫힌 뒤로 버튼이 아니라
+      // 여전히 열려있던 목록의 light-dismiss 오버레이를 클릭 → 목록만 닫히고
+      // 진짜 대상은 못 찾음(다음 스텝에서 target-not-found로 뒤늦게 드러남).
+      // 아래 병합(다음 이벤트를 드롭다운 항목으로 흡수)이 성공하면 그건 여전히
+      // "마지막 재클릭이 진짜 열기였다"는 뜻이라 버릴 게 맞다 — reclickCount는
+      // 그 실패 시(폴스루)에만 쓴다.
+      reclickCount = j - i;
       if (j > i) {
         console.log(`[expand-merge] collapsed ${j - i} redundant re-click(s) of trigger '${e.element.name}' @index ${i}..${j}`);
         e = events[j];
@@ -2929,6 +2961,19 @@ function mergeExpandCollapseClicks(events) {
       }
     }
     out.push(e);
+    // 2026-08-16 (VS "언어 필터" 콤보 실측): 위에서 항목 병합이 안 됐다면
+    // (=이 트리거는 그냥 열기 토글로 남는다) 접었던 재클릭들은 버려진 게
+    // 아니라 실제 물리 클릭이었다 — 홀수 번째는 닫고 짝수 번째는 다시 여는
+    // 진짜 토글 동작. 재생이 매번 "펼치기만" 하고 끝나면, 재클릭이 홀수
+    // 개일 때(VS: 1개, 열려있던 걸 닫음) 실제 종료 상태(닫힘)와 재생 결과
+    // (열림)가 어긋나 다음 클릭이 아직 열려있는 목록의 light-dismiss
+    // 오버레이에 먹힌다(재생 로그에서 그 다음 스텝이 target-not-found로
+    // 뒤늦게 드러남 — 원인이 두 스텝 전이라 진단이 어려웠다). 같은
+    // 셀렉터로 평범한 클릭을 재클릭 수만큼 이어붙여 실제 토글 횟수를
+    // 재현한다 — 좌표도 새 개념도 안 씀, 기존 클릭 경로 재사용.
+    for (let r = 0; r < reclickCount; r++) {
+      out.push({ ...e, element: { ...e.element, expandCollapse: false } });
+    }
   }
   return out;
 }
@@ -3785,7 +3830,27 @@ async function _findElement(sid, rootElId, selector) {
 // coordinates anywhere. Used by simple mode (single _appSid, no title
 // cache needed); session mode uses the title-keyed _clickScoped instead.
 async function _clickBySid(sid, rootElId, selector, dbl = false) {
-    const elId = await _findElement(sid, rootElId, selector);
+    // 2026-08-17 (VS cold-launch STEP-1 FATAL, real GUI run): _findElement()
+    // is one WAD REST call with no retry at all — unlike session mode's
+    // osScopedInvoke.py (~2.7s COM retry) and the session-mode element-search
+    // loop's own 1s-interval REST polling until a deadline. VS's Start Window
+    // ("새 프로젝트 만들기") renders asynchronously after a cold launch; a
+    // click landing in that narrow unready window failed instantly, and
+    // _step()'s ESC recovery then closed the whole app (VS's Start Window
+    // treats ESC as Cancel). Retry here at the SAME order of magnitude as
+    // osScopedInvoke.py's budget — a value already validated against this
+    // exact class of race — rather than inside _findElement() itself, which
+    // is also called by that session-mode loop (already retries; wrapping
+    // would multiply it) and by the window-title lookup (single-shot,
+    // ~15-20s fixed REST cost per call — retrying there multiplies a cost
+    // that's already expensive by design, see that call site's own comment).
+    let elId = null;
+    for (let attempt = 0; attempt < 10; attempt++) {
+        if (_sessionDead) break;
+        elId = await _findElement(sid, rootElId, selector);
+        if (elId) break;
+        if (attempt < 9) await new Promise(r => setTimeout(r, 300));
+    }
     if (!elId) {
         _failures.push('click-not-found:' + String(selector).substring(0, 60));
         return;
@@ -4038,7 +4103,7 @@ function osScopedInvoke(hwnd, target, triggerTarget, relY, triggerRelY, ownerTit
 // no title ambiguity — so every OS-level lookup below prefers it once known.
 let _appHwnd = 0;
 
-async function initAppHwnd() {
+async function initAppHwnd(imageName) {
     try {
         const r = await _appiumFetch(\`/session/\${_appSid}/window\`);
         const j = await r.json();
@@ -4085,40 +4150,50 @@ async function initAppHwnd() {
         // above only catches a hidden 0x0 helper window — a splash screen
         // has a perfectly normal, non-zero rect at this point, so it
         // passes that check, yet gets destroyed and replaced by the app's
-        // real main window within about a second. "session" mode's
-        // launchApp() already solves this correctly by polling a freshly
-        // launched window's title until it settles (server.js, ~5060+) —
-        // "simple" mode never got the same treatment because it doesn't
-        // launch by title match, it inherits whatever window WinAppDriver's
-        // own appium:app capability happened to attach the session to.
+        // real main window shortly after. "session" mode's launchApp()
+        // already solves this correctly by polling a freshly launched
+        // window's title until it settles (server.js, ~5060+) — "simple"
+        // mode never got the same treatment because it doesn't launch by
+        // title match, it inherits whatever window WinAppDriver's own
+        // appium:app capability happened to attach the session to.
         //
-        // Capture the owning PID now, while the window is still known-alive
-        // (GetWindowThreadProcessId fails on an already-destroyed handle,
-        // so this can't be deferred until after a liveness check finds it
-        // gone), then poll briefly. If it dies, reuse the exact same
-        // sibling-rescoping recovery as the zero-size case above — just
-        // searching by the captured PID instead of by the (by-then-invalid)
-        // original hwnd.
+        // 2026-08-17 (VS re-run, real GUI): the first version of this fix
+        // captured the owning PID via -pidOf (GetWindowThreadProcessId on
+        // the CURRENT _appHwnd), reasoning that the window was "still
+        // known-alive" at that point since it had just been read from the
+        // session. Live-measured that assumption is false — pidOut came
+        // back EMPTY on the very first call, meaning the splash had already
+        // died before this script could even ask for its owning PID, let
+        // alone poll its liveness. No fixed check budget can fix a race
+        // that can already be lost before the first check runs.
+        //
+        // Resolve the PID by PROCESS IMAGE NAME instead (-pidByImage) —
+        // this needs nothing about any particular window's lifetime, only
+        // that the process itself is alive, which is guaranteed (it just
+        // launched). Always available, not contingent on capturing it from
+        // a window that may already be gone.
         let pidOut = '';
         try {
             pidOut = execSync(
-                \`powershell -NoProfile -File "\${_helperFile('osWindowRect.ps1')}" -hwnd \${_appHwnd} -pidOf\`,
+                \`powershell -NoProfile -File "\${_helperFile('osWindowRect.ps1')}" -pidByImage "\${imageName}"\`,
                 { stdio: 'pipe', timeout: 15000 }
             ).toString().trim();
         } catch (e) {
-            console.warn('[hwnd] pidOf lookup failed — skipping splash-race settle check:', String(e.message || e).substring(0, 100));
+            console.warn('[hwnd] pidByImage lookup failed — skipping splash-race settle check:', String(e.message || e).substring(0, 100));
         }
         const appPid = parseInt(pidOut, 10);
         if (appPid) {
             // Fixed small number of checks, not a wall-clock deadline — a
             // deadline-based loop burns its ENTIRE budget every time the
             // window is already stable (the common case), adding several
-            // seconds of pure latency to every simple-mode launch. The
-            // splash-race window observed live was under ~1s; 3 checks
-            // 300ms apart (~900ms worst case) is enough margin without
-            // taxing the happy path.
+            // seconds of pure latency to every simple-mode launch. The loop
+            // still breaks the instant a check finds the window gone, so
+            // this only costs the full budget on the genuinely-stable path.
+            // Budget matches osScopedInvoke.py's ~2.7s click-search retry
+            // (2026-07-17/24) — the same order of magnitude already
+            // validated for this exact class of race elsewhere.
             let stillAlive = true;
-            for (let i = 0; i < 3; i++) {
+            for (let i = 0; i < 9; i++) {
                 await new Promise(res => setTimeout(res, 300));
                 const liveRect = _resolveWinRect('');
                 if (!liveRect || (liveRect.width === 0 && liveRect.height === 0)) {
@@ -6318,7 +6393,7 @@ ${launchCall}` : `
     await ensureAppium();
     _appSid = await _createSession(${JSON.stringify(resolveAppCap(exePath))});
     console.log(\`[session] app session \${_appSid} ready\`);
-    await initAppHwnd();
+    await initAppHwnd(${JSON.stringify(path.basename(exePath || ''))});
     normalizeWindowSimple(${JSON.stringify(recordedRect)});
 `;
 

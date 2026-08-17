@@ -1,4 +1,4 @@
-﻿param([string]$titleLike, [string]$hwnd, [switch]$listOnly, [switch]$ownerOnly, [string]$siblingOf, [switch]$pidOf, [string]$siblingOfPid)
+﻿param([string]$titleLike, [string]$hwnd, [switch]$listOnly, [switch]$ownerOnly, [string]$siblingOf, [switch]$pidOf, [string]$siblingOfPid, [string]$pidByImage)
 Add-Type @"
 using System;
 using System.Text;
@@ -65,6 +65,21 @@ public class WinEnum {
   }
 }
 "@ -ErrorAction SilentlyContinue
+# 2026-08-17 (VS splash race, real GUI re-run): -pidOf derives the PID from
+# the CURRENT session hwnd via GetWindowThreadProcessId, which needs that
+# hwnd to still be alive at call time. Measured live: it can already be gone
+# by the very first call after session creation (pidOut came back empty,
+# GetWindowThreadProcessId returned 0) — the splash can die faster than this
+# script can even ask for its owner. Resolve by PROCESS IMAGE NAME instead,
+# which needs nothing about any particular window's lifetime — the process
+# itself is guaranteed alive (it just launched) — whatever window it
+# currently owns still belongs to it.
+if ($pidByImage) {
+  $procName = [System.IO.Path]::GetFileNameWithoutExtension($pidByImage)
+  $p = Get-Process -Name $procName -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($p) { Write-Output $p.Id }
+  exit
+}
 if ($siblingOf) {
   $sibs = [WinEnum]::FindSizedSiblings([IntPtr]([int64]$siblingOf))
   if ($sibs.Count -gt 0) { Write-Output ([int64]$sibs[0]) }
