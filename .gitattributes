@@ -1,0 +1,28 @@
+# Normalize line endings in the repository to LF for every text file.
+#
+# 2026-08-16: added after a two-day debugging detour. server/server.js had two
+# LITERAL NUL bytes in its source (`id + '\0' + name` written as raw 0x00
+# instead of an escape sequence). Git's CRLF filter classifies any buffer
+# containing NUL as binary and skips end-of-line normalization for it, so with
+# core.autocrlf=true the CRLF working copy never got normalized back to the LF
+# blob — `git diff server/server.js` reported all ~6,400 lines as changed when
+# only ~260 actually were, which made two days of uncommitted work impossible
+# to review before committing. ripgrep likewise refused to print matches from
+# that file ("binary file matches"), silently hiding it from code search.
+#
+# Declaring `text=auto eol=lf` here makes normalization explicit and
+# repository-wide instead of depending on each machine's core.autocrlf, so a
+# stray byte can no longer quietly disable it for one file.
+* text=auto eol=lf
+
+# Generated replay scripts embed PowerShell helpers that MUST keep a UTF-8 BOM
+# (powershell -File reads a BOM-less script as the system ANSI codepage, CP949
+# here, which mangles Korean button names — CLAUDE.md §5). They are still text
+# and still want LF; the BOM is content, not an encoding attribute, so the rule
+# above is safe for them.
+
+# Binary assets — never touch.
+*.png binary
+*.jpg binary
+*.ico binary
+*.pdf binary
