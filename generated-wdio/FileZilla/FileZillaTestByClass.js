@@ -710,34 +710,74 @@ async function _step(label, fn) {
 
 class FileZillaPageByClass {
     async click1() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"C:","controlTypeId":50007}, null, null, null, null, true);
+        await _clickBySid(_appSid, null, '~-31814');
     }
 
     async click2() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"hansung","controlTypeId":50007}, null, null, null, null, true);
+        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"C:","controlTypeId":50007}, null, null, null, null, true);
     }
 
     async click3() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"project","controlTypeId":50007}, null, null, null, null, true);
+        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"hansung"}, null, null, null, null, true);
     }
 
     async click4() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"body-graph","controlTypeId":50007}, null, null, null, null, true);
+        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"project","controlTypeId":50007}, null, null, null, null, true);
     }
 
     async click5() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"notebooks","controlTypeId":50007}, null, null, null, null, true);
+        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"..","controlTypeId":50007}, null, null, null, null, true);
     }
 
-    async scroll6() {
-        osScrollEl(_appHwnd, {"automationId":"-31814","className":"SysTreeView32","name":"C:"}, 6);
+    async click6() {
+        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"project","controlTypeId":50007}, null, null, null, null, true);
     }
 
     async click7() {
-        osAncestorInvoke(_appHwnd, {"automationId":"","className":"","name":"바탕 화면"}, 1, 2, 50024);
+        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":".kiro"}, null, null, null, null, true);
     }
 
     async click8() {
+        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"steering","controlTypeId":50007}, null, null, null, null, true);
+    }
+
+    async scroll9() {
+        osScrollEl(_appHwnd, {"automationId":"-31814","className":"SysTreeView32","name":"Documents and Settings"}, 2);
+    }
+
+    async click10() {
+        await _clickBySid(_appSid, null, '//TreeItem[@Name="C:"]', true);
+    }
+
+    async click11() {
+        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"hansung"}, null, null, null, null, true);
+    }
+
+    async click12() {
+        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"project","controlTypeId":50007}, null, null, null, null, true);
+    }
+
+    async click13() {
+        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"code-generator","controlTypeId":50007}, null, null, null, null, true);
+    }
+
+    async click14() {
+        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"generated-wdio","controlTypeId":50007}, null, null, null, null, true);
+    }
+
+    async click15() {
+        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"FileZilla","controlTypeId":50007}, null, null, null, null, true);
+    }
+
+    async scroll16() {
+        osScrollEl(_appHwnd, {"automationId":"-31814","className":"SysTreeView32","name":""}, 13);
+    }
+
+    async click17() {
+        osAncestorInvoke(_appHwnd, {"automationId":"","className":"","name":"바탕 화면"}, 1, 2, 50024);
+    }
+
+    async click18() {
         osExpandCollapse(_appHwnd, {"automationId":"","className":"","name":"C:","controlTypeId":50024}, null, null, null);
     }
 }
@@ -763,14 +803,24 @@ async function run() {
 
         const page = new FileZillaPageByClass();
             osActivate("FileZilla");
-            await _step('1:doubleClick C:', () => page.click1());
-            await _step('2:doubleClick hansung', () => page.click2());
-            await _step('3:doubleClick project', () => page.click3());
-            await _step('4:doubleClick body-graph', () => page.click4());
-            await _step('5:doubleClick notebooks', () => page.click5());
-            await _step('6:scroll delta=6', () => page.scroll6());
-            await _step('7:ancestor-sibling #1/2', () => page.click7());
-            await _step('8:expandCollapse C:', () => page.click8());
+            await _step('1:click ', () => page.click1());
+            await _step('2:doubleClick C:', () => page.click2());
+            await _step('3:doubleClick hansung', () => page.click3());
+            await _step('4:doubleClick project', () => page.click4());
+            await _step('5:doubleClick ..', () => page.click5());
+            await _step('6:doubleClick project', () => page.click6());
+            await _step('7:doubleClick .kiro', () => page.click7());
+            await _step('8:doubleClick steering', () => page.click8());
+            await _step('9:scroll delta=2', () => page.scroll9());
+            await _step('10:doubleClick C:', () => page.click10());
+            await _step('11:doubleClick hansung', () => page.click11());
+            await _step('12:doubleClick project', () => page.click12());
+            await _step('13:doubleClick code-generator', () => page.click13());
+            await _step('14:doubleClick generated-wdio', () => page.click14());
+            await _step('15:doubleClick FileZilla', () => page.click15());
+            await _step('16:scroll delta=13', () => page.scroll16());
+            await _step('17:ancestor-sibling #1/2', () => page.click17());
+            await _step('18:expandCollapse C:', () => page.click18());
     } finally {
 
         if (_appSid) { try { await _appiumFetch(`/session/${_appSid}`, { method: 'DELETE' }, 5000); } catch {} }

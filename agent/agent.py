@@ -101,6 +101,36 @@ NUMPAD_VK = {
 
 GA_ROOT = 2                    # GetAncestor flag
 
+# 2026-08-14 (사용자 요청 — 로그 한 줄에 정보가 몰려 있어 스캔하기 어려움):
+# 최종 캡처 결과 줄(#N click ...)에서 automationId/locatorStrategy 같은
+# "재생에 실제로 쓰이는" 핵심 필드만 강조하기 위한 ANSI 색상. 콘솔이
+# VT 시퀀스를 못 그리면(구형 cmd.exe 등) 아래 enable_vt_processing()이
+# 조용히 실패하고 그냥 원본 이스케이프 문자가 보이는 정도라 안전하다.
+_C_RESET = "\033[0m"
+_C_GREEN = "\033[32m"
+_C_YELLOW = "\033[33m"
+_C_RED = "\033[31m"
+_C_CYAN = "\033[36m"
+_C_DIM = "\033[2m"
+
+
+def _enable_vt_processing():
+    """Windows 콘솔이 ANSI 색 코드를 문자 그대로 찍지 않고 실제로 렌더링
+    하도록 VT 처리를 켠다 — Windows Terminal은 기본으로 켜져 있지만 구형
+    conhost.exe(예: 일부 PowerShell 5.1 창)는 꺼져 있을 수 있다. 실패해도
+    로그 기능 자체엔 영향 없으므로 조용히 무시한다."""
+    try:
+        kernel32 = ctypes.windll.kernel32
+        h = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(h, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(h, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    except Exception:
+        pass
+
+
+_enable_vt_processing()
+
 
 def log(*args):
     print("[agent]", *args, flush=True)
@@ -308,6 +338,13 @@ class UIAInspector:
     # a different row than the one actually clicked).
     GENERIC_CELL_AUTOMATION_IDS = {"System.ItemNameDisplay"}
     ROW_CONTROL_TYPES = {50007, 50024}  # ListItem, TreeItem
+
+    # 2026-08-16: PARENT_PROMOTABLE_CONTROL_TYPES / PARENT_WITH_ID_MAX_HOPS /
+    # _MNEMONIC_PAREN_RE / _strip_mnemonic() / _window_name_search() were
+    # removed together with their only two callers in element_at() — see the
+    # removal note there. (server.js keeps its own, separately-maintained
+    # INTERACTIVE_CLICK_CONTROL_TYPE_IDS for REST-vs-COM click routing; that
+    # is a different mechanism and is unaffected.)
 
     def _nearest_row_ancestor(self, elem, max_up=6):
         """Walk up from elem toward the nearest ListItem/TreeItem ancestor
@@ -807,6 +844,20 @@ class UIAInspector:
                         deeper = self.smallest_element_at(root, int(x), int(y))
                         if deeper is not None:
                             trace["picked_by"] = "smallest_element_at"
+                            # 2026-08-14 (VS "리포지토리 복제" 실측): raw_info와
+                            # 달리 이 결과는 element_at() 시작 시점의 raw hit이
+                            # 아니라 별도 FindAll 탐색으로 방금 찾아낸 다른
+                            # 객체다 — 그 탐색 자체가 시간이 걸려서, 죽은-요소
+                            # 복구(_inspect())가 쓸 수 있는 "아직 살아있을 때"
+                            # 스냅샷이 여태 하나도 없었다(raw_info를 대신 쓰면
+                            # 엉뚱한 객체를 복구하게 됨 — 그래서 그 복구는
+                            # picked_by가 raw-*일 때만 걸리게 막혀 있었다).
+                            # 찾아낸 즉시 가볍게 한 번 읽어서 저장해두면, 이
+                            # 객체 전용의 "아직 살아있을 때" 스냅샷이 생긴다.
+                            try:
+                                trace["smallest_info"] = self.describe(deeper)
+                            except Exception:
+                                pass
                     if deeper is None:
                         deeper = self._deepen(elem, int(x), int(y))
                         if deeper is not None:
@@ -875,6 +926,22 @@ class UIAInspector:
                     if named is not None:
                         trace["picked_by"] = "named-ancestor"
                         return named
+
+            # 2026-08-16: the `parent-with-id` ancestor climb and the
+            # `window-name-search` window-wide Name lookup that used to sit
+            # here were REMOVED. Both were added 2026-08-14 for Visual
+            # Studio's "뒤로(_B)" (a WPF Button whose hit-test lands on its
+            # inner TextBlock label), and neither ever succeeded on the
+            # control they were written for: every subsequent live recording
+            # shows both walking their full budget and then failing
+            # ("no interactive candidate for normalized name '뒤로(B)'"),
+            # because that leaf's ancestor chain varies across recordings and
+            # the window-wide search never finds exactly one interactive
+            # candidate. They cost real capture latency on EVERY id-less
+            # click while contributing no successful captures, so they are
+            # gone rather than tuned. A leaf with no automationId now falls
+            # through to the existing Name-based capture, exactly as it did
+            # before 2026-08-14.
         except Exception:
             pass
         return elem
@@ -4064,9 +4131,31 @@ class Recorder:
                     #  (4) element_at()이 검색한 root_hwnd가 추적 중인 창일 것 —
                     #      이게 Chrome 'Stop' 류의 자기-오염을 막는다(그 케이스는
                     #      root_hwnd가 target에 없다)
-                    _raw = (ins._last_trace or {}).get("raw_info") or {}
                     _picked = str((ins._last_trace or {}).get("picked_by") or "")
                     _rroot = (ins._last_trace or {}).get("root_hwnd") or 0
+                    # 2026-08-14 (VS "리포지토리 복제" 실측, STEP 9/13): raw_info와
+                    # 별도로, smallest_element_at()이 채택한 결과 전용의 "아직
+                    # 살아있을 때" 스냅샷(agent.py의 smallest_element_at 호출부
+                    # 참고) — raw_info를 대신 쓰면 다른(더 엉성한raw hit) 객체를
+                    # 복구하게 되므로 반드시 그 전용 스냅샷을 써야 한다. 같은
+                    # 4가지 안전조건을 그대로 요구.
+                    _smallest = (ins._last_trace or {}).get("smallest_info") or {}
+                    _srect = _smallest.get("rect")
+                    if (_picked == "smallest_element_at"
+                            and isinstance(_srect, tuple)
+                            and point_in_rect(_srect, x, y)
+                            and (_smallest.get("name") or _smallest.get("automationId"))
+                            and _rroot in self.target_hwnds):
+                        log(f"[inspect] adopted element at ({x},{y}) is dead "
+                            f"(rect={_r!r}) but smallest_element_at()'s own FIRST "
+                            f"read caught it alive: name={_smallest.get('name')!r} "
+                            f"id={_smallest.get('automationId')!r} rect={_srect} — "
+                            "using that instead of dropping the step.")
+                        _smallest["locatorFallback"] = (
+                            "coordinate" if _smallest.get("locatorStrategy") == "coordinate" else "")
+                        _smallest["rootHwnd"] = _rroot
+                        return _smallest
+                    _raw = (ins._last_trace or {}).get("raw_info") or {}
                     _rrect = _raw.get("rect")
                     if (_picked.startswith("raw-")
                             and isinstance(_rrect, tuple)
@@ -4291,9 +4380,11 @@ class Recorder:
                 and not info.get("className")
                 and info_ct in ("ListItem", "TreeItem")
             )
-            if (not light_dismiss and elem is not None
-                    and ((not info.get("automationId") and not info.get("name"))
-                         or volatile_named_item)):
+            needs_ancestor_for_nameless = (
+                not light_dismiss and elem is not None
+                and ((not info.get("automationId") and not info.get("name"))
+                     or volatile_named_item))
+            if needs_ancestor_for_nameless:
                 anc = ins._ancestor_sibling_selector(
                     elem,
                     cached_rect=info.get("rect"),
@@ -4330,6 +4421,20 @@ class Recorder:
                         log("[inspect] ancestor+index selector marked "
                             "ambiguousCapture — codegen will emit an explicit "
                             "FAIL step instead of replaying it")
+            # 2026-08-16: an `elif` branch used to run here that computed the
+            # ancestor+sibling-index selector as INSURANCE for elements that
+            # already had a usable automationId/Name, so codegen could fall
+            # back to it if it later found that id+Name duplicated within the
+            # window (HeidiSQL's four scroll-button groups, added 2026-08-13).
+            # Removed: it ran on EVERY named click and, when it failed to
+            # match, burned its whole retry budget doing so — measured ~1.5s
+            # per click on Visual Studio's "뒤로(_B)", which is capture
+            # latency paid by every app to serve one control in one app. The
+            # gate above (id AND name both missing, or a volatile
+            # ListItem/TreeItem) still computes it where it is load-bearing.
+            # Consequence accepted by the user: server.js's duplicateNamedIds
+            # routing no longer receives these fields, so HeidiSQL's
+            # duplicate-id scroll buttons revert to matching the first hit.
             # ExpandCollapsePattern 태깅 — 2026-07-13 진단(poc/diag_expandcollapse.py)으로
             # ComboBox/메뉴바 MenuItem은 일반 클릭만으로 "펼치기"가 재현 안
             # 됨을 실증했지만, **ExpandCollapsePattern "지원 여부"만으로
@@ -5059,9 +5164,28 @@ class Recorder:
         elif _el.get('comboItemIndex') is not None:
             _pick = (f" -> combo item #{_el['comboItemIndex']}"
                      f"/{_el.get('comboItemCount')} '{(_el.get('comboItemName') or '')[:40]}'")
+        # 2026-08-14 (사용자 요청 — 한 줄에 정보가 몰려 있어 스캔하기 어려움):
+        # 재생 시 실제로 쓰이는 핵심 필드(automationId/locatorStrategy)만
+        # ANSI 색으로 강조 — 안정적인 셀렉터(automationId 있음)는 초록,
+        # name/좌표 등 더 약한 폴백은 노랑/빨강. rect/pt 같은 진단용 좌표는
+        # 색 없이 그대로 둔다(스캔할 때 필요한 건 "무엇으로 찾을지"이지
+        # 정확한 픽셀이 아님). Windows Terminal/PS 5.1 둘 다 기본적으로
+        # ANSI VT 시퀀스를 처리한다.
+        _aid = _el.get("automationId") or ""
+        _strategy = _el.get("locatorStrategy") or ""
+        if _aid:
+            _id_display = f"{_C_GREEN}id='{_aid}'{_C_RESET}"
+        else:
+            _id_display = f"{_C_DIM}id=''{_C_RESET}"
+        _strategy_color = {
+            "automationId": _C_GREEN,
+            "name": _C_YELLOW,
+        }.get(_strategy, _C_RED if _strategy else _C_DIM)
+        _strategy_display = f"{_strategy_color}[{_strategy or 'none'}]{_C_RESET}"
         log(f"#{self.event_count} {action:11s} "
-            f"id='{_el['automationId']}' "
-            f"name='{_el['name'][:30]}'{_pick}"
+            f"{_id_display} "
+            f"{_C_CYAN}name='{_el['name'][:30]}'{_C_RESET}{_pick} "
+            f"{_strategy_display}"
             f" rect={_el.get('rect')}{pt}"
             + (f" value='{value}'" if value else ""))
         try:

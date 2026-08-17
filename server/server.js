@@ -404,7 +404,7 @@ if __name__ == "__main__":
 // NOTE: no SetProcessDPIAware call here — agent.py capture and osClick.ps1 are
 // both DPI-unaware, and adding awareness here would skew coordinates by the
 // DPI scale factor (verified: unaware rect matches agent-captured winLeft).
-const OS_WINRECT_PS1 = `param([string]$titleLike, [string]$hwnd, [switch]$listOnly, [switch]$ownerOnly, [string]$siblingOf)
+const OS_WINRECT_PS1 = `param([string]$titleLike, [string]$hwnd, [switch]$listOnly, [switch]$ownerOnly, [string]$siblingOf, [switch]$pidOf, [string]$siblingOfPid)
 Add-Type @"
 using System;
 using System.Text;
@@ -445,8 +445,19 @@ public class WinEnum {
     uint pid;
     GetWindowThreadProcessId(hwndOf, out pid);
     if (pid == 0) return found;
+    return FindSizedSiblingsByPid(pid, hwndOf);
+  }
+  // 2026-08-14 (VS splash-window race): FindSizedSiblings derives the PID
+  // from hwndOf via GetWindowThreadProcessId, which fails (returns 0) once
+  // hwndOf has already been destroyed -- no good for recovering from a
+  // window that died between being grabbed and being used. Callers that
+  // captured the PID earlier, while the window was still alive, can search
+  // directly by PID instead, sidestepping that dead-handle lookup entirely.
+  public static List<IntPtr> FindSizedSiblingsByPid(uint pid, IntPtr exclude) {
+    var found = new List<IntPtr>();
+    if (pid == 0) return found;
     EnumWindows((hWnd, lParam) => {
-      if (hWnd == hwndOf || !IsWindowVisible(hWnd)) return true;
+      if (hWnd == exclude || !IsWindowVisible(hWnd)) return true;
       uint wpid;
       GetWindowThreadProcessId(hWnd, out wpid);
       if (wpid != pid) return true;
@@ -465,6 +476,13 @@ if ($siblingOf) {
   if ($sibs.Count -gt 0) { Write-Output ([int64]$sibs[0]) }
   exit
 }
+# 2026-08-14: search by an already-captured PID instead of re-deriving it
+# from a (possibly by-now-destroyed) hwnd -- see FindSizedSiblingsByPid.
+if ($siblingOfPid) {
+  $sibs = [WinEnum]::FindSizedSiblingsByPid([uint32]$siblingOfPid, [IntPtr]::Zero)
+  if ($sibs.Count -gt 0) { Write-Output ([int64]$sibs[0]) }
+  exit
+}
 # -hwnd targets one specific window directly, bypassing title matching entirely.
 # Title matching alone is ambiguous whenever more than one window shares a
 # substring (e.g. every VS Code window's title ends in "Visual Studio Code") —
@@ -477,6 +495,16 @@ if ($hwnd) {
     # WinAppDriver's appTopLevelWindow rejects outright ("not a top level
     # window handle"), so callers skip the scoped-session attempt entirely.
     Write-Output ([int64][WinEnum]::GetWindow($h, 4))
+    exit
+  }
+  if ($pidOf) {
+    # 2026-08-14 (VS splash-window race): capture the PID while the window
+    # is still known-alive, so a later liveness check that finds it gone can
+    # still search for a replacement via -siblingOfPid (GetWindowThreadProcessId
+    # fails on an already-destroyed handle, so this must happen up front).
+    [uint32]$capturedPid = 0
+    [WinEnum]::GetWindowThreadProcessId($h, [ref]$capturedPid) | Out-Null
+    if ($capturedPid) { Write-Output $capturedPid }
     exit
   }
   $r = New-Object WinEnum+RECT
@@ -1462,15 +1490,21 @@ def main():
     # 구독자를 불러올 수 없음"). 셀렉터/로직 문제가 아니라 타이밍 문제이므로,
     # 실패로 단정하기 전에 짧게 재시도한다(osScopedInvoke.py의 4회 재시도와
     # 같은 근거).
+    # 2026-08-14 실측(Visual Studio 재현): 위 4회/0.3초 재시도로는 부족한
+    # provider가 있다 — 세션 생성 직후 1회가 아니라 STEP 2/3/4처럼 세션
+    # 생성 후 몇 초가 지난 호출들도 재시도를 다 소진하고 매번 같은
+    # ElementFromHandle COMError로 실패했다(WPF 기반 UIA provider로 추정).
+    # 시도 횟수/간격만 늘려 더 느린 provider에 여유를 준다 — 그 외 로직은
+    # 동일.
     root = None
-    for attempt in range(4):
+    for attempt in range(8):
         if attempt > 0:
-            time.sleep(0.3)
+            time.sleep(0.4)
         try:
             root = uia.ElementFromHandle(args.hwnd)
         except Exception as e:
             root = None
-            if attempt == 3:
+            if attempt == 7:
                 print(f"osExpandCollapse: ElementFromHandle failed: {e}", file=sys.stderr)
         if root:
             break
@@ -2838,6 +2872,24 @@ function mergeExpandCollapseClicks(events) {
       const itemRect = next?.element?.rect;
       const looksLikeSiblingNotItem = Array.isArray(triggerRect) && Array.isArray(itemRect)
         && itemRect[1] < triggerRect[3];
+      // 2026-08-14 (VS "언어 필터" 콤보 + "뒤로" 실측): 위 sibling 가드는
+      // "아이템이 트리거보다 아래에 있는가"만 본다 — 트리거가 다이얼로그
+      // 상단, 다음 클릭이 하단에 있으면 그 사이 실제로 아무 항목도 선택 안
+      // 됐어도(트리거 자체에 comboItemIndex가 없다 — 그래서 여기 도달함)
+      // "아래에 있으니 진짜 아이템"으로 잘못 통과시킨다. 실제 드롭다운
+      // 목록은 트리거 바로 아래, 트리거와 수평으로 겹치는 위치에 뜬다 —
+      // 다이얼로그 반대편(수평으로 안 겹침)이나 한참 아래(리스트 하나 높이를
+      // 훨씬 넘는 거리)에 있는 건 드롭다운 항목일 수 없다. 두 조건 다
+      // 넉넉하게 잡아(폭 넓은 owner-drawn 목록, 여러 줄짜리 목록도 통과하도록)
+      // 기존에 이미 잘 되던 병합은 안 건드리면서 이번 사고 같은 "우연히
+      // 아래쪽에 있던 무관한 버튼"만 걸러낸다.
+      const MAX_DROPDOWN_ITEM_GAP = 400;
+      const DROPDOWN_ITEM_X_SLACK = 60;
+      const looksTooFarOrMisaligned = Array.isArray(triggerRect) && Array.isArray(itemRect) && (
+        (itemRect[1] - triggerRect[3]) > MAX_DROPDOWN_ITEM_GAP
+        || itemRect[2] < triggerRect[0] - DROPDOWN_ITEM_X_SLACK
+        || itemRect[0] > triggerRect[2] + DROPDOWN_ITEM_X_SLACK
+      );
       // Cross-window guard (2026-07-23, FileZilla "방화벽 및 라우터 설정
       // 마법사" 재현): a leaf command MenuItem (e.g. "네트워크 구성
       // 마법사(N)...") can still get expandCollapse=true tagged by
@@ -2860,7 +2912,7 @@ function mergeExpandCollapseClicks(events) {
       // falsy로 끊겨 무력화됐다. next에 rootHwndHex가 있으면 그건 세그먼트
       // 스위칭이 이미 아는 별도 창이고, 절대 드롭다운 항목이 아니다.
       const crossesWindow = !!next?.rootHwndHex && next.rootHwndHex !== e.rootHwndHex;
-      if (next && next.action === 'click' && itemName && !looksLikeSiblingNotItem && !crossesWindow) {
+      if (next && next.action === 'click' && itemName && !looksLikeSiblingNotItem && !crossesWindow && !looksTooFarOrMisaligned) {
         console.log(`[expand-merge] merged click+click @index ${i} -> expand '${e.element.name}' then select '${itemName}'`);
         out.push({ ...e, expandItemName: itemName });
         i++; // consume the merged-in item-selection event
@@ -2871,6 +2923,9 @@ function mergeExpandCollapseClicks(events) {
       }
       if (crossesWindow) {
         console.log(`[expand-merge] rejected merge @index ${i}: '${e.element.name}' + '${itemName}' are in different windows (rootHwndHex ${e.rootHwndHex} vs ${next.rootHwndHex}) — '${itemName}' opened a new dialog, not a dropdown item — keeping '${e.element.name}' as a plain toggle`);
+      }
+      if (looksTooFarOrMisaligned) {
+        console.log(`[expand-merge] rejected merge @index ${i}: '${e.element.name}' rect=${JSON.stringify(triggerRect)} + '${itemName}' rect=${JSON.stringify(itemRect)} are too far apart / horizontally misaligned to be the same dropdown — keeping '${e.element.name}' as a plain toggle`);
       }
     }
     out.push(e);
@@ -3767,8 +3822,27 @@ async function _typeScoped(sid, rootElId, selector, text) {
         // 타이핑 분기 주석) — 여기서 element/value가 "성공"을 보고했다는
         // 사실 자체를 남겨야, 다음에도 같은 증상(로그는 성공, 화면은 빈칸)이
         // 나면 "WAD REST가 거짓 성공을 보고하는 컨트롤"로 확정할 수 있다.
-        console.log(\`[type] scoped sendKeys ok (sid=\${sid} elId=\${elId} sel=\${selector})\`);
-        return true;
+        //
+        // 2026-08-13 (FileZilla 실측 — 사용자명/호스트/비밀번호/포트 필드가
+        // 재생 화면에서 매번 눈에 보이게 "친 다음 전체선택 → 다시 침"으로
+        // 두 번 타이핑됨): 호출자 _typeScopedOrCom()은 이 함수의 리턴값과
+        // 무관하게 항상 OS 레벨 osType()까지 추가로 실행했다 — element/value가
+        // wxWidgets 네이티브 Edit 컨트롤에서 실제로 반영 안 되는 사례가 있어서
+        // "확인 없이 항상 한 번 더 보장"하는 쪽을 택했기 때문(§ 위 주석). 그런데
+        // 이 REST 호출이 실제로 성공한 케이스에서도 매번 재입력이 일어나
+        // 사용자에게 이중 타이핑으로 보였다. 여기서 반영 여부를 실제로 읽어
+        // 돌려주면 호출자는 "진짜 실패했을 때만" 폴백하면 된다 — /text 읽기가
+        // 안 되거나 실패하면(엔드포인트 미지원 등) 확인할 수 없으므로 false를
+        // 반환해 기존 동작(항상 폴백)을 그대로 유지한다 — 즉 실제로 값이 일치함을
+        // "증명"했을 때만 폴백을 건너뛰고, 증명 못 하면 기존과 동일하게 안전
+        // 쪽(재입력)으로 fail open한다.
+        let verified = false;
+        try {
+            const r = await (await _appiumFetch(\`/session/\${sid}/element/\${elId}/text\`)).json();
+            if (typeof r.value === 'string') verified = (r.value === text);
+        } catch { /* readback unsupported/failed — stay unverified, caller falls back as before */ }
+        console.log(\`[type] scoped sendKeys \${verified ? 'ok (readback confirmed)' : 'reported ok but unverified'} (sid=\${sid} elId=\${elId} sel=\${selector})\`);
+        return verified;
     } catch (e) { console.warn('[type] scoped sendKeys failed:', String(e.message || e).substring(0, 100)); return false; }
 }
 
@@ -4003,6 +4077,71 @@ async function initAppHwnd() {
                 console.log(\`[hwnd] session window hwnd=\${_appHwnd} (0x\${_appHwnd.toString(16)})\`);
             } else {
                 console.warn('[hwnd] session window is zero-size and no sized sibling window was found');
+            }
+        }
+        // 2026-08-14 (Visual Studio splash-screen race, live-confirmed via
+        // appium.log: the very first element search failed with "no such
+        // window: Currently selected window has been closed"): the check
+        // above only catches a hidden 0x0 helper window — a splash screen
+        // has a perfectly normal, non-zero rect at this point, so it
+        // passes that check, yet gets destroyed and replaced by the app's
+        // real main window within about a second. "session" mode's
+        // launchApp() already solves this correctly by polling a freshly
+        // launched window's title until it settles (server.js, ~5060+) —
+        // "simple" mode never got the same treatment because it doesn't
+        // launch by title match, it inherits whatever window WinAppDriver's
+        // own appium:app capability happened to attach the session to.
+        //
+        // Capture the owning PID now, while the window is still known-alive
+        // (GetWindowThreadProcessId fails on an already-destroyed handle,
+        // so this can't be deferred until after a liveness check finds it
+        // gone), then poll briefly. If it dies, reuse the exact same
+        // sibling-rescoping recovery as the zero-size case above — just
+        // searching by the captured PID instead of by the (by-then-invalid)
+        // original hwnd.
+        let pidOut = '';
+        try {
+            pidOut = execSync(
+                \`powershell -NoProfile -File "\${_helperFile('osWindowRect.ps1')}" -hwnd \${_appHwnd} -pidOf\`,
+                { stdio: 'pipe', timeout: 15000 }
+            ).toString().trim();
+        } catch (e) {
+            console.warn('[hwnd] pidOf lookup failed — skipping splash-race settle check:', String(e.message || e).substring(0, 100));
+        }
+        const appPid = parseInt(pidOut, 10);
+        if (appPid) {
+            // Fixed small number of checks, not a wall-clock deadline — a
+            // deadline-based loop burns its ENTIRE budget every time the
+            // window is already stable (the common case), adding several
+            // seconds of pure latency to every simple-mode launch. The
+            // splash-race window observed live was under ~1s; 3 checks
+            // 300ms apart (~900ms worst case) is enough margin without
+            // taxing the happy path.
+            let stillAlive = true;
+            for (let i = 0; i < 3; i++) {
+                await new Promise(res => setTimeout(res, 300));
+                const liveRect = _resolveWinRect('');
+                if (!liveRect || (liveRect.width === 0 && liveRect.height === 0)) {
+                    stillAlive = false;
+                    break;
+                }
+            }
+            if (!stillAlive) {
+                const sibOut = execSync(
+                    \`powershell -NoProfile -File "\${_helperFile('osWindowRect.ps1')}" -siblingOfPid \${appPid}\`,
+                    { stdio: 'pipe', timeout: 15000 }
+                ).toString().trim();
+                const sibling = parseInt(sibOut, 10);
+                if (sibling) {
+                    console.warn(\`[hwnd] session window was a transient window (e.g. a splash screen) and has since closed — re-creating session scoped to real window hwnd=\${sibling} (0x\${sibling.toString(16)})\`);
+                    // Same reasoning as the zero-size case above: do not
+                    // delete the old session (it would kill the process).
+                    _appSid = await _createSession('0x' + sibling.toString(16));
+                    _appHwnd = sibling;
+                    console.log(\`[hwnd] session window hwnd=\${_appHwnd} (0x\${_appHwnd.toString(16)})\`);
+                } else {
+                    console.warn('[hwnd] session window closed and no real sibling window was found — proceeding with the stale handle, later steps will likely fail');
+                }
             }
         }
     } catch (e) {
@@ -4449,6 +4588,20 @@ async function getWindowSession(title) {
             const hs = _listWindowHwnds(title);
             if (hs.length) hwndNum = hs[0];
         }
+        // 2026-08-13 실측(HeidiSQL): 이 창의 타이틀이 "Unnamed\\<db>\\<table>\\
+        // - HeidiSQL X.X.X.X"처럼 현재 선택된 DB/테이블 경로를 그대로 담고
+        // 있어서, 녹화 시점에 찍힌 정확한 문자열은 세션 내내 다시는 나타나지
+        // 않는다(재생 시 "Open" 직후엔 아직 테이블을 안 골랐으니 title이 더
+        // 짧음) — 위 폴링이 항상 실패해 이후 모든 STEP이 "window not found"로
+        // 연쇄 실패했다. launchApp()이 이미 쓰는 tailFrag 패턴(" - " 뒤쪽만
+        // 남기면 앱 이름/버전처럼 안 바뀌는 부분만 남음)을 여기서도 재사용.
+        if (!hwndNum) {
+            const tailFrag = title.split(' - ').pop();
+            if (tailFrag && tailFrag !== title) {
+                const hs = _listWindowHwnds(tailFrag);
+                if (hs.length) hwndNum = hs[0];
+            }
+        }
         if (hwndNum) _hwndCache[title] = hwndNum;
     }
     // Owned windows (native dialogs owned by the app's main window) can
@@ -4711,13 +4864,38 @@ async function _findScoped(title, selector, timeoutMs = 8000) {
 // 요소 단위 doubleclick 엔드포인트가 없음 — 좌표 기반 moveto/doubleclick은
 // 금지 대상이라 쓰지 않는다). 실패는 _failures로 기록되어 _step()의
 // Fail-and-Recover(팝업 해제 후 1회 재시도)를 태운 뒤 최종 FAIL로 남는다.
-async function _clickScoped(title, selector, dbl = false) {
+// Mirrors agent.py's PARENT_PROMOTABLE_CONTROL_TYPES (agent.py:320) — keep
+// these two lists in sync if either changes.
+const INTERACTIVE_CLICK_CONTROL_TYPE_IDS = new Set([
+    50000, // Button
+    50002, // CheckBox
+    50003, // ComboBox
+    50005, // Hyperlink
+    50007, // ListItem
+    50011, // MenuItem
+    50013, // RadioButton
+    50024, // TreeItem
+    50031, // SplitButton
+]);
+
+async function _clickScoped(title, selector, dbl = false, controlTypeId = 0) {
     // 2026-07-17: owned 다이얼로그면 REST 폴백(15~20초 고정 비용, 실측 확정)을
     // 아예 타지 않고 COM(osScopedInvoke, 1초 미만)으로 즉시 처리한다. 셀렉터가
     // COM 조건으로 못 옮기는 형태(anchor 상대 경로 등)면 null을 반환해 아래
     // REST 경로로 안전하게 폴백한다.
+    //
+    // 2026-08-14 (VS "뒤로(_B)" false-PASS, 실측 확인): REST element/click이
+    // Text/TextBlock 같은 비인터랙티브 컨트롤에도 200을 리턴하지만 실제로는
+    // 아무 효과가 없었다 — 커서만 이동하고 클릭 자체가 안 먹힘, 에러도
+    // _failures push도 전혀 없어서 완전히 조용한 거짓-PASS였다. WAD의 REST
+    // 클릭은 진짜 인터랙티브 컨트롤 타입에만 신뢰할 수 있다. controlTypeId가
+    // 0이면(이 필드가 생기기 전 녹화) "인터랙티브로 간주"해 기존 동작을
+    // 그대로 유지한다 — 이 변경은 COM 경로를 쓰는 범위를 넓히기만 하지
+    // (owned가 아니어도 비인터랙티브 타입이면 COM 사용), 기존에 REST로 잘
+    // 되던 케이스를 좁히지는 않는다.
     const s0 = await getWindowSession(title);
-    if (s0.owned && s0.hwnd) {
+    const isInteractiveType = !controlTypeId || INTERACTIVE_CLICK_CONTROL_TYPE_IDS.has(controlTypeId);
+    if (s0.hwnd && (s0.owned || !isInteractiveType)) {
         const target = _parseSelectorToTarget(selector);
         if (target) {
             osScopedInvoke(s0.hwnd, target);
@@ -4747,14 +4925,19 @@ async function _typeScopedOrCom(title, selector, text) {
             return true;
         }
     }
-    if (s && s.sid) {
-        await _typeScoped(s.sid, s.rootElId, selector, text);
-    }
     // WinAppDriver REST sendKeys returns 200 for native Win32/wxWidgets Edit controls (FileZilla)
-    // without actually firing WM_CHAR or updating native UI text.
-    // Always follow up with OS-level activation + typing to guarantee physical text input.
-    osActivate(title, s ? s.hwnd : _hwndCache[title]);
-    osType(text);
+    // without actually firing WM_CHAR or updating native UI text, so this used to always follow up
+    // with OS-level activation + typing regardless of whether the REST call worked — guaranteeing
+    // correctness, but also guaranteeing every field got visibly typed twice even when the REST
+    // call already succeeded (2026-08-13 실측: 사용자명/호스트/비밀번호/포트 필드 전부 재생마다
+    // "친 다음 전체선택 → 다시 침"으로 보임). _typeScoped()는 이제 실제 반영 여부를 읽어
+    // 리턴하므로(§ 정의부 주석), 확인된 성공일 때만 재입력을 건너뛴다 — 확인 못 한 경우는
+    // 기존과 동일하게 안전 쪽(재입력)으로 유지된다.
+    const restVerified = (s && s.sid) ? await _typeScoped(s.sid, s.rootElId, selector, text) : false;
+    if (!restVerified) {
+        osActivate(title, s ? s.hwnd : _hwndCache[title]);
+        osType(text);
+    }
     return true;
 }
 
@@ -5209,6 +5392,21 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
     return out;
   })();
 
+  // 2026-08-16: duplicateNamedIds was removed here. It detected controls whose
+  // automationId AND Name were both identical within one window (HeidiSQL's
+  // four scroll-button groups, 2026-08-13) and routed them to the
+  // ancestor+sibling-index fallback. Its only data source was agent.py's
+  // insurance branch, which paid ~1.5s of capture latency on EVERY named click
+  // to populate those fields; that branch was deleted 2026-08-16, so this set
+  // could only ever be empty.
+  //
+  // Deleting it also removed two LITERAL NUL BYTES that sat in this function's
+  // map keys (`id + '\0' + name`, written as raw 0x00 rather than an escape).
+  // Those bytes made git's CRLF filter treat the whole file as binary, so
+  // `git diff server/server.js` reported all ~6,400 lines changed instead of
+  // the ~260 that actually were, and ripgrep refused to show matches inside
+  // this file at all. If a NUL separator is ever needed again, write it as
+  // '\u0000' as an escape sequence — never as a raw byte.
   // Electron 창 rect 앵커: 모든 Electron 이벤트 타이틀의 공통 부분문자열.
   // 2026-08-12 (Notepad 실측: launchFrag가 "Desktop Automation Code
   // Generator - Chrome"으로 오염돼 launchApp이 20초 타임아웃 → 이후 모든
@@ -5665,7 +5863,23 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
     } else if ((e.action === 'click' || e.action === 'doubleClick')
         && Number.isInteger(e.element?.ancestorSiblingIndex)
         && Number.isInteger(e.element?.ancestorItemControlTypeId)
-        && e.element?.name !== '..') {
+        && e.element?.name !== '..'
+        && (
+          // 원래 게이트(2026-08-08): automationId/name이 둘 다 없거나,
+          // volatile Name의 ListItem/TreeItem — agent.py의
+          // needs_ancestor_for_nameless와 동일 조건.
+          (!e.element?.automationId && !e.element?.name)
+          || (!e.element?.automationId && !e.element?.className
+              && (e.element?.controlType === 'ListItem' || e.element?.controlType === 'TreeItem'))
+          // 2026-08-16: a third clause used to route "automationId+Name both
+          // present but not unique in this window" (HeidiSQL's four
+          // scroll-button groups) here via duplicateNamedIds. It was fed by
+          // agent.py's insurance branch, which computed the ancestor+sibling
+          // index on EVERY named click at ~1.5s each; that branch was removed
+          // 2026-08-16, so this clause could never match again and is gone
+          // with it. HeidiSQL's duplicate-id scroll buttons revert to
+          // matching the first hit (accepted trade-off).
+        )) {
       // 2026-08-10 (FileZilla '..' 재생 실패 실측): '..'은 디스크 상태와
       // 무관하게 모든 폴더에 항상 같은 이름으로 존재하는 고정 항목이라
       // Name 기반 셀렉터가 형제-순번보다 훨씬 안정적이다(형제 개수는
@@ -5733,7 +5947,17 @@ function generateWdio(strategy, appName, eventList, useSession, exePath) {
       if (isAncestorXWin) {
         const relTitleArg = escapeStr(relTitle);
         hwndPreamble =
-`        const _ancHs${stepNum} = _listWindowHwnds('${relTitleArg}');
+`        let _ancHs${stepNum} = _listWindowHwnds('${relTitleArg}');
+        // 2026-08-13 실측(HeidiSQL): relTitle이 DB/테이블 경로를 담은 살아있는
+        // 타이틀이면 녹화 시점 문자열이 재생에서 다시 안 나타나 이 목록이 항상
+        // 비고, _hwndCache[_mainTitleFrag](세션 관리자 창 — 이미 소멸됨)로
+        // 폴백해 죽은 hwnd를 COM으로 찌르게 된다(ElementFromHandle 실패).
+        // getWindowSession()과 동일한 tailFrag 재시도로 먼저 살아있는 메인
+        // 창을 찾는다.
+        if (!_ancHs${stepNum}.length) {
+            const _ancTail${stepNum} = '${relTitleArg}'.split(' - ').pop();
+            if (_ancTail${stepNum} !== '${relTitleArg}') _ancHs${stepNum} = _listWindowHwnds(_ancTail${stepNum});
+        }
         const _ancHwnd${stepNum} = _ancHs${stepNum}.find(h => h === osForegroundHwnd()) || _ancHs${stepNum}[0] || ${hwndArg};
 `;
         hwndArg = `_ancHwnd${stepNum}`;
@@ -6012,7 +6236,7 @@ ${segBoundary && useSession ? `            console.log('[STEP] switch to window:
         // 셀렉터를 라이브 조회해 element/click(UIA Invoke)한다.
         pushMethod(
 `    async click${stepNum}() {
-        await _clickScoped('${escapeStr(relTitle)}', ${sel}${dbl ? ', true' : ''});
+        await _clickScoped('${escapeStr(relTitle)}', ${sel}${dbl ? ', true' : ', false'}, ${e.element?.controlTypeId || 0});
     }`
         );
       } else {

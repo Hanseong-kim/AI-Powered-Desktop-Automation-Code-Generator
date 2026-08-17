@@ -708,77 +708,22 @@ async function _step(label, fn) {
     await fn();
 }
 
-class FileZillaPageById {
+class NotepadPageByClass {
     async click1() {
-        await _clickBySid(_appSid, null, '~-31814');
+        await _clickBySid(_appSid, null, '//Document[@ClassName="RichEditD2DPT" and @Name="텍스트 편집기"]');
     }
 
-    async click2() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"C:","controlTypeId":50007}, null, null, null, null, true);
+    async type2(value) {
+        osActivate('');
+        osType(value);
     }
 
     async click3() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"hansung"}, null, null, null, null, true);
+        osExpandCollapse(_appHwnd, {"automationId":"File","className":"Microsoft.UI.Xaml.Controls.MenuBarItem","name":"파일"}, null, 10, 13);
     }
 
     async click4() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"project","controlTypeId":50007}, null, null, null, null, true);
-    }
-
-    async click5() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"..","controlTypeId":50007}, null, null, null, null, true);
-    }
-
-    async click6() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"project","controlTypeId":50007}, null, null, null, null, true);
-    }
-
-    async click7() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":".kiro"}, null, null, null, null, true);
-    }
-
-    async click8() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"steering","controlTypeId":50007}, null, null, null, null, true);
-    }
-
-    async scroll9() {
-        osScrollEl(_appHwnd, {"automationId":"-31814","className":"SysTreeView32","name":"Documents and Settings"}, 2);
-    }
-
-    async click10() {
-        await _clickBySid(_appSid, null, '//TreeItem[@Name="C:"]', true);
-    }
-
-    async click11() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"hansung"}, null, null, null, null, true);
-    }
-
-    async click12() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"project","controlTypeId":50007}, null, null, null, null, true);
-    }
-
-    async click13() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"code-generator","controlTypeId":50007}, null, null, null, null, true);
-    }
-
-    async click14() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"generated-wdio","controlTypeId":50007}, null, null, null, null, true);
-    }
-
-    async click15() {
-        osScopedInvoke(_appHwnd, {"automationId":"","className":"","name":"FileZilla","controlTypeId":50007}, null, null, null, null, true);
-    }
-
-    async scroll16() {
-        osScrollEl(_appHwnd, {"automationId":"-31814","className":"SysTreeView32","name":""}, 13);
-    }
-
-    async click17() {
-        osAncestorInvoke(_appHwnd, {"automationId":"","className":"","name":"바탕 화면"}, 1, 2, 50024);
-    }
-
-    async click18() {
-        osExpandCollapse(_appHwnd, {"automationId":"","className":"","name":"C:","controlTypeId":50024}, null, null, null);
+        await _clickBySid(_appSid, null, '//Text[@ClassName="TextBlock" and @Name="저장하지 않음"]');
     }
 }
 
@@ -796,31 +741,17 @@ async function run() {
         _warmupPowerShell();
 
     await ensureAppium();
-    _appSid = await _createSession("C:\\\\Program Files\\\\FileZilla FTP Client\\\\filezilla.exe");
+    _appSid = await _createSession("C:\\\\Windows\\\\System32\\\\notepad.exe");
     console.log(`[session] app session ${_appSid} ready`);
     await initAppHwnd();
-    normalizeWindowSimple({"left":382,"top":46,"width":1102,"height":947});
+    normalizeWindowSimple({"left":2080,"top":160,"width":827,"height":716});
 
-        const page = new FileZillaPageById();
-            osActivate("FileZilla");
-            await _step('1:click ', () => page.click1());
-            await _step('2:doubleClick C:', () => page.click2());
-            await _step('3:doubleClick hansung', () => page.click3());
-            await _step('4:doubleClick project', () => page.click4());
-            await _step('5:doubleClick ..', () => page.click5());
-            await _step('6:doubleClick project', () => page.click6());
-            await _step('7:doubleClick .kiro', () => page.click7());
-            await _step('8:doubleClick steering', () => page.click8());
-            await _step('9:scroll delta=2', () => page.scroll9());
-            await _step('10:doubleClick C:', () => page.click10());
-            await _step('11:doubleClick hansung', () => page.click11());
-            await _step('12:doubleClick project', () => page.click12());
-            await _step('13:doubleClick code-generator', () => page.click13());
-            await _step('14:doubleClick generated-wdio', () => page.click14());
-            await _step('15:doubleClick FileZilla', () => page.click15());
-            await _step('16:scroll delta=13', () => page.scroll16());
-            await _step('17:ancestor-sibling #1/2', () => page.click17());
-            await _step('18:expandCollapse C:', () => page.click18());
+        const page = new NotepadPageByClass();
+            osActivate("제목 없음 - 메모장");
+            await _step('1:click 텍스트 편집기', () => page.click1());
+            await _step('2:type hello\n\nny anem si handng\n\ni wnat to go home\n\nwhat ot se u', () => page.type2('hello\n\nny anem si handng\n\ni wnat to go home\n\nwhat ot se u'));
+            await _step('3:select item #10 탭 닫기', () => page.click3());
+            await _step('4:click 저장하지 않음', () => page.click4());
     } finally {
 
         if (_appSid) { try { await _appiumFetch(`/session/${_appSid}`, { method: 'DELETE' }, 5000); } catch {} }

@@ -27,6 +27,11 @@ const PRESETS = [
   { label: 'GitHub Desktop',  appName: 'GitHubDesktop',    exePath: 'C:\\Users\\user\\AppData\\Local\\GitHubDesktop\\GitHubDesktop.exe' },
   { label: 'Free Download Manager', appName: 'FreeDM',       exePath: 'C:\\Program Files\\Softdeluxe\\Free Download Manager\\fdm.exe' },
   { label: 'Claude Desktop',        appName: 'ClaudeDesktop', exePath: 'Claude_pzs8sxrjxfjjc!Claude' },
+  // 2026-08-13: 멀티윈도우(로그인/시작 창 소멸 → 새 메인 IDE 창 생성) 요구사항 검증용.
+  // WPF 셸, HWND 실측 완료(개인설정→시작 창→메인 IDE 총 2회 소멸/재생성),
+  // 진짜 모달(정보 창 뜨면 메인 창 IsWindowEnabled=False) 확인됨. 컨트롤 74개 중
+  // 이름/AutomationId 둘 다 없는 것 0개 — HeidiSQL(60개 중 31개 실패)보다 압도적으로 양호.
+  { label: 'Visual Studio',    appName: 'VisualStudio',     exePath: 'C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\IDE\\devenv.exe' },
   { label: 'Custom...',        appName: '',                 exePath: '' },
 ];
 

@@ -583,15 +583,21 @@ def main():
     # 구독자를 불러올 수 없음"). 셀렉터/로직 문제가 아니라 타이밍 문제이므로,
     # 실패로 단정하기 전에 짧게 재시도한다(osScopedInvoke.py의 4회 재시도와
     # 같은 근거).
+    # 2026-08-14 실측(Visual Studio 재현): 위 4회/0.3초 재시도로는 부족한
+    # provider가 있다 — 세션 생성 직후 1회가 아니라 STEP 2/3/4처럼 세션
+    # 생성 후 몇 초가 지난 호출들도 재시도를 다 소진하고 매번 같은
+    # ElementFromHandle COMError로 실패했다(WPF 기반 UIA provider로 추정).
+    # 시도 횟수/간격만 늘려 더 느린 provider에 여유를 준다 — 그 외 로직은
+    # 동일.
     root = None
-    for attempt in range(4):
+    for attempt in range(8):
         if attempt > 0:
-            time.sleep(0.3)
+            time.sleep(0.4)
         try:
             root = uia.ElementFromHandle(args.hwnd)
         except Exception as e:
             root = None
-            if attempt == 3:
+            if attempt == 7:
                 print(f"osExpandCollapse: ElementFromHandle failed: {e}", file=sys.stderr)
         if root:
             break

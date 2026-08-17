@@ -208,7 +208,12 @@ def read_controls(app):
 def write_controls(app, payload):
     os.makedirs(CONTROLS_DIR, exist_ok=True)
     path = os.path.join(CONTROLS_DIR, "%s.json" % app)
-    with open(path, "w", encoding="utf-8") as fh:
+    # Some UIA elements report a garbled Name containing lone UTF-16
+    # surrogates (raw-memory read artifact, same class as the "records
+    # fine, replays as a no-op" signature probe_app_automatability.py
+    # flags) -- utf-8 can't encode those. Replace them; the name is
+    # already unusable garbage, not a real selector value.
+    with open(path, "w", encoding="utf-8", errors="replace") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=2)
     return path
 
