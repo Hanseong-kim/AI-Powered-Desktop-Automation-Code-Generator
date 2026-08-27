@@ -1,0 +1,160 @@
+<html>
+<head>
+  <title>Medflow Settings</title>
+
+  <HTA:APPLICATION
+      ID="MedflowSettingsApp"
+      APPLICATIONNAME="Medflow Settings"
+      BORDER="thin"
+      BORDERSTYLE="normal"
+      CAPTION="yes"
+      CONTEXTMENU="yes"
+      MAXIMIZEBUTTON="no"
+      MINIMIZEBUTTON="yes"
+      SHOWINTASKBAR="yes"
+      SINGLEINSTANCE="no"
+      SYSMENU="yes"
+      WINDOWSTATE="normal"
+      SCROLL="no"
+  />
+
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=7" />
+
+  <!--
+    Non-modal by design (2026-08-27): HTA/JScript has no P/Invoke, so there
+    is no way to call the real EnableWindow(hMain, FALSE) that genuine Win32
+    modality requires. Faking it by disabling Main's own controls would test
+    IsEnabled on individual controls, not IsWindowEnabled on a window — not
+    what this tool needs to verify. This window stays independently
+    operable, same as MedflowDetail.hta, which doubles as evidence for the
+    "independent multi-window handling" requirement.
+  -->
+
+  <style type="text/css">
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #f0f0ff;
+      font-family: Tahoma, Arial, sans-serif;
+      font-size: 12px;
+      color: #111;
+    }
+    .head {
+      background: #e6e6e6;
+      border-bottom: 1px solid #9a9a9a;
+      padding: 8px 12px;
+      font-weight: bold;
+      font-size: 13px;
+    }
+    .body {
+      padding: 16px 20px;
+    }
+    fieldset {
+      border: 1px solid #9a9a9a;
+      background: #ffffff;
+      padding: 10px 14px 12px 14px;
+      margin-bottom: 16px;
+    }
+    legend {
+      font-weight: bold;
+      font-size: 12px;
+      padding: 0 4px;
+    }
+    .radioRow, .checkRow {
+      padding: 4px 0;
+    }
+    .radioRow label, .checkRow label {
+      margin-left: 4px;
+    }
+    .btnRow {
+      text-align: right;
+      margin-top: 6px;
+    }
+    .okBtnStyle, .cancelBtnStyle {
+      font-family: Tahoma, Arial, sans-serif;
+      font-size: 12px;
+      font-weight: bold;
+      background: #ececec;
+      border: 2px solid #9a9a9a;
+      border-top-color: #ffffff;
+      border-left-color: #ffffff;
+      padding: 6px 14px;
+      cursor: pointer;
+      margin-left: 8px;
+    }
+  </style>
+
+  <script language="JScript">
+    function $(id){ return document.getElementById(id); }
+
+    function addEvent(el, evt, fn){
+      if (!el) return;
+      if (el.attachEvent) el.attachEvent('on' + evt, fn);
+      else if (el.addEventListener) el.addEventListener(evt, fn, false);
+      else el['on' + evt] = fn;
+    }
+
+    // Choices are NOT persisted anywhere (no file/registry write) — every
+    // launch of this window starts from the same defaults, which keeps
+    // recorded/replayed selectors deterministic.
+    function doOk(){
+      window.close();
+    }
+    function doCancel(){
+      window.close();
+    }
+
+    function init(){
+      addEvent($("okBtn"), "click", doOk);
+      addEvent($("cancelBtn"), "click", doCancel);
+    }
+    addEvent(window, "load", init);
+  </script>
+</head>
+
+<body>
+  <div class="head">Medflow Settings — Preferences</div>
+
+  <div class="body">
+    <fieldset>
+      <legend>Theme</legend>
+      <div class="radioRow">
+        <input type="radio" id="themeLight" name="themeGroup" value="light" checked="checked" />
+        <label for="themeLight">Light</label>
+      </div>
+      <div class="radioRow">
+        <input type="radio" id="themeDark" name="themeGroup" value="dark" />
+        <label for="themeDark">Dark</label>
+      </div>
+      <div class="radioRow">
+        <input type="radio" id="themeSystem" name="themeGroup" value="system" />
+        <label for="themeSystem">Match system</label>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Notifications &amp; Behavior</legend>
+      <div class="checkRow">
+        <input type="checkbox" id="notifyChk" />
+        <label for="notifyChk">Receive notifications</label>
+      </div>
+      <div class="checkRow">
+        <input type="checkbox" id="autosaveChk" checked="checked" />
+        <label for="autosaveChk">Auto-save encounter notes</label>
+      </div>
+      <div class="checkRow">
+        <input type="checkbox" id="minimizeChk" />
+        <label for="minimizeChk">Minimize on startup</label>
+      </div>
+    </fieldset>
+
+    <div class="btnRow">
+      <input type="button" id="cancelBtn" class="cancelBtnStyle" value="CANCEL" />
+      <input type="button" id="okBtn" class="okBtnStyle" value="OK" />
+    </div>
+  </div>
+</body>
+</html>

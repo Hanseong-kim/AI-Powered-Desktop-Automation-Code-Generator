@@ -1,0 +1,138 @@
+<html>
+<head>
+  <title>Medflow Patient Detail</title>
+
+  <HTA:APPLICATION
+      ID="MedflowDetailApp"
+      APPLICATIONNAME="Medflow Patient Detail"
+      BORDER="thin"
+      BORDERSTYLE="normal"
+      CAPTION="yes"
+      CONTEXTMENU="yes"
+      MAXIMIZEBUTTON="yes"
+      MINIMIZEBUTTON="yes"
+      SHOWINTASKBAR="yes"
+      SINGLEINSTANCE="no"
+      SYSMENU="yes"
+      WINDOWSTATE="normal"
+      SCROLL="no"
+  />
+
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=7" />
+  <script src="shared/data.js" language="JScript"></script>
+
+  <style type="text/css">
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      padding: 0;
+      overflow: auto;
+      background: #fafafa;
+      font-family: Tahoma, Arial, sans-serif;
+      font-size: 12px;
+      color: #111;
+    }
+    .head {
+      background: #e6e6e6;
+      border-bottom: 1px solid #9a9a9a;
+      padding: 8px 12px;
+      font-weight: bold;
+      font-size: 13px;
+    }
+    .body { padding: 14px 18px; }
+    .kvTable { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .kvTable td { padding: 3px 0; vertical-align: top; }
+    .kvKey { color: #555; width: 150px; }
+    .kvVal { font-weight: bold; }
+    .notFound { color: #8b1f3b; font-weight: bold; }
+    .closeRow { text-align: right; margin-top: 16px; }
+    .closeBtnStyle {
+      padding: 6px 18px;
+      font-size: 12px;
+      border: 2px solid #8b1f3b;
+      background: #ffffff;
+      cursor: pointer;
+      font-weight: bold;
+    }
+  </style>
+
+  <script language="JScript">
+    function parsePid(){
+      var s = document.location.search; // e.g. "?pid=P12"
+      var m = /[?&]pid=([^&]+)/.exec(s);
+      return m ? decodeURIComponent(m[1]) : "";
+    }
+
+    function renderDetail(){
+      var pid = parsePid();
+      var patient = findPatientById(pid);
+      var box = $("detailBody");
+      var title = $("headTitle");
+
+      if (!patient){
+        setText(title, "Medflow Patient Detail");
+        box.innerHTML = "<div class='notFound'>Patient not found (id=" + escapeHtml(pid) + ").</div>";
+        return;
+      }
+
+      setText(title, "Patient Detail — " + patient.name);
+
+      var html = "<table class='kvTable'>";
+      html += "<tr><td class='kvKey'>MRN</td><td class='kvVal'>" + escapeHtml(patient.mrn) + "</td></tr>";
+      html += "<tr><td class='kvKey'>DOB</td><td class='kvVal'>" + escapeHtml(formatDate(patient.dob)) + " (Age " + escapeHtml(patient.age) + ")</td></tr>";
+      html += "<tr><td class='kvKey'>Sex</td><td class='kvVal'>" + escapeHtml(patient.sex) + "</td></tr>";
+      html += "<tr><td class='kvKey'>Phone</td><td class='kvVal'>" + escapeHtml(patient.phone) + "</td></tr>";
+      html += "<tr><td class='kvKey'>Facility</td><td class='kvVal'>" + escapeHtml(patient.facility) + "</td></tr>";
+      html += "<tr><td class='kvKey'>Department</td><td class='kvVal'>" + escapeHtml(patient.department) + "</td></tr>";
+      html += "<tr><td class='kvKey'>Provider</td><td class='kvVal'>" + escapeHtml(patient.provider) + "</td></tr>";
+      html += "<tr><td class='kvKey'>Technician</td><td class='kvVal'>" + escapeHtml(patient.technician) + "</td></tr>";
+      html += "<tr><td class='kvKey'>Diagnosis</td><td class='kvVal'>" + escapeHtml(patient.diagnosis) + "</td></tr>";
+      html += "<tr><td class='kvKey'>Stage</td><td class='kvVal'>" + escapeHtml(patient.stage) + "</td></tr>";
+      if (patient.department == "Glaucoma"){
+        html += "<tr><td class='kvKey'>Laterality</td><td class='kvVal'>" + escapeHtml(patient.laterality) + "</td></tr>";
+        html += "<tr><td class='kvKey'>IOP (OD/OS)</td><td class='kvVal'>" + escapeHtml(patient.iopOD + "/" + patient.iopOS) + " mmHg</td></tr>";
+        html += "<tr><td class='kvKey'>Target IOP</td><td class='kvVal'>" + escapeHtml(patient.targetIOP) + " mmHg</td></tr>";
+        html += "<tr><td class='kvKey'>CCT (OD/OS)</td><td class='kvVal'>" + escapeHtml(patient.cctOD + "/" + patient.cctOS) + " µm</td></tr>";
+        html += "<tr><td class='kvKey'>Meds</td><td class='kvVal'>" + escapeHtml(patient.meds) + "</td></tr>";
+      }
+      html += "<tr><td class='kvKey'>Last Visit</td><td class='kvVal'>" + escapeHtml(formatDate(patient.lastVisit)) + "</td></tr>";
+      html += "<tr><td class='kvKey'>Next Appt</td><td class='kvVal'>" + escapeHtml(formatDate(patient.nextAppt)) + "</td></tr>";
+      html += "<tr><td class='kvKey'>RX Status</td><td class='kvVal'>" + escapeHtml(patient.rxStatus) + "</td></tr>";
+      html += "<tr><td class='kvKey'>Notes</td><td class='kvVal'>" + escapeHtml(patient.notes) + "</td></tr>";
+      html += "</table>";
+      box.innerHTML = html;
+    }
+
+    function escapeHtml(s){
+      s = String(s);
+      s = s.replace(/&/g, "&amp;");
+      s = s.replace(/</g, "&lt;");
+      s = s.replace(/>/g, "&gt;");
+      s = s.replace(/\"/g, "&quot;");
+      return s;
+    }
+
+    function closeWindow(){
+      window.close();
+    }
+
+    function init(){
+      initMedflowData();
+      renderDetail();
+      addEvent($("closeBtn"), "click", closeWindow);
+    }
+    addEvent(window, "load", init);
+  </script>
+</head>
+
+<body>
+  <div class="head" id="headTitle">Medflow Patient Detail</div>
+  <div class="body">
+    <div id="detailBody">Loading…</div>
+    <div class="closeRow">
+      <input type="button" id="closeBtn" class="closeBtnStyle" value="CLOSE" />
+    </div>
+  </div>
+</body>
+</html>
