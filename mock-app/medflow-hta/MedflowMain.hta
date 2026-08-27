@@ -1,0 +1,3402 @@
+<html>
+<head>
+  <title>Medflow Clinical System</title>
+
+  <!-- HTA configuration (Windows 2003 / mshta.exe) -->
+  <HTA:APPLICATION
+      ID="MedflowApp"
+      APPLICATIONNAME="Medflow Clinical System"
+      BORDER="thin"
+      BORDERSTYLE="normal"
+      CAPTION="yes"
+      CONTEXTMENU="yes"
+      MAXIMIZEBUTTON="yes"
+      MINIMIZEBUTTON="yes"
+      SHOWINTASKBAR="yes"
+      SINGLEINSTANCE="yes"
+      SYSMENU="yes"
+      WINDOWSTATE="normal"
+      SCROLL="no"
+  />
+
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <!-- Force old-IE modes (helps on some locked-down machines) -->
+  <meta http-equiv="X-UA-Compatible" content="IE=7" />
+
+  <style type="text/css">
+    /* ===== Windows 2003 / IE6-friendly styling (no CSS grid/flex/variables) ===== */
+    html, body {
+      height: 100%;
+    }
+    body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #bfbfbf;
+      font-family: Tahoma, Arial, sans-serif;
+      font-size: 12px;
+      color: #111;
+    }
+    .app {
+      width: 100%;
+      height: 100%;
+      table-layout: fixed; /* keep right panel from expanding; enable horizontal scroll inside list */ 
+    }
+
+    /* Title bar (internal) */
+    .titlebar {
+      height: 28px;
+      background: #e6e6e6;
+      border-bottom: 1px solid #9a9a9a;
+      padding: 4px 10px;
+      font-weight: bold;
+      font-size: 13px;
+      line-height: 20px;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+    .titlebar span.meta {
+      font-weight: normal;
+      color: #444;
+      margin-left: 14px;
+    }
+
+    /* Menu bar */
+    .menubar {
+      height: 26px;
+      background: #f3f3f3;
+      border-bottom: 1px solid #9a9a9a;
+      padding: 2px 4px;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+    .menuBtn {
+      font-family: Tahoma, Arial, sans-serif;
+      font-size: 12px;
+      border: 1px solid #f3f3f3;
+      background: #f3f3f3;
+      padding: 2px 6px;
+      margin-right: 2px;
+      cursor: pointer;
+    }
+    .menuBtnHover {
+      border: 1px solid #cfcfcf;
+      background: #ffffff;
+    }
+    .menuBtnActive {
+      border: 1px solid #7aa7d9;
+      background: #eaf2ff;
+      font-weight: bold;
+    }
+
+    /* Main layout */
+    .contentTable {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .leftCell {
+      background: #c9c9ff;
+      vertical-align: top;
+      border-right: 2px solid #9a9a9a;
+    }
+    .rightCell {
+      width: 360px;
+      background: #e8e8ff;
+      vertical-align: top;
+    
+      overflow: hidden;
+    }
+
+    /* Left header (logo + selectors) */
+    .leftHeader {
+      padding: 10px 12px 8px 12px;
+    }
+    .brandBox {
+      border: 1px solid #9a9a9a;
+      background: #d9d9ff;
+      padding: 6px 8px;
+      width: 310px;
+    }
+    .brandName {
+      font-size: 28px;
+      font-weight: bold;
+      line-height: 28px;
+    }
+    .brandSub {
+      color: #555;
+      font-size: 12px;
+      margin-top: 2px;
+    }
+    .selectorsBox {
+      margin-top: 8px;
+      text-align: right;
+    }
+    .selectorsBox label {
+      font-weight: bold;
+      margin-right: 6px;
+    }
+    .selectorsBox select {
+      font-family: Tahoma, Arial, sans-serif;
+      font-size: 12px;
+      border: 1px solid #9a9a9a;
+      background: #ffffff;
+      padding: 2px;
+      width: 120px;
+      margin-bottom: 6px;
+    }
+
+    /* Left buttons area */
+    .leftButtonsWrap {
+      margin: 0 12px 10px 12px;
+      border: 0px;
+      overflow: auto;
+      background: #c9c9ff;
+    }
+    .btnGrid {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 18px 16px;
+    }
+    .mfBtn {
+      width: 100%;
+      height: 54px;
+      font-family: Tahoma, Arial, sans-serif;
+      font-size: 13px;
+      font-weight: bold;
+      letter-spacing: 0.4px;
+      background: #ececec;
+      border: 2px solid #9a9a9a;
+      border-top-color: #ffffff;
+      border-left-color: #ffffff;
+      cursor: pointer;
+    }
+    .mfBtn:hover {
+      background: #f5f5f5;
+    }
+    .mfBtnActive {
+      outline: 2px solid #7aa7d9;
+    }
+
+    /* Footer */
+    .footer {
+      height: 56px;
+      background: #f0f0ff;
+      border-top: 2px solid #9a9a9a;
+      padding: 6px 10px;
+    }
+    .footerTable {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .footerTable td {
+      vertical-align: middle;
+      padding-right: 8px;
+      white-space: nowrap;
+    }
+    .footerInput {
+      font-family: Tahoma, Arial, sans-serif;
+      font-size: 12px;
+      border: 1px solid #9a9a9a;
+      padding: 3px 4px;
+      width: 210px;
+    }
+    .footerBtn {
+      font-family: Tahoma, Arial, sans-serif;
+      font-size: 12px;
+      font-weight: bold;
+      background: #ececec;
+      border: 2px solid #9a9a9a;
+      border-top-color: #ffffff;
+      border-left-color: #ffffff;
+      padding: 6px 10px;
+      cursor: pointer;
+    }
+
+    /* Right panel */
+    .rxBox {
+      background: #1d6fb8;
+      color: #e9f4ff;
+      font-family: "Courier New", monospace;
+      font-size: 12px;
+      padding: 8px 10px;
+    }
+    .rxRow {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .rxRow td {
+      padding: 1px 0;
+    }
+    .rxNum {
+      text-align: right;
+      font-weight: bold;
+      width: 60px;
+    }
+
+    .clockBox {
+      background: #d6d6ff;
+      border-bottom: 2px solid #9a9a9a;
+      text-align: center;
+      padding: 8px 8px 10px 8px;
+    }
+    .clockDate {
+      font-family: "Courier New", monospace;
+      font-size: 16px;
+    }
+    .clockTime {
+      font-size: 40px;
+      font-weight: bold;
+      margin-top: 2px;
+      line-height: 44px;
+    }
+
+    .workHeader {
+      padding: 8px 8px 6px 8px;
+    }
+    .workTitle {
+      font-weight: bold;
+      font-size: 13px;
+    }
+    .workSub {
+      font-size: 11px;
+      color: #555;
+      margin-top: 2px;
+    }
+    .filterRow {
+      margin-top: 6px;
+      text-align: right;
+      white-space: nowrap;
+    }
+    .filterRow input {
+      font-family: Tahoma, Arial, sans-serif;
+      font-size: 12px;
+      border: 1px solid #9a9a9a;
+      padding: 2px 4px;
+      width: 150px;
+    }
+
+    .listHeaderWrap {
+      margin: 0 8px 0 8px;
+      border: 1px solid #9a9a9a;
+      border-bottom: 0px;
+      background: #f2f2f2;
+      overflow: hidden;
+    
+      zoom: 1;
+          width: 344px;
+}
+    .listBodyWrap {
+      margin: 0 8px 8px 8px;
+      border: 1px solid #9a9a9a;
+      background: #ffffff;
+      overflow: scroll;
+    
+      zoom: 1;
+          width: 344px;
+}
+    .listTable {
+      border-collapse: collapse;
+      table-layout: fixed;
+      font-size: 12px;
+    }
+    .listTh {
+      border-bottom: 1px solid #cfcfcf;
+      padding: 5px 6px;
+      text-align: left;
+      white-space: nowrap;
+      background: #f2f2f2;
+      cursor: default;
+    }
+    .listTd {
+      border-bottom: 1px solid #eeeeee;
+      padding: 5px 6px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .rowHover {
+      background: #f7fbff;
+    }
+    .rowSelected {
+      background: #dcecff;
+    }
+    .clickLink {
+      color: #0066cc;
+      text-decoration: underline;
+      cursor: pointer;
+    }
+
+    .detailsBox {
+      margin: 0 8px 10px 8px;
+      border: 1px solid #9a9a9a;
+      background: #fafafa;
+      padding: 8px;
+      overflow: auto;
+          width: 344px;
+}
+    .detailsHdr {
+      font-weight: bold;
+      font-size: 13px;
+      margin-bottom: 6px;
+    }
+    .pill {
+      float: right;
+      border: 1px solid #cfcfcf;
+      background: #ffffff;
+      padding: 2px 8px;
+      font-size: 11px;
+      color: #333;
+    }
+    .kvTable {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    .kvTable td {
+      padding: 2px 0;
+      vertical-align: top;
+    }
+    .kvKey { color: #555; width: 120px; }
+    .kvVal { font-weight: bold; }
+
+    /* Popup content (Visit Summary Notes / Encounter Details / Print Selected) */
+    .popupWrap h2 {
+      margin: 0 0 10px 0;
+      font-size: 16px;
+    }
+    .popupWrap table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 12px;
+    }
+    .popupWrap td, .popupWrap th {
+      border: 1px solid #c0c0c0;
+      padding: 4px 6px;
+      text-align: left;
+      vertical-align: top;
+    }
+    .popupWrap .muted { color: #666666; }
+
+
+    /* Modal overlay (IE6-friendly) */
+    .overlay {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      background: #000000;
+      filter: alpha(opacity=35);
+      opacity: 0.35;
+      display: none;
+      z-index: 1000;
+    }
+    .modal {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 820px;
+      height: 520px;
+      margin-left: -410px;
+      margin-top: -260px;
+      border: 2px solid #6f6f6f;
+      background: #ffffff;
+      display: none;
+      z-index: 1001;
+    }
+    .modalHead {
+      background: #e6e6e6;
+      border-bottom: 1px solid #9a9a9a;
+      padding: 8px 10px;
+      font-weight: bold;
+      font-size: 13px;
+    }
+    .modalBody {
+      padding: 10px;
+      height: 430px;
+      overflow: auto;
+      font-size: 12px;
+    }
+    .modalFoot {
+      background: #f3f3f3;
+      border-top: 1px solid #9a9a9a;
+      padding: 8px 10px;
+      text-align: right;
+    }
+    .modalBtn {
+      font-family: Tahoma, Arial, sans-serif;
+      font-size: 12px;
+      font-weight: bold;
+      background: #ececec;
+      border: 2px solid #9a9a9a;
+      border-top-color: #ffffff;
+      border-left-color: #ffffff;
+      padding: 6px 10px;
+      cursor: pointer;
+      margin-left: 8px;
+    }
+
+  
+    /* Encounters window (Patient's Registration Details) */
+    #encOverlay { z-index: 1100; }
+    #encModal { z-index: 1101; }
+
+    .encModal{
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 980px;
+      height: 580px;
+      margin-left: -490px;
+      margin-top: -290px;
+      border: 2px solid #6f6f6f;
+      background: #ffffff;
+      display: none;
+    }
+    .encHead{
+      background: #e6e6e6;
+      border-bottom: 1px solid #9a9a9a;
+      padding: 6px 10px;
+      font-weight: bold;
+      font-size: 13px;
+    }
+    .encTabs{
+      background: #efefef;
+      border-bottom: 1px solid #c0c0c0;
+      padding: 4px 6px;
+      height: 28px;
+      overflow: hidden;
+      white-space: nowrap;
+    }
+    .tabBtn{
+      font-size: 11px;
+      padding: 3px 8px;
+      border: 1px solid #c0c0c0;
+      background: #f6f6f6;
+      margin-right: 3px;
+      cursor: pointer;
+    }
+    .tabBtnActive{
+      background: #ffffff;
+      border-bottom: 1px solid #ffffff;
+      font-weight: bold;
+    }
+    .encBody{
+      padding: 10px;
+      height: 508px; /* 580 - (head+tabs+padding) approx */
+      overflow: auto;
+    }
+    .encPane{ display: none; }
+    .encPaneActive{ display: block; }
+
+    .encTopLink{
+      color: #0066cc;
+      text-decoration: underline;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .encSectionTitle{
+      margin: 10px 0 6px 0;
+      font-size: 12px;
+      font-weight: bold;
+    }
+    .encAddRow{
+      margin: 4px 0 10px 0;
+      font-size: 12px;
+    }
+    .encPlus{
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      text-align: center;
+      line-height: 14px;
+      border: 1px solid #2b8f2b;
+      background: #4bd14b;
+      color: #ffffff;
+      font-weight: bold;
+      margin-right: 6px;
+      font-size: 12px;
+    }
+    .encAddLink{
+      color: #cc0000;
+      text-decoration: underline;
+      cursor: pointer;
+      font-weight: bold;
+    }
+
+    .encTableWrap{
+      border: 1px solid #c0c0c0;
+      background: #ffffff;
+      height: 300px;
+      overflow: auto;
+    }
+    .encTable{
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 12px;
+      table-layout: fixed;
+    }
+    .encTable th, .encTable td{
+      border: 1px solid #e0e0e0;
+      padding: 4px 6px;
+      vertical-align: middle;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .encTable th{
+      background: #f6f6f6;
+      font-weight: bold;
+      text-align: left;
+    }
+    .encEditBtn{
+      width: 24px;
+      height: 20px;
+      font-size: 11px;
+      padding: 0;
+    }
+    .encRowHover{ background: #f1f6ff; }
+    .encRowSelected{ background: #dbe9ff; }
+
+    .encButtonRow{
+      text-align: center;
+      margin: 14px 0 0 0;
+    }
+    .encButton{
+      padding: 4px 12px;
+      font-size: 12px;
+      border: 1px solid #9a9a9a;
+      background: #efefef;
+      cursor: pointer;
+      margin: 0 6px;
+    }
+    .encCloseRow{
+      text-align: right;
+      margin-top: 14px;
+    }
+    .encCloseBtn{
+      padding: 6px 18px;
+      font-size: 12px;
+      border: 2px solid #8b1f3b;
+      background: #ffffff;
+      cursor: pointer;
+      font-weight: bold;
+    }
+
+</style>
+
+  <script language="JScript">
+  // ============================
+  // Windows 2003 / IE6-safe JS
+  // ============================
+
+  // --- Helpers (IE6 safe) ---
+  function $(id){ return document.getElementById(id); }
+
+  function addEvent(el, evt, fn){
+    if (!el) return;
+    if (el.attachEvent) el.attachEvent('on' + evt, fn);
+    else if (el.addEventListener) el.addEventListener(evt, fn, false);
+    else el['on' + evt] = fn;
+  }
+
+  function setText(el, txt){
+    if (!el) return;
+    if (typeof el.innerText !== 'undefined') el.innerText = txt;
+    else el.textContent = txt;
+  }
+
+  function trim(s){
+    return String(s).replace(/^\s+|\s+$/g,'');
+  }
+
+  function toLower(s){
+    return String(s).toLowerCase();
+  }
+
+  // --- Seeded RNG (LCG) ---
+  var __seed = 1;
+  function initSeed(){
+    var d = new Date();
+    // (yyyy*10000 + mm*100 + dd) style seed without toISOString
+    __seed = (d.getFullYear() * 10000) + ((d.getMonth()+1) * 100) + d.getDate();
+    if (__seed < 1) __seed = 1;
+  }
+  function rand(){
+    __seed = (__seed * 1103515245 + 12345) & 0x7fffffff;
+    return __seed / 0x7fffffff;
+  }
+  function r(min, max){
+    return Math.floor(rand() * (max - min + 1)) + min;
+  }
+  function pick(arr){
+    return arr[Math.floor(rand() * arr.length)];
+  }
+
+  function pad2(n){
+    n = String(n);
+    return (n.length < 2) ? ("0" + n) : n;
+  }
+  function formatDate(d){
+    return pad2(d.getDate()) + "/" + pad2(d.getMonth()+1) + "/" + d.getFullYear();
+  }
+  function formatTime(d){
+    var h = d.getHours();
+    var m = pad2(d.getMinutes());
+    var s = pad2(d.getSeconds());
+    var ampm = (h >= 12) ? "PM" : "AM";
+    h = h % 12;
+    if (h === 0) h = 12;
+    return h + ":" + m + ":" + s + " " + ampm;
+  }
+  function formatTimeShort(d){
+    var h = d.getHours();
+    var m = pad2(d.getMinutes());
+    var ampm = (h >= 12) ? "PM" : "AM";
+    h = h % 12;
+    if (h === 0) h = 12;
+    return h + ":" + m + " " + ampm;
+  }
+  function dateAddDays(base, days){
+    var d = new Date(base.getTime());
+    d.setDate(d.getDate() + days);
+    return d;
+  }
+
+  // --- App Data ---
+  var FIRST = ["James","Mary","Robert","Patricia","John","Jennifer","Michael","Linda","David","Elizabeth","William","Barbara","Richard","Susan","Joseph","Jessica","Thomas","Sarah","Charles","Karen","Daniel","Nancy","Matthew","Lisa","Anthony","Betty","Mark","Sandra","Paul","Ashley","Steven","Kimberly","Andrew","Donna","Kenneth","Emily","George","Michelle","Joshua","Carol","Kevin","Amanda","Brian","Melissa"];
+  var LAST  = ["Smith","Johnson","Williams","Brown","Jones","Garcia","Miller","Davis","Rodriguez","Martinez","Hernandez","Lopez","Gonzalez","Wilson","Anderson","Thomas","Taylor","Moore","Jackson","Martin","Lee","Perez","Thompson","White","Harris","Sanchez","Clark","Ramirez","Lewis","Robinson","Walker","Young","Allen","King","Wright","Scott","Torres","Nguyen","Hill","Flores","Green","Adams","Nelson","Baker","Hall","Rivera","Campbell","Mitchell","Carter","Roberts"];
+  var PROVIDERS = ["William H Bartlett MD","S. Patel MD","L. Chen MD","A. Rodriguez MD","K. Nguyen MD"];
+  var TECHS = ["CitrusBits","E. Johnson","M. Flores","T. Nguyen","R. Patel"];
+  var FACILITIES = ["TC1","TC2","East"];
+
+  var GLAUCOMA_DX = ["Primary Open Angle Glaucoma (POAG)","Normal Tension Glaucoma (NTG)","Pseudoexfoliative Glaucoma (PXF)","Primary Angle Closure Glaucoma (PACG)","Ocular Hypertension (OHTN)"];
+  var GLAUCOMA_STAGE = ["Mild","Moderate","Severe"];
+  var LATERALITY = ["OD","OS","OU"];
+  var RETINA_DX = ["Diabetic Retinopathy","Wet AMD","Dry AMD","Retinal Tear","Vitreous Hemorrhage","Macular Edema"];
+  var PEDS_REASON = ["Amblyopia check","Strabismus follow-up","Myopia progression","School vision exam","Red reflex check"];
+  var OPTICAL_TASK = ["Frame selection","Lens order status","Glasses pickup","Rx verification","Warranty adjustment"];
+  var CL_TASK = ["Soft lens fit","Toric lens eval","RGP follow-up","Dispense visit","Dry eye CL check"];
+  var REFR_REASON = ["LASIK evaluation","PRK follow-up","Refractive consult","Topo review","Dry eye pre-op"];
+  var MEDS = ["Latanoprost qHS","Bimatoprost qHS","Timolol BID","Brimonidine TID","Dorzolamide TID","Dorzolamide/Timolol BID","Netarsudil qHS","Pilocarpine QID"];
+
+  function randomPhone(){
+    return "(" + r(200,989) + ") " + r(200,989) + "-" + r(1000,9999);
+  }
+  function randomMRN(){
+    return String(r(10000000, 99999999));
+  }
+  function randomDOB(age){
+    var today = new Date();
+    var year = today.getFullYear() - age;
+    var month = r(0,11);
+    var day = r(1,28);
+    return new Date(year, month, day);
+  }
+  function chooseRxStatus(){
+    var x = rand();
+    if (x < 0.10) return "pending";
+    if (x < 0.18) return "refill";
+    if (x < 0.23) return "change";
+    if (x < 0.33) return "needsigning";
+    return "none";
+  }
+
+  var DATA = { patients: [], encounters: {} };
+
+  function generatePatients(){
+    var patients = [];
+    var counter = 0;
+
+    // Glaucoma-heavy registry
+    var glaucomaCount = 22;
+    var i;
+    for (i=0;i<glaucomaCount;i++){
+      counter++;
+      var age = r(45, 88);
+      var sex = pick(["F","M"]);
+      var first = pick(FIRST);
+      var last = pick(LAST);
+      var name = last + ", " + first;
+      var facility = pick(FACILITIES);
+      var dept = "Glaucoma";
+      var dx = pick(GLAUCOMA_DX);
+      var stage = pick(GLAUCOMA_STAGE);
+      var laterality = pick(LATERALITY);
+
+      var baseIOP = (stage=="Mild") ? r(12,20) : (stage=="Moderate") ? r(14,24) : r(16,30);
+      var iopOD = baseIOP + r(-3,3);
+      var iopOS = baseIOP + r(-3,3);
+      if (iopOD < 8) iopOD = 8; if (iopOD > 35) iopOD = 35;
+      if (iopOS < 8) iopOS = 8; if (iopOS > 35) iopOS = 35;
+
+      var target = (stage=="Mild") ? r(14,18) : (stage=="Moderate") ? r(12,16) : r(10,14);
+
+      var cctOD = r(480, 620);
+      var cctOS = r(480, 620);
+
+      var cdBase = (stage=="Mild") ? (rand()*0.2+0.4) : (stage=="Moderate") ? (rand()*0.2+0.6) : (rand()*0.2+0.75);
+      var cdOD = Math.round(cdBase*100)/100;
+      var cdOS = Math.round(((stage=="Mild") ? (rand()*0.2+0.4) : (stage=="Moderate") ? (rand()*0.2+0.6) : (rand()*0.2+0.75))*100)/100;
+
+      var vfOD = (stage=="Mild") ? -(rand()*4+1) : (stage=="Moderate") ? -(rand()*6+6) : -(rand()*10+12);
+      var vfOS = (stage=="Mild") ? -(rand()*4+1) : (stage=="Moderate") ? -(rand()*6+6) : -(rand()*10+12);
+      vfOD = Math.round(vfOD*10)/10; vfOS = Math.round(vfOS*10)/10;
+
+      var rnflOD = (stage=="Mild") ? r(80,105) : (stage=="Moderate") ? r(65,90) : r(45,75);
+      var rnflOS = (stage=="Mild") ? r(80,105) : (stage=="Moderate") ? r(65,90) : r(45,75);
+
+      var medsCount = (stage=="Mild") ? r(0,2) : (stage=="Moderate") ? r(1,3) : r(2,4);
+      var medsArr = [];
+      var j;
+      for (j=0;j<medsCount;j++){
+        medsArr[medsArr.length] = pick(MEDS);
+      }
+      // de-duplicate
+      var medsUnique = [];
+      for (j=0;j<medsArr.length;j++){
+        var found = false;
+        var k;
+        for (k=0;k<medsUnique.length;k++){
+          if (medsUnique[k] == medsArr[j]) { found = true; break; }
+        }
+        if (!found) medsUnique[medsUnique.length] = medsArr[j];
+      }
+      var meds = (medsUnique.length) ? medsUnique.join("; ") : "None on file";
+
+      var lastVisit = dateAddDays(new Date(), -r(7,120));
+      var nextAppt = dateAddDays(new Date(), r(7,140));
+
+      patients[patients.length] = {
+        id: "P" + counter,
+        mrn: randomMRN(),
+        name: name,
+        first: first,
+        last: last,
+        sex: sex,
+        age: age,
+        dob: randomDOB(age),
+        phone: randomPhone(),
+        facility: facility,
+        department: dept,
+        provider: pick(PROVIDERS),
+        technician: pick(TECHS),
+        diagnosis: dx,
+        stage: stage,
+        laterality: laterality,
+        iopOD: iopOD,
+        iopOS: iopOS,
+        targetIOP: target,
+        cctOD: cctOD,
+        cctOS: cctOS,
+        cdOD: cdOD,
+        cdOS: cdOS,
+        vfMD_OD: vfOD,
+        vfMD_OS: vfOS,
+        rnflOD: rnflOD,
+        rnflOS: rnflOS,
+        meds: meds,
+        lastVisit: lastVisit,
+        nextAppt: nextAppt,
+        rxStatus: chooseRxStatus(),
+        notes: "Continue current regimen; recheck IOP at next visit."
+      };
+    }
+
+    // Retina
+    var retinaCount = 10;
+    for (i=0;i<retinaCount;i++){
+      counter++;
+      var age2 = r(35,90);
+      var sex2 = pick(["F","M"]);
+      var first2 = pick(FIRST);
+      var last2 = pick(LAST);
+      var facility2 = pick(FACILITIES);
+      var dx2 = pick(RETINA_DX);
+      var name2 = last2 + ", " + first2;
+
+      patients[patients.length] = {
+        id: "P" + counter,
+        mrn: randomMRN(),
+        name: name2,
+        first: first2,
+        last: last2,
+        sex: sex2,
+        age: age2,
+        dob: randomDOB(age2),
+        phone: randomPhone(),
+        facility: facility2,
+        department: "Retina",
+        provider: pick(PROVIDERS),
+        technician: pick(TECHS),
+        diagnosis: dx2,
+        stage: pick(["Stable","Active","New"]),
+        laterality: pick(LATERALITY),
+        iopOD: r(10,22),
+        iopOS: r(10,22),
+        targetIOP: 0,
+        cctOD: r(500,600),
+        cctOS: r(500,600),
+        cdOD: "",
+        cdOS: "",
+        vfMD_OD: "",
+        vfMD_OS: "",
+        rnflOD: "",
+        rnflOS: "",
+        meds: pick(["AREDS2","None on file","Prednisolone taper","Artificial tears"]),
+        lastVisit: dateAddDays(new Date(), -r(5,90)),
+        nextAppt: dateAddDays(new Date(), r(7,90)),
+        rxStatus: chooseRxStatus(),
+        notes: "OCT macula performed; review with provider."
+      };
+    }
+
+    // Pediatrics
+    var pedsCount = 10;
+    for (i=0;i<pedsCount;i++){
+      counter++;
+      var age3 = r(3,13);
+      var sex3 = pick(["F","M"]);
+      var first3 = pick(["Olivia","Emma","Ava","Sophia","Mia","Noah","Liam","Ethan","Lucas","Mason","Ella","Grace","Zoe","Leo","Jack"]);
+      var last3 = pick(LAST);
+      var facility3 = pick(FACILITIES);
+      var name3 = last3 + ", " + first3;
+
+      patients[patients.length] = {
+        id: "P" + counter,
+        mrn: randomMRN(),
+        name: name3,
+        first: first3,
+        last: last3,
+        sex: sex3,
+        age: age3,
+        dob: randomDOB(age3),
+        phone: randomPhone(),
+        facility: facility3,
+        department: "Pediatrics",
+        provider: pick(PROVIDERS),
+        technician: pick(TECHS),
+        diagnosis: pick(PEDS_REASON),
+        stage: pick(["Routine","Follow-up","New"]),
+        laterality: "",
+        iopOD: r(8,18),
+        iopOS: r(8,18),
+        targetIOP: 0,
+        cctOD: "",
+        cctOS: "",
+        cdOD: "",
+        cdOS: "",
+        vfMD_OD: "",
+        vfMD_OS: "",
+        rnflOD: "",
+        rnflOS: "",
+        meds: "None on file",
+        lastVisit: dateAddDays(new Date(), -r(10,220)),
+        nextAppt: dateAddDays(new Date(), r(7,160)),
+        rxStatus: "none",
+        notes: "Peds screening protocols; ensure cycloplegic refraction if indicated."
+      };
+    }
+
+    // Optical
+    var opticalCount = 8;
+    for (i=0;i<opticalCount;i++){
+      counter++;
+      var age4 = r(16,85);
+      var sex4 = pick(["F","M"]);
+      var first4 = pick(FIRST);
+      var last4 = pick(LAST);
+      var facility4 = pick(FACILITIES);
+      var name4 = last4 + ", " + first4;
+
+      patients[patients.length] = {
+        id: "P" + counter,
+        mrn: randomMRN(),
+        name: name4,
+        first: first4,
+        last: last4,
+        sex: sex4,
+        age: age4,
+        dob: randomDOB(age4),
+        phone: randomPhone(),
+        facility: facility4,
+        department: "Optical",
+        provider: pick(PROVIDERS),
+        technician: pick(TECHS),
+        diagnosis: pick(OPTICAL_TASK),
+        stage: pick(["Pending","In progress","Ready","Completed"]),
+        laterality: "",
+        iopOD: "",
+        iopOS: "",
+        targetIOP: 0,
+        cctOD: "",
+        cctOS: "",
+        cdOD: "",
+        cdOS: "",
+        vfMD_OD: "",
+        vfMD_OS: "",
+        rnflOD: "",
+        rnflOS: "",
+        meds: "—",
+        lastVisit: dateAddDays(new Date(), -r(1,40)),
+        nextAppt: dateAddDays(new Date(), r(1,21)),
+        rxStatus: "none",
+        notes: "Optical order workflow item."
+      };
+    }
+
+    // Contact Lenses
+    var clCount = 8;
+    for (i=0;i<clCount;i++){
+      counter++;
+      var age5 = r(14,65);
+      var sex5 = pick(["F","M"]);
+      var first5 = pick(FIRST);
+      var last5 = pick(LAST);
+      var facility5 = pick(FACILITIES);
+      var name5 = last5 + ", " + first5;
+
+      patients[patients.length] = {
+        id: "P" + counter,
+        mrn: randomMRN(),
+        name: name5,
+        first: first5,
+        last: last5,
+        sex: sex5,
+        age: age5,
+        dob: randomDOB(age5),
+        phone: randomPhone(),
+        facility: facility5,
+        department: "Contact Lenses",
+        provider: pick(PROVIDERS),
+        technician: pick(TECHS),
+        diagnosis: pick(CL_TASK),
+        stage: pick(["New fit","Follow-up","Dispense"]),
+        laterality: "",
+        iopOD: r(10,22),
+        iopOS: r(10,22),
+        targetIOP: 0,
+        cctOD: "",
+        cctOS: "",
+        cdOD: "",
+        cdOS: "",
+        vfMD_OD: "",
+        vfMD_OS: "",
+        rnflOD: "",
+        rnflOS: "",
+        meds: pick(["Artificial tears","None on file","Pataday PRN"]),
+        lastVisit: dateAddDays(new Date(), -r(5,120)),
+        nextAppt: dateAddDays(new Date(), r(7,70)),
+        rxStatus: chooseRxStatus(),
+        notes: "CL workflow item; confirm brand/BC/DIA."
+      };
+    }
+
+    // Refractive
+    var refrCount = 6;
+    for (i=0;i<refrCount;i++){
+      counter++;
+      var age6 = r(20,55);
+      var sex6 = pick(["F","M"]);
+      var first6 = pick(FIRST);
+      var last6 = pick(LAST);
+      var facility6 = pick(FACILITIES);
+      var name6 = last6 + ", " + first6;
+
+      patients[patients.length] = {
+        id: "P" + counter,
+        mrn: randomMRN(),
+        name: name6,
+        first: first6,
+        last: last6,
+        sex: sex6,
+        age: age6,
+        dob: randomDOB(age6),
+        phone: randomPhone(),
+        facility: facility6,
+        department: "Refractive",
+        provider: pick(PROVIDERS),
+        technician: pick(TECHS),
+        diagnosis: pick(REFR_REASON),
+        stage: pick(["Consult","Pre-op","Post-op"]),
+        laterality: "",
+        iopOD: r(10,20),
+        iopOS: r(10,20),
+        targetIOP: 0,
+        cctOD: r(490,610),
+        cctOS: r(490,610),
+        cdOD: "",
+        cdOS: "",
+        vfMD_OD: "",
+        vfMD_OS: "",
+        rnflOD: "",
+        rnflOS: "",
+        meds: pick(["Artificial tears","Steroid taper","None on file"]),
+        lastVisit: dateAddDays(new Date(), -r(5,90)),
+        nextAppt: dateAddDays(new Date(), r(7,90)),
+        rxStatus: chooseRxStatus(),
+        notes: "Refractive workflow item."
+      };
+    }
+
+    // Workup patients are drawn from other departments (Workup is treated as a workflow list)
+    return patients;
+  }
+
+  
+  // Generate encounters for each patient (Patient Data -> Encounters column)
+  function generateEncounters(patients){
+    var encounters = {};
+    var descriptions = ["Follow-Up", "Visit", "Initial Consultation", "Post-Op", "Emergency"];
+    var facilities = ["My DemoPractice", "Bethesda", "TC1", "TC2", "East"];
+
+    var i;
+    for (i=0;i<patients.length;i++){
+      var p = patients[i];
+      var numEnc = r(2, 8);
+      var list = [];
+      var baseId = 800 + r(0, 120);
+
+      var j;
+      for (j=0;j<numEnc;j++){
+        var daysAgo = r(1, 365);
+        var encDate = dateAddDays(new Date(), -daysAgo);
+        list[list.length] = {
+          id: baseId + j,
+          patientId: p.id,
+          providerName: pick(PROVIDERS),
+          facilityName: pick(facilities),
+          date: encDate,
+          description: pick(descriptions),
+          hasSummary: (rand() > 0.3) ? 1 : 0
+        };
+      }
+
+      // Sort by date descending (most recent first)
+      list.sort(function(a,b){ return b.date - a.date; });
+      encounters[p.id] = list;
+    }
+    return encounters;
+  }
+
+// --- State ---
+  var state = {
+    facility: "TC1",
+    department: "Glaucoma",
+    view: "glaucoma_followup",
+    quickFilter: "",
+    selectedRowId: "",
+    sortKey: "",
+    sortDir: "asc",
+    currentRows: null,
+    currentCols: null,
+    currentEncounterPatientId: "",
+    selectedEncounterId: "",
+    encTab: "encounters"
+  };
+
+  // --- Views definition (IE6-safe) ---
+  var VIEW_DEFS = null;
+
+  function buildScheduleRows(dept, count){
+    if (!count) count = 16;
+    var pool = [];
+    var i;
+    for (i=0;i<DATA.patients.length;i++){
+      var p = DATA.patients[i];
+      if (p.department == dept && p.facility == state.facility){
+        pool[pool.length] = p;
+      }
+    }
+    if (pool.length < 6){
+      // fallback to dept across all facilities
+      pool = [];
+      for (i=0;i<DATA.patients.length;i++){
+        var p2 = DATA.patients[i];
+        if (p2.department == dept){
+          pool[pool.length] = p2;
+        }
+      }
+    }
+    // Shuffle (simple)
+    var shuffled = pool.slice(0);
+    for (i=0;i<shuffled.length;i++){
+      var j = r(0, shuffled.length-1);
+      var tmp = shuffled[i]; shuffled[i] = shuffled[j]; shuffled[j] = tmp;
+    }
+    var chosen = [];
+    for (i=0;i<shuffled.length && chosen.length < count;i++){
+      chosen[chosen.length] = shuffled[i];
+    }
+
+    var start = new Date();
+    start.setHours(8,0,0,0);
+
+    var rows = [];
+    for (i=0;i<chosen.length;i++){
+      var p3 = chosen[i];
+      var appt = new Date(start.getTime() + i*15*60*1000);
+      var reason = "";
+      if (dept == "Glaucoma"){
+        reason = pick(["IOP check","VF / HVF","OCT RNFL","Medication follow-up","Post-SLT check"]);
+      } else if (dept == "Retina"){
+        reason = pick(["OCT Macula","Dilated exam","Injection follow-up","FA imaging","Urgent symptoms"]);
+      } else if (dept == "Pediatrics"){
+        reason = p3.diagnosis;
+      } else if (dept == "Contact Lenses"){
+        reason = p3.diagnosis;
+      } else if (dept == "Refractive"){
+        reason = p3.diagnosis;
+      } else if (dept == "Optical"){
+        reason = p3.diagnosis;
+      } else {
+        reason = "Follow-up";
+      }
+      var status = pick(["Arrived","Checked in","Waiting","In testing","Ready for doctor"]);
+      rows[rows.length] = {
+        id: "A-" + dept + "-" + p3.id,
+        patientId: p3.id,
+        name: (dept=="Pediatrics") ? (p3.name + " (age " + p3.age + ")") : p3.name,
+        time: formatTimeShort(appt),
+        reason: reason,
+        status: status
+      };
+    }
+    return rows;
+  }
+
+  function buildWorkupRows(){
+    var tasks = ["VA + Refraction","Tonometry","OCT setup","Visual field setup","Dilation","Drops education","Lensometry","History update"];
+    var pr = ["Routine","High","Urgent"];
+    var rows = [];
+    var base = filterPatientsByContext();
+    if (base.length < 1) base = DATA.patients;
+    var i;
+    for (i=0;i<base.length && rows.length < 18;i++){
+      var p = base[i];
+      rows[rows.length] = {
+        id: "W-" + p.id,
+        patientId: p.id,
+        patient: p.name,
+        task: pick(tasks),
+        priority: (i % 9 == 0) ? "Urgent" : pick(pr)
+      };
+    }
+    return rows;
+  }
+
+  function filterPatientsByContext(){
+    var out = [];
+    var i;
+    for (i=0;i<DATA.patients.length;i++){
+      var p = DATA.patients[i];
+      if (p.facility == state.facility && p.department == state.department){
+        out[out.length] = p;
+      }
+    }
+    return out;
+  }
+
+  function buildPatientRegistryRows(){
+    var list = filterPatientsByContext();
+    if (list.length < 1){
+      // fallback to department any facility
+      list = [];
+      var i;
+      for (i=0;i<DATA.patients.length;i++){
+        var p = DATA.patients[i];
+        if (p.department == state.department){
+          list[list.length] = p;
+        }
+      }
+    }
+
+    var rows = [];
+    var i2;
+    for (i2=0;i2<list.length;i2++){
+      var p2 = list[i2];
+      var iop = (p2.iopOD!=="" && p2.iopOS!=="") ? (p2.iopOD + "/" + p2.iopOS) : "—";
+      var target = (p2.targetIOP && p2.targetIOP != 0) ? String(p2.targetIOP) : "—";
+      var encCount = 0;
+      if (DATA.encounters && DATA.encounters[p2.id]) encCount = DATA.encounters[p2.id].length;
+      var medsShort = p2.meds;
+      if (medsShort.length > 28) medsShort = medsShort.substring(0, 28) + "...";
+      rows[rows.length] = {
+        id: "R-" + p2.id,
+        patientId: p2.id,
+        mrn: p2.mrn,
+        name: p2.name,
+        sex: p2.sex,
+        age: p2.age,
+        diagnosis: p2.diagnosis,
+        stage: p2.stage,
+        iop: iop,
+        target: target,
+        encounters: encCount,
+        last: formatDate(p2.lastVisit),
+        next: formatDate(p2.nextAppt)
+      };
+    }
+    return rows;
+  }
+
+  function defineViews(){
+    VIEW_DEFS = {
+      // main buttons
+      single_screen: {
+        title: function(){ return state.department + " Single Screen — Queue"; },
+        sub: function(){ return "Facility " + state.facility + " • Department " + state.department; },
+        columns: [
+          {key:"name", label:"Name", width:180, sortable:1},
+          {key:"time", label:"Time", width:80, sortable:1},
+          {key:"status", label:"Status", width:120, sortable:1}
+        ],
+        rows: function(){ return buildScheduleRows(state.department, 16); }
+      },
+      specialized_exams: {
+        title: function(){ return "Specialized Exams"; },
+        sub: function(){ return "Facility " + state.facility + " • Department " + state.department; },
+        columns: [
+          {key:"exam", label:"Exam", width:160, sortable:1},
+          {key:"template", label:"Template", width:220, sortable:1},
+          {key:"notes", label:"Notes", width:260, sortable:0}
+        ],
+        rows: function(){
+          var exams = [
+            ["OCT RNFL","Glaucoma OCT RNFL","Confirm signal strength and scan quality"],
+            ["OCT Macula","Retina OCT Macula","Verify laterality and macular cube"],
+            ["HVF 24-2","Visual Field 24-2","Ensure proper lens and fixation monitoring"],
+            ["HVF 10-2","Visual Field 10-2","Use 10-2 for advanced glaucoma or central defects"],
+            ["Pachymetry","CCT Measurement","Record OD/OS and calibrate device"],
+            ["Fundus Photos","Color Photos","Center disc/macula as appropriate"],
+            ["Gonioscopy","Angle Evaluation","Document Shaffer grade / PAS if present"],
+            ["Topography","Corneal Topo","Refractive screening and irregular astigmatism check"]
+          ];
+          var rows = [];
+          var i;
+          for (i=0;i<exams.length;i++){
+            rows[rows.length] = { id: "EX-" + i, exam: exams[i][0], template: exams[i][1], notes: exams[i][2] };
+          }
+          return rows;
+        }
+      },
+      refractive_exam: {
+        title: function(){ return "Refractive Exam — Queue"; },
+        sub: function(){ return "Facility " + state.facility; },
+        columns: [
+          {key:"name", label:"Name", width:180, sortable:1},
+          {key:"time", label:"Time", width:80, sortable:1},
+          {key:"reason", label:"Reason", width:240, sortable:0}
+        ],
+        rows: function(){ return buildScheduleRows("Refractive", 14); }
+      },
+      glaucoma_followup: {
+        title: function(){ return "Glaucoma Follow Up — Queue"; },
+        sub: function(){ return "Facility " + state.facility; },
+        columns: [
+          {key:"name", label:"Name", width:190, sortable:1},
+          {key:"time", label:"Time", width:80, sortable:1},
+          {key:"reason", label:"Reason", width:250, sortable:0}
+        ],
+        rows: function(){ return buildScheduleRows("Glaucoma", 18); }
+      },
+      workup: {
+        title: function(){ return "Workup — Technician Worklist"; },
+        sub: function(){ return "Facility " + state.facility + " • Department " + state.department; },
+        columns: [
+          {key:"patient", label:"Patient", width:200, sortable:1},
+          {key:"task", label:"Task", width:220, sortable:1},
+          {key:"priority", label:"Priority", width:90, sortable:1}
+        ],
+        rows: function(){ return buildWorkupRows(); }
+      },
+      contact_lens_exam: {
+        title: function(){ return "Contact Lens Exam — Queue"; },
+        sub: function(){ return "Facility " + state.facility; },
+        columns: [
+          {key:"name", label:"Name", width:200, sortable:1},
+          {key:"time", label:"Time", width:80, sortable:1},
+          {key:"reason", label:"Visit Type", width:240, sortable:0}
+        ],
+        rows: function(){ return buildScheduleRows("Contact Lenses", 14); }
+      },
+      optical: {
+        title: function(){ return "Optical — Work Queue"; },
+        sub: function(){ return "Facility " + state.facility; },
+        columns: [
+          {key:"name", label:"Customer", width:200, sortable:1},
+          {key:"order", label:"Order / Task", width:220, sortable:1},
+          {key:"status", label:"Status", width:120, sortable:1}
+        ],
+        rows: function(){
+          var base = [];
+          var i;
+          for (i=0;i<DATA.patients.length;i++){
+            var p = DATA.patients[i];
+            if (p.department == "Optical" && p.facility == state.facility) base[base.length] = p;
+          }
+          if (base.length < 1){
+            for (i=0;i<DATA.patients.length;i++){
+              var p2 = DATA.patients[i];
+              if (p2.department == "Optical") base[base.length] = p2;
+            }
+          }
+          var statusArr = ["Pending","In progress","Ready","Completed"];
+          var rows = [];
+          for (i=0;i<base.length && rows.length < 16;i++){
+            var p3 = base[i];
+            rows[rows.length] = { id:"O-" + p3.id, patientId:p3.id, name:p3.name, order:p3.diagnosis, status: pick(statusArr) };
+          }
+          return rows;
+        }
+      },
+      workflow_maint: {
+        title: function(){ return "Workflow File Maintenance"; },
+        sub: function(){ return "Facility " + state.facility; },
+        columns: [
+          {key:"item", label:"Item", width:240, sortable:1},
+          {key:"type", label:"Type", width:120, sortable:1},
+          {key:"owner", label:"Owner", width:100, sortable:1},
+          {key:"status", label:"Status", width:120, sortable:1}
+        ],
+        rows: function(){
+          var items = [
+            ["Template: Glaucoma FU","Template","Admin","Active"],
+            ["Order Set: OCT RNFL","Order Set","Admin","Active"],
+            ["Printer Mapping","System","IT","Active"],
+            ["Device: OCT Station 2","Device","IT","Needs review"],
+            ["User Role: Technician","Security","Admin","Active"],
+            ["Form: Consent Injection","Form","Admin","Active"],
+            ["Task Routing Rules","Workflow","Admin","Needs review"],
+            ["Billing Codes Update","Billing","Admin","Pending"],
+            ["Provider Schedule Sync","Integration","IT","Active"]
+          ];
+          var rows = [];
+          var i;
+          for (i=0;i<items.length;i++){
+            rows[rows.length] = { id:"F-" + i, item:items[i][0], type:items[i][1], owner:items[i][2], status:items[i][3] };
+          }
+          return rows;
+        }
+      },
+      retina_single: {
+        title: function(){ return "Retina Single Screen — Queue"; },
+        sub: function(){ return "Facility " + state.facility; },
+        columns: [
+          {key:"name", label:"Name", width:200, sortable:1},
+          {key:"time", label:"Time", width:80, sortable:1},
+          {key:"reason", label:"Reason", width:240, sortable:0}
+        ],
+        rows: function(){ return buildScheduleRows("Retina", 16); }
+      },
+      pediatric_single: {
+        title: function(){ return "Pediatric Single Screen — Queue"; },
+        sub: function(){ return "Facility " + state.facility; },
+        columns: [
+          {key:"name", label:"Name", width:200, sortable:1},
+          {key:"time", label:"Time", width:80, sortable:1},
+          {key:"reason", label:"Reason", width:240, sortable:0}
+        ],
+        rows: function(){ return buildScheduleRows("Pediatrics", 18); }
+      },
+      patient_data: {
+        title: function(){ return "Patient Data — " + state.department; },
+        sub: function(){ return "Facility " + state.facility + " • Sorted/Filtered list"; },
+        columns: [
+          {key:"mrn", label:"MRN", width:90, sortable:1},
+          {key:"name", label:"Name", width:180, sortable:1},
+          {key:"sex", label:"Sex", width:40, sortable:1},
+          {key:"age", label:"Age", width:45, sortable:1},
+          {key:"diagnosis", label:"Diagnosis", width:220, sortable:1},
+          {key:"stage", label:"Stage", width:80, sortable:1},
+          {key:"iop", label:"IOP OD/OS", width:90, sortable:0},
+          {key:"target", label:"Target", width:60, sortable:1},
+          {key:"encounters", label:"Encounters", width:90, sortable:1},
+          {key:"last", label:"Last Visit", width:90, sortable:1},
+          {key:"next", label:"Next Appt", width:90, sortable:1}
+],
+        rows: function(){ return buildPatientRegistryRows(); }
+      },
+
+      // Top menu views
+      admin: {
+        title: function(){ return "Administration"; },
+        sub: function(){ return "System administration tasks"; },
+        columns: [
+          {key:"task", label:"Task", width:240, sortable:1},
+          {key:"owner", label:"Owner", width:120, sortable:1},
+          {key:"status", label:"Status", width:120, sortable:1}
+        ],
+        rows: function(){
+          return [
+            {id:"A1", task:"User & Role Management", owner:"Admin", status:"Available"},
+            {id:"A2", task:"Facility Configuration", owner:"Admin", status:"Available"},
+            {id:"A3", task:"Audit Log Review", owner:"Compliance", status:"Available"},
+            {id:"A4", task:"Integrations Health Check", owner:"IT", status:"Available"},
+            {id:"A5", task:"Device Inventory", owner:"IT", status:"Available"}
+          ];
+        }
+      },
+      front_desk: {
+        title: function(){ return "Front Desk — Today's Schedule"; },
+        sub: function(){ return "Facility " + state.facility + " • Department " + state.department; },
+        columns: [
+          {key:"name", label:"Patient", width:200, sortable:1},
+          {key:"time", label:"Time", width:80, sortable:1},
+          {key:"dept", label:"Dept", width:120, sortable:1},
+          {key:"status", label:"Status", width:120, sortable:1}
+        ],
+        rows: function(){
+          var base = [];
+          var i;
+          for (i=0;i<DATA.patients.length;i++){
+            var p = DATA.patients[i];
+            if (p.facility == state.facility) base[base.length] = p;
+          }
+          if (base.length < 1) base = DATA.patients.slice(0);
+          var start = new Date(); start.setHours(8,0,0,0);
+          var out = [];
+          for (i=0;i<base.length && out.length < 22;i++){
+            var p2 = base[i];
+            out[out.length] = {
+              id: "FD-" + p2.id,
+              patientId: p2.id,
+              name: p2.name,
+              time: formatTimeShort(new Date(start.getTime() + i*10*60*1000)),
+              dept: p2.department,
+              status: pick(["Scheduled","Checked in","Arrived","Cancelled","Rescheduled"])
+            };
+          }
+          return out;
+        }
+      },
+      technician: {
+        title: function(){ return "Technician — Worklist"; },
+        sub: function(){ return "Facility " + state.facility + " • Department " + state.department; },
+        columns: [
+          {key:"patient", label:"Patient", width:200, sortable:1},
+          {key:"task", label:"Task", width:200, sortable:1},
+          {key:"status", label:"Status", width:120, sortable:1}
+        ],
+        rows: function(){
+          var tasks = ["VA","IOP","OCT","HVF","Pachy","Photos","Dilation","History update"];
+          var statusArr = ["Pending","In progress","Complete"];
+          var base = filterPatientsByContext();
+          if (base.length < 1) base = DATA.patients;
+          var out = [];
+          var i;
+          for (i=0;i<base.length && out.length < 20;i++){
+            var p = base[i];
+            out[out.length] = { id:"T-" + p.id, patientId:p.id, patient:p.name, task: pick(tasks), status: pick(statusArr) };
+          }
+          return out;
+        }
+      },
+      doctor_function: {
+        title: function(){ return "Doctor Function — Inbox"; },
+        sub: function(){ return "Facility " + state.facility + " • Department " + state.department; },
+        columns: [
+          {key:"item", label:"Item", width:160, sortable:1},
+          {key:"patient", label:"Patient", width:220, sortable:1},
+          {key:"due", label:"Due", width:90, sortable:1}
+        ],
+        rows: function(){
+          var base = filterPatientsByContext();
+          if (base.length < 1) base = DATA.patients;
+          var items = ["Sign RX","Review OCT","Review VF","Chart completion","Call patient","Order review"];
+          var out = [];
+          var i;
+          for (i=0;i<base.length && out.length < 18;i++){
+            var p = base[i];
+            out[out.length] = { id:"D-" + p.id, patientId:p.id, item: pick(items), patient: p.name, due: pick(["Today","Tomorrow","This week"]) };
+          }
+          return out;
+        }
+      },
+      asc_surgery: {
+        title: function(){ return "ASC/Surgery — Schedule"; },
+        sub: function(){ return "Facility " + state.facility; },
+        columns: [
+          {key:"time", label:"Time", width:80, sortable:1},
+          {key:"patient", label:"Patient", width:220, sortable:1},
+          {key:"procedure", label:"Procedure", width:220, sortable:1},
+          {key:"surgeon", label:"Surgeon", width:170, sortable:1}
+        ],
+        rows: function(){
+          var procs = ["Cataract extraction","SLT","iStent + Cataract","Vitrectomy","YAG capsulotomy"];
+          var base = [];
+          var i;
+          for (i=0;i<DATA.patients.length;i++){
+            var p = DATA.patients[i];
+            if (p.facility == state.facility) base[base.length] = p;
+          }
+          if (base.length < 1) base = DATA.patients.slice(0);
+          var start = new Date(); start.setHours(7,30,0,0);
+          var out = [];
+          for (i=0;i<base.length && out.length < 12;i++){
+            var p2 = base[i];
+            out[out.length] = {
+              id:"S-" + p2.id,
+              patientId: p2.id,
+              time: formatTimeShort(new Date(start.getTime() + i*30*60*1000)),
+              patient: p2.name,
+              procedure: pick(procs),
+              surgeon: pick(PROVIDERS)
+            };
+          }
+          return out;
+        }
+      },
+      contact_lenses: {
+        title: function(){ return "Contact Lenses — Work Queue"; },
+        sub: function(){ return "Facility " + state.facility; },
+        columns: [
+          {key:"name", label:"Name", width:200, sortable:1},
+          {key:"time", label:"Time", width:80, sortable:1},
+          {key:"reason", label:"Visit Type", width:240, sortable:0}
+        ],
+        rows: function(){ return buildScheduleRows("Contact Lenses", 16); }
+      },
+      billing: {
+        title: function(){ return "Billing — Work Queue"; },
+        sub: function(){ return "Facility " + state.facility; },
+        columns: [
+          {key:"patient", label:"Patient", width:220, sortable:1},
+          {key:"balance", label:"Balance", width:90, sortable:1},
+          {key:"status", label:"Claim Status", width:140, sortable:1}
+        ],
+        rows: function(){
+          var statuses = ["Submitted","Denied","Pending","Paid","Needs info"];
+          var base = [];
+          var i;
+          for (i=0;i<DATA.patients.length;i++){
+            var p = DATA.patients[i];
+            if (p.facility == state.facility) base[base.length] = p;
+          }
+          if (base.length < 1) base = DATA.patients.slice(0);
+          var out = [];
+          for (i=0;i<base.length && out.length < 22;i++){
+            var p2 = base[i];
+            out[out.length] = {
+              id:"B-" + p2.id,
+              patientId:p2.id,
+              patient:p2.name,
+              balance:"$" + r(0,620) + "." + pad2(r(0,99)),
+              status: pick(statuses)
+            };
+          }
+          return out;
+        }
+      },
+      file_maint: {
+        title: function(){ return "File Maint — Items"; },
+        sub: function(){ return "Facility " + state.facility; },
+        columns: [
+          {key:"file", label:"File", width:200, sortable:1},
+          {key:"updated", label:"Updated", width:100, sortable:1},
+          {key:"by", label:"By", width:120, sortable:1}
+        ],
+        rows: function(){
+          var files = ["Templates","Order Sets","User Roles","Devices","Facilities","Providers","Locations","Billing Codes","Macros","Letters"];
+          var out = [];
+          var i;
+          for (i=0;i<files.length;i++){
+            out[out.length] = { id:"FM-" + i, file:files[i], updated:formatDate(dateAddDays(new Date(), -r(1,60))), by: pick(["Admin","IT","Supervisor"]) };
+          }
+          return out;
+        }
+      },
+      image_processing: {
+        title: function(){ return "Image Processing — Imaging Queue"; },
+        sub: function(){ return "Facility " + state.facility + " • Department " + state.department; },
+        columns: [
+          {key:"patient", label:"Patient", width:220, sortable:1},
+          {key:"test", label:"Test", width:160, sortable:1},
+          {key:"status", label:"Status", width:120, sortable:1}
+        ],
+        rows: function(){
+          var tests = ["OCT RNFL","OCT Macula","Fundus Photos","FA","HVF 24-2","HVF 10-2"];
+          var statusArr = ["Ready","In progress","Complete","Needs repeat"];
+          var base = filterPatientsByContext();
+          if (base.length < 1) base = DATA.patients;
+          var out = [];
+          var i;
+          for (i=0;i<base.length && out.length < 20;i++){
+            var p = base[i];
+            out[out.length] = { id:"IP-" + p.id, patientId:p.id, patient:p.name, test: pick(tests), status: pick(statusArr) };
+          }
+          return out;
+        }
+      },
+      procedures: {
+        title: function(){ return "Procedures"; },
+        sub: function(){ return "Procedure tools and lists"; },
+        columns: [
+          {key:"proc", label:"Procedure", width:260, sortable:1},
+          {key:"code", label:"Code", width:80, sortable:1},
+          {key:"notes", label:"Notes", width:260, sortable:0}
+        ],
+        rows: function(){
+          return [
+            {id:"PR1", proc:"Selective Laser Trabeculoplasty (SLT)", code:"65855", notes:"Confirm laterality and consent"},
+            {id:"PR2", proc:"YAG Capsulotomy", code:"66821", notes:"Check IOL status and dilate as needed"},
+            {id:"PR3", proc:"Intravitreal Injection", code:"67028", notes:"Verify medication lot and laterality"},
+            {id:"PR4", proc:"Gonioscopy", code:"92020", notes:"Document angle findings"},
+            {id:"PR5", proc:"Extended Ophthalmoscopy", code:"92201/92202", notes:"Retina assessment per indication"}
+          ];
+        }
+      },
+      query_tool: {
+        title: function(){ return "Query Tool"; },
+        sub: function(){ return "Saved queries (click to run)"; },
+        columns: [
+          {key:"query", label:"Query", width:260, sortable:1},
+          {key:"scope", label:"Scope", width:120, sortable:1},
+          {key:"last", label:"Last Run", width:100, sortable:1}
+        ],
+        rows: function(){
+          return [
+            {id:"Q1", query:"Glaucoma: IOP above target", scope:"Glaucoma", last: formatDate(dateAddDays(new Date(), -7))},
+            {id:"Q2", query:"Retina: Injections due this week", scope:"Retina", last: formatDate(dateAddDays(new Date(), -3))},
+            {id:"Q3", query:"Pediatrics: Myopia progression follow-ups", scope:"Pediatrics", last: formatDate(dateAddDays(new Date(), -12))},
+            {id:"Q4", query:"Billing: Claims denied", scope:"Billing", last: formatDate(dateAddDays(new Date(), -1))}
+          ];
+        }
+      },
+      practice_mgmt: {
+        title: function(){ return "Practice Management"; },
+        sub: function(){ return "Facility " + state.facility; },
+        columns: [
+          {key:"kpi", label:"KPI", width:220, sortable:1},
+          {key:"value", label:"Value", width:120, sortable:1},
+          {key:"trend", label:"Trend", width:60, sortable:1}
+        ],
+        rows: function(){
+          return [
+            {id:"PM1", kpi:"Patients seen (today)", value:String(r(40,120)), trend: pick(["↑","→","↓"])},
+            {id:"PM2", kpi:"No-show rate (30d)", value:String(r(3,12)) + "%", trend: pick(["↓","→","↑"])},
+            {id:"PM3", kpi:"Avg wait time", value:String(r(8,26)) + " min", trend: pick(["↓","→","↑"])},
+            {id:"PM4", kpi:"Open billing items", value:String(r(20,140)), trend: pick(["↓","→","↑"])},
+            {id:"PM5", kpi:"Pending RX items", value:String(r(0,18)), trend: pick(["↓","→","↑"])}
+          ];
+        }
+      },
+      quick_message: {
+        title: function(){ return "Quick Message"; },
+        sub: function(){ return "Message inbox"; },
+        columns: [
+          {key:"from", label:"From", width:140, sortable:1},
+          {key:"subject", label:"Subject", width:220, sortable:1},
+          {key:"time", label:"Time", width:80, sortable:1}
+        ],
+        rows: function(){
+          var senders = ["Front Desk","Optical","Billing","Technician","IT Support","Lab"];
+          var subjects = ["Call patient back","Rx clarification","Lens order update","Schedule change","Device down","Insurance verification"];
+          var now = new Date();
+          var out = [];
+          var i;
+          for (i=0;i<14;i++){
+            out[out.length] = {
+              id:"M-" + i,
+              from: pick(senders),
+              subject: pick(subjects),
+              time: formatTimeShort(new Date(now.getTime() - i*23*60*1000))
+            };
+          }
+          return out;
+        }
+      }
+    };
+  }
+
+  // --- Mapping buttons to views ---
+  var ACTION_TO_VIEW = {
+    single_screen: "single_screen",
+    specialized_exams: "specialized_exams",
+    refractive_exam: "refractive_exam",
+    glaucoma_followup: "glaucoma_followup",
+    workup: "workup",
+    contact_lens_exam: "contact_lens_exam",
+    optical: "optical",
+    workflow_maint: "workflow_maint",
+    retina_single: "retina_single",
+    pediatric_single: "pediatric_single",
+    patient_data: "patient_data"
+  };
+  var NAV_TO_VIEW = {
+    admin: "admin",
+    front_desk: "front_desk",
+    technician: "technician",
+    doctor_function: "doctor_function",
+    asc_surgery: "asc_surgery",
+    contact_lenses: "contact_lenses",
+    billing: "billing",
+    file_maint: "file_maint",
+    image_processing: "image_processing",
+    procedures: "procedures",
+    query_tool: "query_tool",
+    practice_mgmt: "practice_mgmt",
+    quick_message: "quick_message"
+  };
+
+  // --- UI updates ---
+  function updateRxCounts(){
+    var relevant = [];
+    var i;
+    for (i=0;i<DATA.patients.length;i++){
+      var p = DATA.patients[i];
+      if (p.facility == state.facility && p.department == state.department){
+        relevant[relevant.length] = p;
+      }
+    }
+    if (relevant.length < 1){
+      for (i=0;i<DATA.patients.length;i++){
+        var p2 = DATA.patients[i];
+        if (p2.department == state.department) relevant[relevant.length] = p2;
+      }
+    }
+    var counts = {pending:0, refill:0, change:0, needsigning:0};
+    for (i=0;i<relevant.length;i++){
+      var s = relevant[i].rxStatus;
+      if (s == "pending") counts.pending++;
+      else if (s == "refill") counts.refill++;
+      else if (s == "change") counts.change++;
+      else if (s == "needsigning") counts.needsigning++;
+    }
+    setText($("rxPending"), String(counts.pending));
+    setText($("rxRefill"), String(counts.refill));
+    setText($("rxChange"), String(counts.change));
+    setText($("rxNeedSigning"), String(counts.needsigning));
+  }
+
+  // IE-safe table build helpers (NO innerHTML on TABLE/TBODY/TR)
+  function clearTable(tbl){
+    // delete all rows
+    while (tbl.rows.length > 0){
+      tbl.deleteRow(0);
+    }
+  }
+
+  function getCurrentView(){
+    if (!VIEW_DEFS) return null;
+    return VIEW_DEFS[state.view] ? VIEW_DEFS[state.view] : VIEW_DEFS["glaucoma_followup"];
+  }
+
+  function applyFilter(rows, cols, q){
+    q = toLower(trim(q));
+    if (!q) return rows;
+
+    var out = [];
+    var i;
+    for (i=0;i<rows.length;i++){
+      var row = rows[i];
+      var hay = "";
+      var c;
+      for (c=0;c<cols.length;c++){
+        var key = cols[c].key;
+        hay += " " + String(row[key]);
+      }
+      if (toLower(hay).indexOf(q) >= 0){
+        out[out.length] = row;
+      }
+    }
+    return out;
+  }
+
+  function sortRows(rows, key, dir){
+    if (!key) return rows;
+    var sorted = rows.slice(0);
+    sorted.sort(function(a,b){
+      var av = a[key];
+      var bv = b[key];
+      if (av === null || typeof av === "undefined") av = "";
+      if (bv === null || typeof bv === "undefined") bv = "";
+
+      // numeric check
+      var an = parseFloat(av);
+      var bn = parseFloat(bv);
+      var aIsNum = !isNaN(an) && String(av).replace(/^\s+|\s+$/g,'').match(/^-?\d+(\.\d+)?$/);
+      var bIsNum = !isNaN(bn) && String(bv).replace(/^\s+|\s+$/g,'').match(/^-?\d+(\.\d+)?$/);
+      var cmp;
+      if (aIsNum && bIsNum){
+        cmp = an - bn;
+      } else {
+        av = toLower(String(av));
+        bv = toLower(String(bv));
+        if (av < bv) cmp = -1;
+        else if (av > bv) cmp = 1;
+        else cmp = 0;
+      }
+      return (dir == "asc") ? cmp : -cmp;
+    });
+    return sorted;
+  }
+
+  function renderView(){
+    var def = getCurrentView();
+    if (!def) return;
+
+    // titles
+    setText($("viewTitle"), def.title());
+    setText($("viewSub"), def.sub());
+
+    // build rows
+    var cols = def.columns;
+    var rows = def.rows();
+
+    // apply filter
+    rows = applyFilter(rows, cols, state.quickFilter);
+
+    // sort
+    rows = sortRows(rows, state.sortKey, state.sortDir);
+
+    state.currentRows = rows;
+    state.currentCols = cols;
+
+    // Header table
+    var hdrTbl = $("listHeaderTable");
+    clearTable(hdrTbl);
+    var hr = hdrTbl.insertRow(0);
+    var totalW = 0;
+    var i;
+    for (i=0;i<cols.length;i++){
+      var c = cols[i];
+      var th = document.createElement("td");
+      th.className = "listTh";
+      th.style.width = (c.width ? c.width : 120) + "px";
+      totalW += (c.width ? c.width : 120);
+
+      // clickable sort headers
+      if (c.sortable){
+        th.style.cursor = "pointer";
+        th.title = "Click to sort";
+        // closure-safe handler: attach key via attribute
+        th._sortkey = c.key;
+        addEvent(th, "click", onHeaderClick);
+      }
+      setText(th, c.label + ((state.sortKey == c.key) ? (state.sortDir=="asc" ? "  ▲" : "  ▼") : ""));
+      hr.appendChild(th);
+    }
+    hdrTbl.style.width = totalW + "px";
+
+    // Body table
+    var bodyTbl = $("listBodyTable");
+    clearTable(bodyTbl);
+    bodyTbl.style.width = totalW + "px";
+
+    for (i=0;i<rows.length;i++){
+      var row = rows[i];
+      var tr = bodyTbl.insertRow(bodyTbl.rows.length);
+      tr._rowid = row.id;
+      tr._patientid = row.patientId ? row.patientId : "";
+      tr.className = "";
+      // hover
+      addEvent(tr, "mouseover", onRowOver);
+      addEvent(tr, "mouseout", onRowOut);
+      addEvent(tr, "click", onRowClick);
+      addEvent(tr, "dblclick", onRowDblClick);
+
+      var j;
+      for (j=0;j<cols.length;j++){
+        var col = cols[j];
+        var td = tr.insertCell(tr.cells.length);
+        td.className = "listTd";
+        td.style.width = (col.width ? col.width : 120) + "px";
+        var val = row[col.key];
+        if (typeof val === "undefined" || val === null) val = "";
+
+        // Encounters column opens the Encounters window (like Medflow)
+        if (col.key == "encounters" && row.patientId){
+          var link = document.createElement("span");
+          link.className = "clickLink";
+          link._pid = row.patientId;
+          setText(link, String(val));
+          addEvent(link, "click", onEncounterLinkClick);
+          td.appendChild(link);
+        } else {
+          setText(td, String(val));
+        }
+      }
+
+      // mark selected
+      if (row.id == state.selectedRowId){
+        tr.className = "rowSelected";
+      }
+    }
+
+    // Update selection / details
+    if (rows.length > 0){
+      // if no selection, auto-select first
+      if (!state.selectedRowId){
+        state.selectedRowId = rows[0].id;
+      } else {
+        // if selection not present anymore, select first
+        var found = false;
+        for (i=0;i<rows.length;i++){
+          if (rows[i].id == state.selectedRowId) { found = true; break; }
+        }
+        if (!found) state.selectedRowId = rows[0].id;
+      }
+    } else {
+      state.selectedRowId = "";
+    }
+    highlightSelection();
+    renderDetails();
+  }
+
+  function highlightSelection(){
+    var bodyTbl = $("listBodyTable");
+    var i;
+    for (i=0;i<bodyTbl.rows.length;i++){
+      var tr = bodyTbl.rows[i];
+      var rid = tr._rowid;
+      if (rid == state.selectedRowId){
+        tr.className = "rowSelected";
+      } else {
+        tr.className = "";
+      }
+    }
+  }
+
+  function findRowById(rowId){
+    // use currentRows
+    if (!state.currentRows) return null;
+    var i;
+    for (i=0;i<state.currentRows.length;i++){
+      if (state.currentRows[i].id == rowId) return state.currentRows[i];
+    }
+    return null;
+  }
+
+  function findPatientById(pid){
+    if (!pid) return null;
+    var i;
+    for (i=0;i<DATA.patients.length;i++){
+      if (DATA.patients[i].id == pid) return DATA.patients[i];
+    }
+    return null;
+  }
+
+  function renderDetails(){
+    var pill = $("selectionPill");
+    var box = $("detailsBody");
+
+    if (!state.selectedRowId){
+      setText(pill, "No selection");
+      box.innerHTML = "<span style='color:#555;'>Select a row in the list to view details.</span>";
+      return;
+    }
+    var row = findRowById(state.selectedRowId);
+    if (!row){
+      setText(pill, "No selection");
+      box.innerHTML = "<span style='color:#555;'>Select a row in the list to view details.</span>";
+      return;
+    }
+    var pid = row.patientId;
+    var patient = findPatientById(pid);
+
+    if (patient){
+      setText(pill, patient.name);
+
+      var html = "<table class='kvTable'>";
+      html += "<tr><td class='kvKey'>MRN</td><td class='kvVal'>" + patient.mrn + "</td></tr>";
+      html += "<tr><td class='kvKey'>DOB</td><td class='kvVal'>" + formatDate(patient.dob) + " (Age " + patient.age + ")</td></tr>";
+      html += "<tr><td class='kvKey'>Sex</td><td class='kvVal'>" + patient.sex + "</td></tr>";
+      html += "<tr><td class='kvKey'>Phone</td><td class='kvVal'>" + patient.phone + "</td></tr>";
+      html += "<tr><td class='kvKey'>Facility</td><td class='kvVal'>" + patient.facility + "</td></tr>";
+      html += "<tr><td class='kvKey'>Department</td><td class='kvVal'>" + patient.department + "</td></tr>";
+      html += "<tr><td class='kvKey'>Provider</td><td class='kvVal'>" + patient.provider + "</td></tr>";
+
+      if (patient.department == "Glaucoma"){
+        html += "<tr><td class='kvKey'>Dx / Stage</td><td class='kvVal'>" + patient.diagnosis + " • " + patient.stage + "</td></tr>";
+        html += "<tr><td class='kvKey'>Laterality</td><td class='kvVal'>" + patient.laterality + "</td></tr>";
+        html += "<tr><td class='kvKey'>IOP (OD/OS)</td><td class='kvVal'>" + patient.iopOD + "/" + patient.iopOS + " mmHg</td></tr>";
+        html += "<tr><td class='kvKey'>Target IOP</td><td class='kvVal'>" + patient.targetIOP + " mmHg</td></tr>";
+        html += "<tr><td class='kvKey'>CCT (OD/OS)</td><td class='kvVal'>" + patient.cctOD + "/" + patient.cctOS + " µm</td></tr>";
+        html += "<tr><td class='kvKey'>C/D (OD/OS)</td><td class='kvVal'>" + patient.cdOD + "/" + patient.cdOS + "</td></tr>";
+        html += "<tr><td class='kvKey'>VF MD (OD/OS)</td><td class='kvVal'>" + patient.vfMD_OD + "/" + patient.vfMD_OS + " dB</td></tr>";
+        html += "<tr><td class='kvKey'>RNFL (OD/OS)</td><td class='kvVal'>" + patient.rnflOD + "/" + patient.rnflOS + " µm</td></tr>";
+        html += "<tr><td class='kvKey'>Meds</td><td class='kvVal'>" + patient.meds + "</td></tr>";
+      } else {
+        html += "<tr><td class='kvKey'>Reason</td><td class='kvVal'>" + patient.diagnosis + "</td></tr>";
+        if (patient.iopOD !== "" && patient.iopOS !== ""){
+          html += "<tr><td class='kvKey'>IOP (OD/OS)</td><td class='kvVal'>" + patient.iopOD + "/" + patient.iopOS + " mmHg</td></tr>";
+        }
+        if (patient.cctOD !== "" && patient.cctOS !== ""){
+          html += "<tr><td class='kvKey'>CCT (OD/OS)</td><td class='kvVal'>" + patient.cctOD + "/" + patient.cctOS + " µm</td></tr>";
+        }
+        html += "<tr><td class='kvKey'>Notes</td><td class='kvVal'>" + patient.notes + "</td></tr>";
+      }
+      html += "<tr><td class='kvKey'>Last Visit</td><td class='kvVal'>" + formatDate(patient.lastVisit) + "</td></tr>";
+      html += "<tr><td class='kvKey'>Next Appt</td><td class='kvVal'>" + formatDate(patient.nextAppt) + "</td></tr>";
+      html += "</table>";
+
+      html += "<div style='margin-top:8px;color:#555;'><b>Tip:</b> Double-click a row to open the full record view.</div>";
+      box.innerHTML = html;
+    } else {
+      // non-patient row
+      setText(pill, "Selected");
+      var html2 = "<table class='kvTable'>";
+      var cols = state.currentCols;
+      var i2;
+      for (i2=0;i2<cols.length;i2++){
+        var k = cols[i2].key;
+        html2 += "<tr><td class='kvKey'>" + cols[i2].label + "</td><td class='kvVal'>" + String(row[k]) + "</td></tr>";
+      }
+      html2 += "</table>";
+      box.innerHTML = html2;
+    }
+  }
+
+  // --- Modal (patient record) ---
+  function openRecordModal(){
+    if (!state.selectedRowId) return;
+    var row = findRowById(state.selectedRowId);
+    if (!row) return;
+
+    var pid = row.patientId;
+    var patient = findPatientById(pid);
+
+    if (!patient){
+      // for non-patient rows show generic
+      $("modalTitle").innerText = "Details";
+      $("modalBody").innerHTML = $("detailsBody").innerHTML;
+      showModal();
+      return;
+    }
+
+    $("modalTitle").innerText = patient.name + " — Patient Record";
+
+    var html = "";
+    html += "<table class='kvTable'>";
+    html += "<tr><td class='kvKey'>MRN</td><td class='kvVal'>" + patient.mrn + "</td></tr>";
+    html += "<tr><td class='kvKey'>DOB</td><td class='kvVal'>" + formatDate(patient.dob) + " (Age " + patient.age + ")</td></tr>";
+    html += "<tr><td class='kvKey'>Sex</td><td class='kvVal'>" + patient.sex + "</td></tr>";
+    html += "<tr><td class='kvKey'>Phone</td><td class='kvVal'>" + patient.phone + "</td></tr>";
+    html += "<tr><td class='kvKey'>Facility</td><td class='kvVal'>" + patient.facility + "</td></tr>";
+    html += "<tr><td class='kvKey'>Department</td><td class='kvVal'>" + patient.department + "</td></tr>";
+    html += "<tr><td class='kvKey'>Provider</td><td class='kvVal'>" + patient.provider + "</td></tr>";
+    html += "<tr><td class='kvKey'>Technician</td><td class='kvVal'>" + patient.technician + "</td></tr>";
+    html += "<tr><td class='kvKey'>Diagnosis</td><td class='kvVal'>" + patient.diagnosis + "</td></tr>";
+    html += "<tr><td class='kvKey'>Stage</td><td class='kvVal'>" + patient.stage + "</td></tr>";
+    if (patient.department == "Glaucoma"){
+      html += "<tr><td class='kvKey'>Laterality</td><td class='kvVal'>" + patient.laterality + "</td></tr>";
+      html += "<tr><td class='kvKey'>IOP (OD/OS)</td><td class='kvVal'>" + patient.iopOD + "/" + patient.iopOS + " mmHg</td></tr>";
+      html += "<tr><td class='kvKey'>Target IOP</td><td class='kvVal'>" + patient.targetIOP + " mmHg</td></tr>";
+      html += "<tr><td class='kvKey'>CCT (OD/OS)</td><td class='kvVal'>" + patient.cctOD + "/" + patient.cctOS + " µm</td></tr>";
+      html += "<tr><td class='kvKey'>C/D (OD/OS)</td><td class='kvVal'>" + patient.cdOD + "/" + patient.cdOS + "</td></tr>";
+      html += "<tr><td class='kvKey'>VF MD (OD/OS)</td><td class='kvVal'>" + patient.vfMD_OD + "/" + patient.vfMD_OS + " dB</td></tr>";
+      html += "<tr><td class='kvKey'>RNFL (OD/OS)</td><td class='kvVal'>" + patient.rnflOD + "/" + patient.rnflOS + " µm</td></tr>";
+      html += "<tr><td class='kvKey'>Meds</td><td class='kvVal'>" + patient.meds + "</td></tr>";
+    }
+    html += "<tr><td class='kvKey'>Last Visit</td><td class='kvVal'>" + formatDate(patient.lastVisit) + "</td></tr>";
+    html += "<tr><td class='kvKey'>Next Appt</td><td class='kvVal'>" + formatDate(patient.nextAppt) + "</td></tr>";
+    html += "<tr><td class='kvKey'>RX Status</td><td class='kvVal'>" + patient.rxStatus + "</td></tr>";
+    html += "</table>";
+
+    $("modalBody").innerHTML = html;
+    showModal();
+  }
+
+  function showModal(){
+    var ov = $("overlay");
+    var md = $("modal");
+    // Ensure modal sits above the Encounters window when launched from there.
+    if (ov){
+      ov.style.zIndex = 1200;
+      ov.style.display = "block";
+    }
+    if (md){
+      md.style.zIndex = 1201;
+      md.style.display = "block";
+    }
+  }
+  function closeModal(){
+    $("overlay").style.display = "none";
+    $("modal").style.display = "none";
+  }
+
+
+  // --- Encounters Window (Patient's Registration Details) ---
+  function onEncounterLinkClick(){
+    var el = window.event ? window.event.srcElement : this;
+    // climb up to element that has _pid
+    while (el && typeof el._pid === "undefined" && el.parentNode){
+      el = el.parentNode;
+    }
+    if (el && el._pid){
+      openEncountersModal(el._pid);
+    }
+    if (window.event){
+      window.event.cancelBubble = true;
+      window.event.returnValue = false;
+    }
+    return false;
+  }
+
+  function showEncModal(){
+    $("encOverlay").style.display = "block";
+    $("encModal").style.display = "block";
+  }
+
+  function closeEncModal(){
+    $("encOverlay").style.display = "none";
+    $("encModal").style.display = "none";
+    state.currentEncounterPatientId = "";
+    state.selectedEncounterId = "";
+  }
+
+  function onEncTabClick(){
+    var el = window.event ? window.event.srcElement : this;
+    if (!el) return;
+    // in IE, click may be on INPUT itself
+    var id = el.id ? el.id : "";
+    if (id.indexOf("encTab_") !== 0) return;
+    var key = id.substring(7);
+    setEncTab(key);
+  }
+
+  function setEncTab(tabKey){
+    state.encTab = tabKey;
+
+    var keys = ["search","demos","insurances","preauth","contacts","summary","appointments","followup","documents","encounters","bills","notes","pharmacies","rx","intakeforms"];
+    var i;
+    for (i=0;i<keys.length;i++){
+      var k = keys[i];
+      var btn = $("encTab_" + k);
+      if (btn){
+        btn.className = (k == tabKey) ? "tabBtn tabBtnActive" : "tabBtn";
+      }
+      var pane = $("encPane_" + k);
+      if (pane){
+        pane.className = (k == tabKey) ? "encPane encPaneActive" : "encPane";
+      }
+    }
+  }
+
+  function openEncountersModal(patientId){
+    var p = findPatientById(patientId);
+    if (!p) return;
+
+    state.currentEncounterPatientId = patientId;
+    state.selectedEncounterId = "";
+
+    var gender = (p.sex == "M") ? "Male" : "Female";
+    setText($("encTitle"), "Patient's Registration Details [ " + p.mrn + " ], " + p.name + ", " + p.age + " Years, " + gender);
+
+    setEncTab("encounters");
+    renderEncountersTable(patientId);
+    showEncModal();
+  }
+
+  function getEncountersForPatient(patientId){
+    if (!DATA.encounters) DATA.encounters = {};
+    if (!DATA.encounters[patientId]) DATA.encounters[patientId] = [];
+    return DATA.encounters[patientId];
+  }
+
+  function findEncounterById(patientId, encId){
+    var list = getEncountersForPatient(patientId);
+    var i;
+    for (i=0;i<list.length;i++){
+      if (String(list[i].id) == String(encId)) return list[i];
+    }
+    return null;
+  }
+
+  function renderEncountersTable(patientId){
+    var tbody = $("encTableBody");
+    if (!tbody) return;
+
+    // clear tbody
+    while (tbody.rows.length > 0){
+      tbody.deleteRow(0);
+    }
+
+    var list = getEncountersForPatient(patientId);
+    if (!list || list.length < 1){
+      var tr0 = tbody.insertRow(tbody.rows.length);
+      var td0 = tr0.insertCell(0);
+      td0.colSpan = 8;
+      td0.style.textAlign = "center";
+      td0.style.color = "#666666";
+      td0.style.padding = "18px";
+      setText(td0, "No encounters found for this patient.");
+      return;
+    }
+
+    var i;
+    for (i=0;i<list.length;i++){
+      var enc = list[i];
+
+      var tr = tbody.insertRow(tbody.rows.length);
+      tr._encid = enc.id;
+      tr._pid = patientId;
+
+      addEvent(tr, "mouseover", onEncRowOver);
+      addEvent(tr, "mouseout", onEncRowOut);
+      addEvent(tr, "click", onEncRowClick);
+
+      // Encounter Id
+      var tdId = tr.insertCell(tr.cells.length);
+      var idLink = document.createElement("span");
+      idLink.className = "clickLink";
+      idLink._encid = enc.id;
+      idLink._pid = patientId;
+      setText(idLink, String(enc.id));
+      addEvent(idLink, "click", onEncIdClick);
+      tdId.appendChild(idLink);
+
+      // Provider Name
+      var tdProv = tr.insertCell(tr.cells.length);
+      setText(tdProv, enc.providerName);
+
+      // Facility Name
+      var tdFac = tr.insertCell(tr.cells.length);
+      setText(tdFac, enc.facilityName);
+
+      // Date
+      var tdDate = tr.insertCell(tr.cells.length);
+      setText(tdDate, formatDate(enc.date));
+
+      // Description
+      var tdDesc = tr.insertCell(tr.cells.length);
+      setText(tdDesc, enc.description);
+
+      // Edit
+      var tdEdit = tr.insertCell(tr.cells.length);
+      tdEdit.style.textAlign = "center";
+      var editBtn = document.createElement("input");
+      editBtn.type = "button";
+      editBtn.value = "E";
+      editBtn.title = "Edit encounter";
+      editBtn.className = "encEditBtn";
+      editBtn._encid = enc.id;
+      editBtn._pid = patientId;
+      addEvent(editBtn, "click", onEditEncounter);
+      tdEdit.appendChild(editBtn);
+
+      // Visit Summary Notes
+      var tdSum = tr.insertCell(tr.cells.length);
+      if (enc.hasSummary){
+        var sumLink = document.createElement("span");
+        sumLink.className = "clickLink";
+        sumLink._encid = enc.id;
+        sumLink._pid = patientId;
+        setText(sumLink, "Visit Summary Notes");
+        addEvent(sumLink, "click", onVisitSummaryClick);
+        tdSum.appendChild(sumLink);
+      } else {
+        setText(tdSum, "");
+      }
+
+      // Select To Print
+      var tdChk = tr.insertCell(tr.cells.length);
+      tdChk.style.textAlign = "center";
+      var cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb._encid = enc.id;
+      tdChk.appendChild(cb);
+
+      // selected state
+      if (String(state.selectedEncounterId) != "" && String(state.selectedEncounterId) == String(enc.id)){
+        tr.className = "encRowSelected";
+      }
+    }
+  }
+
+  function getEventRow(){
+    var el = window.event ? window.event.srcElement : null;
+    while (el && el.tagName && el.tagName.toLowerCase() != "tr"){
+      el = el.parentNode;
+    }
+    return el;
+  }
+
+  function onEncRowOver(){
+    var tr = getEventRow();
+    if (!tr) return;
+    if (tr.className != "encRowSelected"){
+      tr.className = "encRowHover";
+    }
+  }
+  function onEncRowOut(){
+    var tr = getEventRow();
+    if (!tr) return;
+    if (String(tr._encid) == String(state.selectedEncounterId)){
+      tr.className = "encRowSelected";
+    } else {
+      tr.className = "";
+    }
+  }
+  function onEncRowClick(){
+    var tr = getEventRow();
+    if (!tr) return;
+    state.selectedEncounterId = tr._encid;
+    // repaint selection
+    var tbody = $("encTableBody");
+    var i;
+    for (i=0;i<tbody.rows.length;i++){
+      var r = tbody.rows[i];
+      if (String(r._encid) == String(state.selectedEncounterId)){
+        r.className = "encRowSelected";
+      } else {
+        r.className = "";
+      }
+    }
+  }
+
+  function onEncIdClick(){
+    // Click on Encounter Id: select row and open details window
+    var el = window.event ? window.event.srcElement : this;
+    while (el && typeof el._encid === "undefined" && el.parentNode){
+      el = el.parentNode;
+    }
+    if (!el) return false;
+
+    state.selectedEncounterId = el._encid;
+    onEncRowClick(); // highlight
+
+    var enc = findEncounterById(el._pid, el._encid);
+    if (enc){
+      openEncounterDetails(enc);
+    }
+
+    if (window.event){
+      window.event.cancelBubble = true;
+      window.event.returnValue = false;
+    }
+    return false;
+  }
+
+  function onEditEncounter(){
+    var el = window.event ? window.event.srcElement : this;
+    if (!el) return false;
+
+    var enc = findEncounterById(el._pid, el._encid);
+    if (!enc) return false;
+
+    var newDesc = prompt("Edit description:", enc.description);
+    if (newDesc !== null){
+      enc.description = newDesc;
+      renderEncountersTable(el._pid);
+    }
+
+    if (window.event){
+      window.event.cancelBubble = true;
+      window.event.returnValue = false;
+    }
+    return false;
+  }
+
+  function onVisitSummaryClick(){
+    var el = window.event ? window.event.srcElement : this;
+    while (el && typeof el._encid === "undefined" && el.parentNode){
+      el = el.parentNode;
+    }
+    if (!el) return false;
+
+    var enc = findEncounterById(el._pid, el._encid);
+    if (enc){
+      openVisitSummary(enc);
+    }
+
+    if (window.event){
+      window.event.cancelBubble = true;
+      window.event.returnValue = false;
+    }
+    return false;
+  }
+
+  function escapeHtml(s){
+    s = String(s);
+    s = s.replace(/&/g, "&amp;");
+    s = s.replace(/</g, "&lt;");
+    s = s.replace(/>/g, "&gt;");
+    s = s.replace(/\"/g, "&quot;");
+    return s;
+  }
+
+  function openPopupHtml(title, bodyHtml){
+    // NOTE (Win2003/IE6): window.open() can throw "Access is denied" depending on IE security/popup settings.
+    // To keep this HTA stable, render the popup content inside the built-in modal instead.
+    $("modalTitle").innerText = String(title);
+    $("modalBody").innerHTML = "<div class='popupWrap'>" + String(bodyHtml) + "</div>";
+    showModal();
+    return null;
+  }
+
+  function openEncounterDetails(enc){
+    var p = findPatientById(enc.patientId);
+    var html = '';
+    html += '<h2>Encounter #' + escapeHtml(enc.id) + '</h2>';
+    if (p){
+      html += '<div class="muted"><b>Patient:</b> ' + escapeHtml(p.name) + ' &nbsp; <b>MRN:</b> ' + escapeHtml(p.mrn) + '</div>';
+      html += '<div class="muted"><b>Department:</b> ' + escapeHtml(p.department) + ' &nbsp; <b>Facility:</b> ' + escapeHtml(p.facility) + '</div>';
+      html += '<br />';
+    }
+    html += '<table><tr><th style="width:160px;">Provider</th><td>' + escapeHtml(enc.providerName) + '</td></tr>';
+    html += '<tr><th>Facility</th><td>' + escapeHtml(enc.facilityName) + '</td></tr>';
+    html += '<tr><th>Date</th><td>' + escapeHtml(formatDate(enc.date)) + '</td></tr>';
+    html += '<tr><th>Description</th><td>' + escapeHtml(enc.description) + '</td></tr></table>';
+    openPopupHtml("Encounter " + enc.id, html);
+  }
+
+  function openVisitSummary(enc){
+    var p = findPatientById(enc.patientId);
+    var html = '';
+    html += '<h2>Visit Summary Notes - Encounter #' + escapeHtml(enc.id) + '</h2>';
+    if (p){
+      html += '<div class="muted"><b>Patient:</b> ' + escapeHtml(p.name) + ' &nbsp; <b>MRN:</b> ' + escapeHtml(p.mrn) + '</div>';
+      html += '<div class="muted"><b>DOB:</b> ' + escapeHtml(formatDate(p.dob)) + ' (Age ' + escapeHtml(p.age) + ') &nbsp; <b>Sex:</b> ' + escapeHtml(p.sex) + '</div>';
+      html += '<div class="muted"><b>Diagnosis:</b> ' + escapeHtml(p.diagnosis) + '</div>';
+      html += '<br />';
+    }
+    html += '<table>';
+    html += '<tr><th style="width:180px;">Assessment</th><td>Stable. Continue current management plan.</td></tr>';
+    html += '<tr><th>Plan</th><td>Follow-up as scheduled. Reinforce medication compliance.</td></tr>';
+    if (p && p.department == "Glaucoma"){
+      html += '<tr><th>IOP OD/OS</th><td>' + escapeHtml(p.iopOD + "/" + p.iopOS) + ' mmHg &nbsp; (Target ' + escapeHtml(p.targetIOP) + ')</td></tr>';
+      html += '<tr><th>Medications</th><td>' + escapeHtml(p.meds) + '</td></tr>';
+      html += '<tr><th>Notes</th><td>OCT / VF reviewed. No progression noted.</td></tr>';
+    } else {
+      html += '<tr><th>Notes</th><td>Routine follow-up documentation.</td></tr>';
+    }
+    html += '</table>';
+    openPopupHtml("Visit Summary Notes", html);
+  }
+
+  function onAddNewPatient(){
+    if (window.event){
+      window.event.returnValue = false;
+      window.event.cancelBubble = true;
+    }
+    alert("Add New Patient is available in the full system.");
+    return false;
+  }
+
+  function onAddEncounter(){
+    if (window.event){
+      window.event.returnValue = false;
+      window.event.cancelBubble = true;
+    }
+    var pid = state.currentEncounterPatientId;
+    if (!pid) return false;
+
+    var list = getEncountersForPatient(pid);
+
+    // compute new id
+    var maxId = 0;
+    var i;
+    for (i=0;i<list.length;i++){
+      if (list[i].id > maxId) maxId = list[i].id;
+    }
+    var newId = (maxId > 0) ? (maxId + 1) : (800 + r(0, 150));
+
+    list[list.length] = {
+      id: newId,
+      patientId: pid,
+      providerName: pick(PROVIDERS),
+      facilityName: state.facility,
+      date: new Date(),
+      description: "Follow-Up",
+      hasSummary: 1
+    };
+
+    // newest first
+    list.sort(function(a,b){ return b.date - a.date; });
+
+    // update encounters count in Patient Data list behind the modal
+    renderView();
+    renderEncountersTable(pid);
+    return false;
+  }
+
+  function getSelectedEncounterIds(){
+    var ids = [];
+    var tbody = $("encTableBody");
+    if (!tbody) return ids;
+
+    var inputs = tbody.getElementsByTagName("input");
+    var i;
+    for (i=0;i<inputs.length;i++){
+      var inp = inputs[i];
+      if (inp && inp.type == "checkbox" && inp.checked){
+        ids[ids.length] = inp._encid;
+      }
+    }
+    return ids;
+  }
+
+  function onViewPdf(){
+    if (window.event){
+      window.event.returnValue = false;
+      window.event.cancelBubble = true;
+    }
+
+    var pid = state.currentEncounterPatientId;
+    if (!pid) return false;
+
+    var list = getEncountersForPatient(pid);
+    if (!list || list.length < 1){
+      alert("No encounters available.");
+      return false;
+    }
+
+    var enc = null;
+
+    // Prefer selected encounter
+    if (state.selectedEncounterId){
+      enc = findEncounterById(pid, state.selectedEncounterId);
+    }
+
+    // Otherwise first checked
+    if (!enc){
+      var selected = getSelectedEncounterIds();
+      if (selected.length > 0){
+        enc = findEncounterById(pid, selected[0]);
+      }
+    }
+
+    // Otherwise most recent
+    if (!enc){
+      enc = list[0];
+    }
+
+    // "View PDF" (HTML preview) for the selected encounter
+    openVisitSummary(enc);
+    return false;
+  }
+
+  function onPrintSelected(){
+    if (window.event){
+      window.event.returnValue = false;
+      window.event.cancelBubble = true;
+    }
+
+    var pid = state.currentEncounterPatientId;
+    if (!pid) return false;
+
+    var ids = getSelectedEncounterIds();
+    if (ids.length < 1){
+      alert("Please select at least one encounter to print.");
+      return false;
+    }
+
+    var p = findPatientById(pid);
+    var html = '';
+    html += '<h2>Selected Encounters</h2>';
+    if (p){
+      html += '<div class="muted"><b>Patient:</b> ' + escapeHtml(p.name) + ' &nbsp; <b>MRN:</b> ' + escapeHtml(p.mrn) + '</div><br />';
+    }
+
+    html += '<table>';
+    html += '<tr><th style="width:90px;">Encounter Id</th><th style="width:160px;">Provider</th><th style="width:120px;">Facility</th><th style="width:90px;">Date</th><th>Description</th></tr>';
+
+    var i;
+    for (i=0;i<ids.length;i++){
+      var enc = findEncounterById(pid, ids[i]);
+      if (enc){
+        html += '<tr><td>' + escapeHtml(enc.id) + '</td><td>' + escapeHtml(enc.providerName) + '</td><td>' + escapeHtml(enc.facilityName) + '</td><td>' + escapeHtml(formatDate(enc.date)) + '</td><td>' + escapeHtml(enc.description) + '</td></tr>';
+      }
+    }
+    html += '</table>';
+
+    openPopupHtml("Print Selected", html);
+    return false;
+  }
+
+
+  // --- Events ---
+  function onHeaderClick(){
+    // In attachEvent, "this" can be window, so use event.srcElement.
+    var el = window.event ? window.event.srcElement : this;
+    if (!el) return;
+
+    // Ensure we have the header cell
+    while (el && el.tagName && el.tagName.toLowerCase() != "td" && el.parentNode){
+      el = el.parentNode;
+    }
+    var key = el._sortkey;
+    if (!key) return;
+
+    if (state.sortKey == key){
+      state.sortDir = (state.sortDir == "asc") ? "desc" : "asc";
+    } else {
+      state.sortKey = key;
+      state.sortDir = "asc";
+    }
+    renderView();
+  }
+
+  
+  function onRowOver(){
+    var tr = window.event ? window.event.srcElement : this;
+    // might hit td, climb to tr
+    while (tr && tr.tagName && tr.tagName.toLowerCase() != "tr"){
+      tr = tr.parentNode;
+    }
+    if (!tr) return;
+    if (tr._rowid != state.selectedRowId){
+      tr.className = "rowHover";
+    }
+  }
+  function onRowOut(){
+    var tr = window.event ? window.event.srcElement : this;
+    while (tr && tr.tagName && tr.tagName.toLowerCase() != "tr"){
+      tr = tr.parentNode;
+    }
+    if (!tr) return;
+    if (tr._rowid == state.selectedRowId){
+      tr.className = "rowSelected";
+    } else {
+      tr.className = "";
+    }
+  }
+  function onRowClick(){
+    var tr = window.event ? window.event.srcElement : this;
+    while (tr && tr.tagName && tr.tagName.toLowerCase() != "tr"){
+      tr = tr.parentNode;
+    }
+    if (!tr) return;
+    state.selectedRowId = tr._rowid;
+    highlightSelection();
+    renderDetails();
+  }
+  function onRowDblClick(){
+    onRowClick();
+    openRecordModal();
+  }
+
+  // Cached button references (IE6-safe)
+  var __menuButtons = [];
+  var __actionButtons = [];
+
+  function cacheButtons(){
+    __menuButtons = [];
+    __actionButtons = [];
+    var inputs = document.getElementsByTagName("input");
+    var i;
+    for (i=0;i<inputs.length;i++){
+      var el = inputs[i];
+      if (el && el.id){
+        if (el.id.indexOf("nav_") == 0){
+          __menuButtons[__menuButtons.length] = el;
+        } else if (el.id.indexOf("btn_") == 0){
+          __actionButtons[__actionButtons.length] = el;
+        }
+      }
+    }
+  }
+
+  function menuOver(){
+    var src = window.event ? window.event.srcElement : this;
+    if (!src) return;
+    if (src.className.indexOf("menuBtnActive") < 0){
+      src.className = "menuBtn menuBtnHover";
+    }
+  }
+  function menuOut(){
+    var src = window.event ? window.event.srcElement : this;
+    if (!src) return;
+    if (src.className.indexOf("menuBtnActive") < 0){
+      src.className = "menuBtn";
+    }
+  }
+
+  function setPressedButton(action){
+    var i;
+    for (i=0;i<__actionButtons.length;i++){
+      var b = __actionButtons[i];
+      if (!b || !b.id) continue;
+      if (action && b.id == ("btn_" + action)){
+        b.className = "mfBtn mfBtnActive";
+      } else {
+        b.className = "mfBtn";
+      }
+    }
+  }
+
+  function setActiveMenu(menuKey){
+    var i;
+    for (i=0;i<__menuButtons.length;i++){
+      var b = __menuButtons[i];
+      if (!b || !b.id) continue;
+      if (menuKey && b.id == ("nav_" + menuKey)){
+        b.className = "menuBtn menuBtnActive";
+      } else {
+        b.className = "menuBtn";
+      }
+    }
+  }
+
+  function syncHeaderScroll(){
+    // keep header aligned when the body is horizontally scrolled
+    try{
+      $("listHeaderWrap").scrollLeft = $("listBodyWrap").scrollLeft;
+    }catch(e){}
+  }
+
+  function setView(viewId, fromAction, fromMenu){
+    state.view = viewId;
+    state.quickFilter = "";
+    $("quickFilter").value = "";
+    state.selectedRowId = "";
+    state.sortKey = "";
+    state.sortDir = "asc";
+
+    // reset list scroll positions (important for horizontal scrolling views)
+    try{
+      $("listBodyWrap").scrollTop = 0;
+      $("listBodyWrap").scrollLeft = 0;
+      $("listHeaderWrap").scrollLeft = 0;
+    }catch(e){}
+
+    if (fromAction){
+      // department implied by some actions
+      if (viewId == "glaucoma_followup") state.department = "Glaucoma";
+      if (viewId == "retina_single") state.department = "Retina";
+      if (viewId == "pediatric_single") state.department = "Pediatrics";
+      if (viewId == "contact_lens_exam") state.department = "Contact Lenses";
+      if (viewId == "refractive_exam") state.department = "Refractive";
+      if (viewId == "optical") state.department = "Optical";
+      if (viewId == "workup") state.department = "Workup";
+      $("deptSelect").value = state.department;
+
+      setPressedButton(getActionFromView(viewId));
+      setActiveMenu("");
+    }
+    if (fromMenu){
+      setActiveMenu(getMenuFromView(viewId));
+      setPressedButton("");
+    }
+
+    updateRxCounts();
+    renderView();
+  }
+
+  function getActionFromView(viewId){
+    var k;
+    for (k in ACTION_TO_VIEW){
+      if (ACTION_TO_VIEW[k] == viewId) return k;
+    }
+    return "";
+  }
+  function getMenuFromView(viewId){
+    var k;
+    for (k in NAV_TO_VIEW){
+      if (NAV_TO_VIEW[k] == viewId) return k;
+    }
+    return "";
+  }
+
+  function onActionButton(){
+    var el = window.event ? window.event.srcElement : this;
+    if (!el) return;
+    // click can originate from child nodes; climb to an element with an id
+    while (el && !el.id && el.parentNode){
+      el = el.parentNode;
+    }
+    if (!el || !el.id) return;
+
+    // action buttons are id="btn_<action>"
+    if (el.id.indexOf("btn_") != 0) return;
+    var action = el.id.substring(4);
+    var viewId = ACTION_TO_VIEW[action];
+    if (!viewId) return;
+    setView(viewId, true, false);
+  }
+
+  
+  function onMenuButton(){
+    var el = window.event ? window.event.srcElement : this;
+    if (!el) return;
+    while (el && !el.id && el.parentNode){
+      el = el.parentNode;
+    }
+    if (!el || !el.id) return;
+
+    // menu buttons are id="nav_<key>"
+    if (el.id.indexOf("nav_") != 0) return;
+    var key = el.id.substring(4);
+    var viewId = NAV_TO_VIEW[key];
+    if (!viewId) return;
+    setView(viewId, false, true);
+  }
+
+  
+  function onFacilityChange(){
+    state.facility = $("facilitySelect").value;
+    updateRxCounts();
+    renderView();
+    renderDetails();
+  }
+  function onDeptChange(){
+    state.department = $("deptSelect").value;
+    updateRxCounts();
+    renderView();
+    renderDetails();
+  }
+
+  function onQuickFilter(){
+    state.quickFilter = $("quickFilter").value;
+    renderView();
+  }
+
+  function resetClinicians(){
+    $("doctorInput").value = "William H Bartlett MD";
+    $("techInput").value = "CitrusBits";
+  }
+
+  function searchName(){
+    var q = trim($("searchInput").value);
+    if (!q){
+      alert("Enter a patient name to search.");
+      return;
+    }
+    // Build search results view on the fly (simple)
+    var ql = toLower(q);
+    var matches = [];
+    var i;
+    for (i=0;i<DATA.patients.length;i++){
+      var p = DATA.patients[i];
+      var nm = toLower(p.name);
+      if (nm.indexOf(ql) >= 0){
+        matches[matches.length] = p;
+      }
+    }
+    // Define a temporary view
+    VIEW_DEFS["search_results"] = {
+      title: function(){ return "Search Results"; },
+      sub: function(){ return String(matches.length) + " match(es) for \"" + q + "\""; },
+      columns: [
+        {key:"name", label:"Name", width:200, sortable:1},
+        {key:"mrn", label:"MRN", width:90, sortable:1},
+        {key:"dept", label:"Dept", width:120, sortable:1},
+        {key:"facility", label:"Facility", width:80, sortable:1},
+        {key:"next", label:"Next Appt", width:100, sortable:1}
+      ],
+      rows: function(){
+        var out = [];
+        var j;
+        for (j=0;j<matches.length;j++){
+          var p2 = matches[j];
+          out[out.length] = {
+            id: "SR-" + p2.id,
+            patientId: p2.id,
+            name: p2.name,
+            mrn: p2.mrn,
+            dept: p2.department,
+            facility: p2.facility,
+            next: formatDate(p2.nextAppt)
+          };
+        }
+        return out;
+      }
+    };
+
+    setView("search_results", false, true);
+  }
+
+  function exitApp(){
+    if (confirm("Exit Medflow Clinical System?")){
+      window.close();
+    }
+  }
+
+  // Clock
+  function tickClock(){
+    var now = new Date();
+    setText($("clockDate"), formatDate(now));
+    setText($("clockTime"), formatTime(now));
+  }
+
+  // Layout sizing
+  function layout(){
+    var h = (document.documentElement && document.documentElement.clientHeight) ? document.documentElement.clientHeight : document.body.clientHeight;
+    var w = (document.documentElement && document.documentElement.clientWidth) ? document.documentElement.clientWidth : document.body.clientWidth;
+
+    // Rows: title (28) + menu (26) + footer (56) + content remainder
+    var contentH = h - 28 - 26 - 56;
+    if (contentH < 200) contentH = 200;
+
+    $("contentRow").style.height = contentH + "px";
+
+    // Ensure the left/right cells adopt the calculated height
+    $("leftCell").style.height = contentH + "px";
+    $("rightCell").style.height = contentH + "px";
+
+    // Left scroll area height
+    // left header approx 126px (brand + selectors). Keep dynamic.
+    var leftHeaderH = $("leftHeader").offsetHeight;
+    var leftButtonsH = contentH - leftHeaderH - 10;
+    if (leftButtonsH < 140) leftButtonsH = 140;
+    $("leftButtonsWrap").style.height = leftButtonsH + "px";
+
+    // Right: rx (approx 80) + clock (approx 90) + header (approx 70) + list + details
+    var rxH = $("rxBox").offsetHeight;
+    var clockH = $("clockBox").offsetHeight;
+    var workHeaderH = $("workHeader").offsetHeight;
+
+    // Details height fixed-ish
+    var detailsH = 150;
+    $("detailsBox").style.height = detailsH + "px";
+
+    var listAvail = contentH - rxH - clockH - workHeaderH - detailsH - 20;
+    if (listAvail < 120) listAvail = 120;
+
+    $("listBodyWrap").style.height = listAvail + "px";
+
+    // Header wrap height fixed
+    $("listHeaderWrap").style.height = "26px";
+
+    // Make header and body widths consistent
+    // (body wrap may show horizontal scroll if table wider)
+
+    // Force fixed widths on scroll containers. In old IE/HTA, DIVs inside table cells
+    // can shrink-to-fit their table content, which makes the horizontal scrollbar non-functional.
+    var rcW = $("rightCell").offsetWidth;
+    if (!rcW || rcW < 1) rcW = 360;
+    var innerW = rcW - 16; // account for 8px left/right margins on list boxes
+    if (innerW < 200) innerW = 200;
+
+    $("listHeaderWrap").style.width = innerW + "px";
+    $("listBodyWrap").style.width = innerW + "px";
+    $("detailsBox").style.width = innerW + "px";
+  }
+
+  function init(){
+    initSeed();
+    DATA.patients = generatePatients();
+    DATA.encounters = generateEncounters(DATA.patients);
+    defineViews();
+
+    // wire events
+    wireButtons();
+
+    // defaults
+    $("facilitySelect").value = state.facility;
+    $("deptSelect").value = state.department;
+    $("doctorInput").value = "William H Bartlett MD";
+    $("techInput").value = "CitrusBits";
+
+    updateRxCounts();
+    tickClock();
+    window.setInterval(tickClock, 1000);
+
+    // default view is glaucoma followup
+    setView("glaucoma_followup", true, false);
+
+    // initial layout
+    layout();
+    addEvent(window, "resize", layout);
+  }
+
+  function wireMenuHover(){
+    var inputs = document.getElementsByTagName("input");
+    var i;
+    for (i=0;i<inputs.length;i++){
+      var el = inputs[i];
+      if (el.getAttribute && el.getAttribute("data-view")){
+        addEvent(el, "mouseover", function(){
+          var src = window.event ? window.event.srcElement : this;
+          if (src.className.indexOf("menuBtnActive") < 0) src.className = "menuBtn menuBtnHover";
+        });
+        addEvent(el, "mouseout", function(){
+          var src = window.event ? window.event.srcElement : this;
+          if (src.className.indexOf("menuBtnActive") < 0) src.className = "menuBtn";
+        });
+      }
+    }
+  }
+
+  function wireButtons(){
+    // Cache the nav/action buttons once (avoids custom attributes in old IE)
+    cacheButtons();
+
+    var i;
+
+    // Menu buttons (top nav)
+    for (i=0;i<__menuButtons.length;i++){
+      var m = __menuButtons[i];
+      addEvent(m, "click", onMenuButton);
+      addEvent(m, "mouseover", menuOver);
+      addEvent(m, "mouseout", menuOut);
+    }
+
+    // Main action buttons (center panel)
+    for (i=0;i<__actionButtons.length;i++){
+      var a = __actionButtons[i];
+      addEvent(a, "click", onActionButton);
+    }
+
+    addEvent($("facilitySelect"), "change", onFacilityChange);
+    addEvent($("deptSelect"), "change", onDeptChange);
+    addEvent($("quickFilter"), "keyup", onQuickFilter);
+    addEvent($("listBodyWrap"), "scroll", syncHeaderScroll);
+
+    addEvent($("resetCliniciansBtn"), "click", resetClinicians);
+    addEvent($("searchBtn"), "click", searchName);
+    addEvent($("exitBtn"), "click", exitApp);
+
+    // Enter key in search input
+    addEvent($("searchInput"), "keyup", function(){
+      var e = window.event;
+      if (e && e.keyCode == 13) searchName();
+    });
+
+    // modal close
+    addEvent($("modalCloseBtn"), "click", closeModal);
+    addEvent($("modalCloseTopBtn"), "click", closeModal);
+    addEvent($("modalPrintBtn"), "click", function(){
+      // Print modal body (basic)
+      window.print();
+    });
+
+    // encounters window
+    addEvent($("encCloseBtn"), "click", closeEncModal);
+    addEvent($("encCloseTopBtn"), "click", closeEncModal);
+    addEvent($("encAddPatientLink"), "click", onAddNewPatient);
+    addEvent($("encAddEncounterLink"), "click", onAddEncounter);
+    addEvent($("encViewPdfBtn"), "click", onViewPdf);
+    addEvent($("encPrintSelectedBtn"), "click", onPrintSelected);
+
+    // tab buttons
+    var tabs = ["search","demos","insurances","preauth","contacts","summary","appointments","followup","documents","encounters","bills","notes","pharmacies","rx","intakeforms"];
+    var ti;
+    for (ti=0;ti<tabs.length;ti++){
+      var tb = $("encTab_" + tabs[ti]);
+      if (tb) addEvent(tb, "click", onEncTabClick);
+    }
+  }
+
+  
+  // Start when ready
+  addEvent(window, "load", init);
+
+  </script>
+</head>
+
+<body>
+  <table class="app" cellspacing="0" cellpadding="0">
+    <colgroup>
+      <col>
+      <col width="360">
+    </colgroup>
+    <tr>
+      <td colspan="2" class="titlebar">
+        Medflow Clinical System
+        <span class="meta">Copyright 1999-2025 Medflow, Inc. &nbsp;&nbsp; Database: MEDFLOW</span>
+      </td>
+    </tr>
+
+    <tr>
+      <td colspan="2" class="menubar">
+        <input type="button" class="menuBtn" id="nav_admin" value="Administration" />
+        <input type="button" class="menuBtn" id="nav_front_desk" value="Front Desk" />
+        <input type="button" class="menuBtn" id="nav_technician" value="Technician" />
+        <input type="button" class="menuBtn" id="nav_doctor_function" value="Doctor Function" />
+        <input type="button" class="menuBtn" id="nav_asc_surgery" value="ASC/Surgery" />
+        <input type="button" class="menuBtn" id="nav_contact_lenses" value="Contact Lenses" />
+        <input type="button" class="menuBtn" id="nav_billing" value="Billing" />
+        <input type="button" class="menuBtn" id="nav_file_maint" value="File Maint" />
+        <input type="button" class="menuBtn" id="nav_image_processing" value="Image Processing" />
+        <input type="button" class="menuBtn" id="nav_procedures" value="Procedures" />
+        <input type="button" class="menuBtn" id="nav_query_tool" value="Query Tool" />
+        <input type="button" class="menuBtn" id="nav_practice_mgmt" value="Practice Management" />
+        <input type="button" class="menuBtn" id="nav_quick_message" value="Quick Message" />
+      </td>
+    </tr>
+
+    <tr id="contentRow">
+      <td id="leftCell" class="leftCell">
+        <div id="leftHeader" class="leftHeader">
+          <div class="brandBox">
+            <div class="brandName">Medflow</div>
+            <div class="brandSub">by Sightview</div>
+          </div>
+
+          <div class="selectorsBox">
+            <div>
+              <label>Facility:</label>
+              <select id="facilitySelect">
+                <option value="TC1">TC1</option>
+                <option value="TC2">TC2</option>
+                <option value="East">East</option>
+              </select>
+            </div>
+            <div>
+              <label>Department:</label>
+              <select id="deptSelect">
+                <option value="Glaucoma">Glaucoma</option>
+                <option value="Retina">Retina</option>
+                <option value="Pediatrics">Pediatrics</option>
+                <option value="Optical">Optical</option>
+                <option value="Contact Lenses">Contact Lenses</option>
+                <option value="Refractive">Refractive</option>
+                <option value="Workup">Workup</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div id="leftButtonsWrap" class="leftButtonsWrap">
+          <table class="btnGrid">
+            <tr>
+              <td><input type="button" class="mfBtn" id="btn_single_screen" value="DIRECT TO SINGLE SCREEN EXAM" /></td>
+              <td><input type="button" class="mfBtn" id="btn_specialized_exams" value="SPECIALIZED EXAMS" /></td>
+            </tr>
+            <tr>
+              <td><input type="button" class="mfBtn" id="btn_refractive_exam" value="REFRACTIVE EXAM" /></td>
+              <td><input type="button" class="mfBtn" id="btn_glaucoma_followup" value="DIRECT TO GLAUCOMA FOLLOW UP" /></td>
+            </tr>
+            <tr>
+              <td><input type="button" class="mfBtn" id="btn_workup" value="WORKUP" /></td>
+              <td><input type="button" class="mfBtn" id="btn_contact_lens_exam" value="CONTACT LENS EXAM" /></td>
+            </tr>
+            <tr>
+              <td><input type="button" class="mfBtn" id="btn_optical" value="OPTICAL" /></td>
+              <td><input type="button" class="mfBtn" id="btn_workflow_maint" value="WORKFLOW FILE MAINTENANCE" /></td>
+            </tr>
+            <tr>
+              <td><input type="button" class="mfBtn" id="btn_retina_single" value="DIRECT TO RETINA SINGLE SCREEN" /></td>
+              <td><input type="button" class="mfBtn" id="btn_patient_data" value="PATIENT DATA" /></td>
+            </tr>
+            <tr>
+              <td colspan="2"><input type="button" class="mfBtn" id="btn_pediatric_single" style="width:100%;" value="DIRECT PEDIATRIC SINGLE SCREEN" /></td>
+            </tr>
+          </table>
+        </div>
+      </td>
+
+      <td id="rightCell" class="rightCell" width="360">
+        <div id="rxBox" class="rxBox">
+          <table class="rxRow">
+            <tr><td>DrFirst Pending RX Count:</td><td class="rxNum" id="rxPending">0</td></tr>
+            <tr><td>Refill Request Count:</td><td class="rxNum" id="rxRefill">0</td></tr>
+            <tr><td>RxChange Count:</td><td class="rxNum" id="rxChange">0</td></tr>
+            <tr><td>RxNeedSigning Count:</td><td class="rxNum" id="rxNeedSigning">0</td></tr>
+          </table>
+        </div>
+
+        <div id="clockBox" class="clockBox">
+          <div class="clockDate" id="clockDate">--/--/----</div>
+          <div class="clockTime" id="clockTime">--:--:-- --</div>
+        </div>
+
+        <div id="workHeader" class="workHeader">
+          <div class="workTitle" id="viewTitle">Queue</div>
+          <div class="workSub" id="viewSub">Select a row to view details.</div>
+
+          <div class="filterRow">
+            <span style="color:#555;">Filter:</span>
+            <input type="text" id="quickFilter" />
+          </div>
+        </div>
+
+        <div id="listHeaderWrap" class="listHeaderWrap">
+          <table id="listHeaderTable" class="listTable"></table>
+        </div>
+        <div id="listBodyWrap" class="listBodyWrap">
+          <table id="listBodyTable" class="listTable"></table>
+        </div>
+
+        <div id="detailsBox" class="detailsBox">
+          <div class="detailsHdr">
+            Details
+            <span class="pill" id="selectionPill">No selection</span>
+            <div style="clear:both;"></div>
+          </div>
+          <div id="detailsBody" style="color:#555;">Select a row in the list to view details.</div>
+        </div>
+      </td>
+    </tr>
+
+    <tr>
+      <td colspan="2" class="footer">
+        <table class="footerTable">
+          <tr>
+            <td><b>Doctor:</b></td>
+            <td><input type="text" id="doctorInput" class="footerInput" value="William H Bartlett MD" /></td>
+            <td><input type="button" id="resetCliniciansBtn" class="footerBtn" value="RESET CLINICIANS" /></td>
+            <td style="width:18px;"></td>
+            <td><b>Technician:</b></td>
+            <td><input type="text" id="techInput" class="footerInput" value="CitrusBits" /></td>
+            <td style="width:18px;"></td>
+            <td><input type="text" id="searchInput" class="footerInput" style="width:220px;" value="" /></td>
+            <td><input type="button" id="searchBtn" class="footerBtn" value="SEARCH NAME" /></td>
+            <td><input type="button" id="exitBtn" class="footerBtn" value="EXIT" /></td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+
+  <!-- Modal -->
+  <div id="overlay" class="overlay"></div>
+  <div id="modal" class="modal">
+    <div class="modalHead">
+      <span id="modalTitle">Patient Record</span>
+      <input type="button" id="modalCloseTopBtn" class="modalBtn" style="float:right;" value="CLOSE" />
+      <div style="clear:both;"></div>
+    </div>
+    <div id="modalBody" class="modalBody"></div>
+    <div class="modalFoot">
+      <input type="button" id="modalPrintBtn" class="modalBtn" value="PRINT" />
+      <input type="button" id="modalCloseBtn" class="modalBtn" value="CLOSE" />
+    </div>
+  </div>
+
+
+  <!-- Encounters Window -->
+  <div id="encOverlay" class="overlay"></div>
+  <div id="encModal" class="encModal">
+    <div class="encHead">
+      <span id="encTitle">Patient's Registration Details</span>
+      <input type="button" id="encCloseTopBtn" class="modalBtn" style="float:right;width:28px;" value="X" />
+      <div style="clear:both;"></div>
+    </div>
+
+    <div class="encTabs">
+      <input type="button" class="tabBtn" id="encTab_search" value="Search" />
+      <input type="button" class="tabBtn" id="encTab_demos" value="Demos" />
+      <input type="button" class="tabBtn" id="encTab_insurances" value="Insurances" />
+      <input type="button" class="tabBtn" id="encTab_preauth" value="Pre Auth" />
+      <input type="button" class="tabBtn" id="encTab_contacts" value="Contacts" />
+      <input type="button" class="tabBtn" id="encTab_summary" value="Summary" />
+      <input type="button" class="tabBtn" id="encTab_appointments" value="Appointments" />
+      <input type="button" class="tabBtn" id="encTab_followup" value="Followup" />
+      <input type="button" class="tabBtn" id="encTab_documents" value="Documents" />
+      <input type="button" class="tabBtn tabBtnActive" id="encTab_encounters" value="Encounters" />
+      <input type="button" class="tabBtn" id="encTab_bills" value="Bills" />
+      <input type="button" class="tabBtn" id="encTab_notes" value="Notes" />
+      <input type="button" class="tabBtn" id="encTab_pharmacies" value="Pharmacies" />
+      <input type="button" class="tabBtn" id="encTab_rx" value="Rx" />
+      <input type="button" class="tabBtn" id="encTab_intakeforms" value="IntakeForms" />
+    </div>
+
+    <div class="encBody">
+      <div id="encPane_search" class="encPane">
+        <div class="encSectionTitle">Search</div>
+        <div style="font-size:12px;color:#666;">Search tools are available in the full system.</div>
+      </div>
+
+      <div id="encPane_demos" class="encPane">
+        <div class="encSectionTitle">Demos</div>
+        <div style="font-size:12px;color:#666;">Demographics details are available in the full system.</div>
+      </div>
+
+      <div id="encPane_insurances" class="encPane">
+        <div class="encSectionTitle">Insurances</div>
+        <div style="font-size:12px;color:#666;">Insurance information is available in the full system.</div>
+      </div>
+
+      <div id="encPane_preauth" class="encPane">
+        <div class="encSectionTitle">Pre Auth</div>
+        <div style="font-size:12px;color:#666;">Pre-authorization workflows are available in the full system.</div>
+      </div>
+
+      <div id="encPane_contacts" class="encPane">
+        <div class="encSectionTitle">Contacts</div>
+        <div style="font-size:12px;color:#666;">Contacts are available in the full system.</div>
+      </div>
+
+      <div id="encPane_summary" class="encPane">
+        <div class="encSectionTitle">Summary</div>
+        <div style="font-size:12px;color:#666;">Summary view is available in the full system.</div>
+      </div>
+
+      <div id="encPane_appointments" class="encPane">
+        <div class="encSectionTitle">Appointments</div>
+        <div style="font-size:12px;color:#666;">Appointments are available in the full system.</div>
+      </div>
+
+      <div id="encPane_followup" class="encPane">
+        <div class="encSectionTitle">Followup</div>
+        <div style="font-size:12px;color:#666;">Follow-up workflows are available in the full system.</div>
+      </div>
+
+      <div id="encPane_documents" class="encPane">
+        <div class="encSectionTitle">Documents</div>
+        <div style="font-size:12px;color:#666;">Documents are available in the full system.</div>
+      </div>
+
+      <div id="encPane_bills" class="encPane">
+        <div class="encSectionTitle">Bills</div>
+        <div style="font-size:12px;color:#666;">Billing information is available in the full system.</div>
+      </div>
+
+      <div id="encPane_notes" class="encPane">
+        <div class="encSectionTitle">Notes</div>
+        <div style="font-size:12px;color:#666;">Notes are available in the full system.</div>
+      </div>
+
+      <div id="encPane_pharmacies" class="encPane">
+        <div class="encSectionTitle">Pharmacies</div>
+        <div style="font-size:12px;color:#666;">Pharmacy information is available in the full system.</div>
+      </div>
+
+      <div id="encPane_rx" class="encPane">
+        <div class="encSectionTitle">Rx</div>
+        <div style="font-size:12px;color:#666;">Prescription workflows are available in the full system.</div>
+      </div>
+
+      <div id="encPane_intakeforms" class="encPane">
+        <div class="encSectionTitle">IntakeForms</div>
+        <div style="font-size:12px;color:#666;">Intake forms are available in the full system.</div>
+      </div>
+
+      <div id="encPane_encounters" class="encPane encPaneActive">
+        <div style="margin-bottom:6px;">
+          <span id="encAddPatientLink" class="encTopLink">Add New Patient</span>
+        </div>
+
+        <div class="encSectionTitle">Patient Encounters</div>
+
+        <div class="encAddRow">
+          <span class="encPlus">+</span>
+          <span id="encAddEncounterLink" class="encAddLink">Click Here To Add Encounters</span>
+        </div>
+
+        <div class="encTableWrap">
+          <table class="encTable" cellspacing="0" cellpadding="0">
+            <colgroup>
+              <col style="width:100px;" />
+              <col style="width:160px;" />
+              <col style="width:130px;" />
+              <col style="width:90px;" />
+              <col style="width:140px;" />
+              <col style="width:50px;" />
+              <col style="width:140px;" />
+              <col style="width:110px;" />
+            </colgroup>
+            <thead>
+              <tr>
+                <th>Encounter Id</th>
+                <th>Provider Name</th>
+                <th>Facility Name</th>
+                <th>Date</th>
+                <th>Description</th>
+                <th>Edit</th>
+                <th>&nbsp;</th>
+                <th>Select To Print</th>
+              </tr>
+            </thead>
+            <tbody id="encTableBody"></tbody>
+          </table>
+        </div>
+
+        <div class="encButtonRow">
+          <input type="button" class="encButton" id="encViewPdfBtn" value="View PDF" />
+          <input type="button" class="encButton" id="encPrintSelectedBtn" value="Print Selected" />
+        </div>
+
+        <div class="encCloseRow">
+          <input type="button" class="encCloseBtn" id="encCloseBtn" value="CLOSE" />
+        </div>
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>
