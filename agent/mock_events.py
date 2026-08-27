@@ -908,6 +908,33 @@ COMBO_INDEX_SESSION_META = {
     "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
 }
 
+# 2026-08-17 (VS "새 프로젝트 만들기" 언어/플랫폼 필터 실측): MockComboIndex와
+# 달리 이 콤보의 항목은 owner-drawn이 아니라 진짜 Name이 있다. 캡처 시점과
+# 재생 시점의 실제 목록 길이가 (같은 마우스 조작이라도) 구조적으로 어긋날 수
+# 있는 콤보라, osExpandCollapse.py가 개수 불일치 시 이 Name으로 유일하게
+# 찾아 폴백할 수 있어야 한다 — 그러려면 codegen이 comboItemName을
+# osExpandCollapse() 호출에 넘겨야 하는데, 예전엔 stepLabel 표시용으로만
+# 쓰고 버리고 있었다.
+NAMED_COMBO_INDEX_APP = "MockNamedComboIndex"
+NAMED_COMBO_INDEX_EVENTS = [
+    make_event("click", name="", automation_id="", class_name="ComboBox",
+               control_type="ComboBox", app_name=NAMED_COMBO_INDEX_APP,
+               expand_collapse=True, index=1),
+    make_event("click", name="Save", automation_id="btnSave", class_name="Button",
+               control_type="Button", app_name=NAMED_COMBO_INDEX_APP, index=2),
+]
+NAMED_COMBO_INDEX_EVENTS[0]["element"]["comboItemIndex"] = 4
+NAMED_COMBO_INDEX_EVENTS[0]["element"]["comboItemCount"] = 18
+NAMED_COMBO_INDEX_EVENTS[0]["element"]["comboItemName"] = "MySQL on RDS"
+NAMED_COMBO_INDEX_SESSION_META = {
+    "action": "session_meta",
+    "app": NAMED_COMBO_INDEX_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
 # hwnd-id trigger scenario (2026-07-29, HeidiSQL "더보기" SplitButton, 3차):
 # the target/triggerTarget object builders for the COM helpers
 # (osScopedInvoke/osExpandCollapse) read el.automationId directly — a
@@ -3310,6 +3337,39 @@ def step_wdio_generate_owner_drawn_dropdown_by_index():
         )
 
 
+def step_wdio_generate_named_combo_forwards_item_name():
+    print("\n[16b] Named combo item forwards comboItemName as a count-mismatch fallback")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", NAMED_COMBO_INDEX_SESSION_META)
+    for ev in NAMED_COMBO_INDEX_EVENTS:
+        request("POST", "/api/events", ev)
+
+    status, body = request("POST", "/api/generate", {
+        "appName": NAMED_COMBO_INDEX_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (named combo index) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped named-combo-index checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname = f.get("filename", "")
+        content = f.get("content", "")
+        check(
+            f"  {fname} forwards comboItemName to osExpandCollapse() as a count-mismatch fallback",
+            '"MySQL on RDS", 4, 18)' in content,
+            "agent.py already captures the real item Name for combos whose "
+            "items aren't owner-drawn (e.g. VS project-wizard filters); "
+            "codegen was discarding it (only used for the step label) so "
+            "osExpandCollapse.py had nothing to fall back on when the live "
+            "item count legitimately differs from the recorded one (VS "
+            "'언어 필터' 실측 2026-08-17: the list only shrinks by one after "
+            "a REAL mouse-driven selection, which a replay-side UIA "
+            "Invoke() never triggers, so capture and replay can never agree "
+            "on count for this control)",
+        )
+
+
 def step_wdio_generate_menu_index_is_not_a_trigger():
     print("\n[16] An index-based item pick is a complete action, not a bare trigger (HeidiSQL 더 보기, 2026-08-06)")
     request("DELETE", "/api/events")
@@ -4039,6 +4099,7 @@ def main():
     step_wdio_generate_trigger_expand_merge_order()
     step_wdio_generate_nameless_item_no_fake_itemname()
     step_wdio_generate_owner_drawn_dropdown_by_index()
+    step_wdio_generate_named_combo_forwards_item_name()
     step_wdio_generate_menu_index_is_not_a_trigger()
     step_wdio_generate_combobox_ex_reclick_drops_name()
     step_wdio_generate_hwnd_trigger_keeps_name()

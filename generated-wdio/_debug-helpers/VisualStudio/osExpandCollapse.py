@@ -212,7 +212,14 @@ def send_input_click(uia, el, tag, double=False):
     비시각적으로라도 동작하는 게 낫다는 2026-07-24 지시).
     """
     def bail(reason):
-        print("[COM-SendInput] fallback: " + reason + " - using programmatic Invoke/Select", file=sys.stderr)
+        # 2026-08-17 (VS 언어/플랫폼 필터 실측): 이 함수를 호출하는 스크립트가
+        # 결국 성공(exit 0)으로 끝나면, server.js의 execSync는 stdout만
+        # 돌려주고 stderr는 그냥 버린다 — 그래서 물리 클릭이 매번 폴백되고
+        # 있었는데도 사용자에게는 이유가 전혀 안 보였다(드롭다운은 열리는데
+        # 항목 클릭만 시각적으로 안 되는 증상으로만 나타남). stdout으로
+        # 옮긴다 — 실패(비정상 종료) 경로는 여전히 stdoutTxt로 그대로
+        # 보여지므로 그쪽 진단력은 잃지 않는다.
+        print("[COM-SendInput] fallback: " + reason + " - using programmatic Invoke/Select")
         return False
 
     if os.environ.get("QAFORGE_COM_CLICK") == "invoke":
@@ -265,8 +272,45 @@ def send_input_click(uia, el, tag, double=False):
         at_point = uia.ElementFromPoint(winpt)
     except Exception as e:
         return bail("element-from-point-failed (%s)" % e)
-    if not at_point or not _same_or_descendant(uia, el, at_point):
-        return bail("point-resolves-elsewhere")
+
+    def _fmt_elem(e2):
+        try:
+            return (f"name={e2.CurrentName!r} "
+                    f"automationId={e2.CurrentAutomationId!r} "
+                    f"className={e2.CurrentClassName!r} "
+                    f"controlType={e2.CurrentControlType!r}")
+        except Exception as e3:
+            return f"(read failed: {e3})"
+
+    if not at_point:
+        return bail("point-resolves-elsewhere -- wanted %s, "
+                    "ElementFromPoint(%d,%d) returned nothing"
+                    % (_fmt_elem(el), x, y))
+    if not _same_or_descendant(uia, el, at_point):
+        # 2026-08-17 (VS 콤보 팝업 항목 실측, VirtualizingStackPanel):
+        # ListBoxItem의 ClickablePoint가 그 자식 TextBlock 위에 찍히는데,
+        # WPF 가상화 목록은 스크롤/재렌더링 때마다 AutomationPeer를 새로
+        # 만들거나 재활용한다 — FindAll()로 찾은 el과 그 직후 같은 좌표를
+        # ElementFromPoint로 다시 찍어 얻은 결과가 논리적으로는 완전히 같은
+        # 화면상의 항목인데 COM 정체성만 달라, CompareElements 기반
+        # _same_or_descendant가 매번 "다른 요소"로 오판했다(실측: 92건 전부
+        # Name까지 정확히 일치, className만 ListBoxItem vs TextBlock).
+        # PID 검사(covered-by-other-window)는 이미 통과했으므로 같은
+        # 프로세스/창 안이라는 건 확정됐다 — 여기서 남은 위험은 "정말
+        # 엉뚱한 요소"가 아니라 "같은 항목의 재활용된 피어"뿐이므로, Name이
+        # 있고 정확히 일치하면 클릭을 진행한다(빈 Name끼리의 일치는 owner-drawn
+        # 항목 오인식을 막기 위해 여전히 거부).
+        try:
+            same_name = bool(el.CurrentName) and el.CurrentName == at_point.CurrentName
+        except Exception:
+            same_name = False
+        if not same_name:
+            return bail("point-resolves-elsewhere -- wanted %s, "
+                        "ElementFromPoint(%d,%d) returned %s"
+                        % (_fmt_elem(el), x, y, _fmt_elem(at_point)))
+        print(f"[COM-SendInput] identity check failed but Name matches "
+              f"({el.CurrentName!r}) -- treating as the same item under a "
+              "recycled virtualized AutomationPeer, proceeding with the click")
 
     nx = int(round((x - vx) * 65535.0 / (vw - 1)))
     ny = int(round((y - vy) * 65535.0 / (vh - 1)))
@@ -507,15 +551,23 @@ def invoke_item(uia, mod, el, double=False):
     # --ancestor-sel-b64 경로에서 그대로 쓰인다.
     if send_input_click(uia, el, "osExpandCollapse", double):
         return True
+    # 2026-08-17 (VS 언어/플랫폼 필터 재현): send_input_click()이 실패하는
+    # 이유는 stderr로만 남는데, 성공 종료(exit 0)면 server.js의 execSync가
+    # stdout만 돌려주고 stderr는 그냥 버린다 — 사용자에게는 아무 로그도 안
+    # 보이면서 드롭다운이 시각적으로 안 눌리는 현상으로만 나타났다. 어느
+    # 폴백 경로가 "예외 없이 통과"했는지 stdout에 남겨 구분 가능하게 한다.
     try:
         el.GetCurrentPattern(UIA_InvokePatternId).QueryInterface(mod.IUIAutomationInvokePattern).Invoke()
+        print("[osExpandCollapse] invoke_item: fell back to InvokePattern (no visible SendInput click)")
         return True
     except Exception:
         pass
     if toggle_item(mod, el, "osExpandCollapse"):
+        print("[osExpandCollapse] invoke_item: fell back to TogglePattern (no visible SendInput click)")
         return True
     try:
         el.GetCurrentPattern(UIA_SelectionItemPatternId).QueryInterface(mod.IUIAutomationSelectionItemPattern).Select()
+        print("[osExpandCollapse] invoke_item: fell back to SelectionItemPattern.Select (no visible SendInput click)")
         return True
     except Exception:
         pass
@@ -523,10 +575,12 @@ def invoke_item(uia, mod, el, double=False):
         legacy = el.GetCurrentPattern(UIA_LegacyIAccessiblePatternId).QueryInterface(mod.IUIAutomationLegacyIAccessiblePattern)
         try:
             legacy.Select(UIA_SELECTIONFLAG_TAKESELECTION)
+            print("[osExpandCollapse] invoke_item: fell back to Legacy.Select(TAKESELECTION) (no visible SendInput click)")
             return True
         except Exception:
             pass
         legacy.DoDefaultAction()
+        print("[osExpandCollapse] invoke_item: fell back to Legacy.DoDefaultAction (no visible SendInput click)")
         return True
     except Exception:
         return False
@@ -846,6 +900,37 @@ def main():
                 print(f"[osExpandCollapse] {where}: {arr.Length} items but the "
                       f"recording saw {args.item_count} — the list changed since "
                       "capture; refusing to pick by position", file=sys.stderr)
+                # 2026-08-17 (VS 언어/플랫폼 필터 실측): 이런 콤보는
+                # owner-drawn이 아니라 항목마다 실제 Name이 있다(예: 'C#').
+                # 캡처 당시 마우스로 실제 값을 골랐을 때만 목록 길이가 줄어드는
+                # VS 내부 동작 때문에, 같은 조작이라도 캡처 시점 개수와 재생
+                # 시점 개수가 구조적으로 절대 안 맞을 수 있다 — 그렇다고 자리를
+                # 짐작해서 찍으면 안 되므로, item_name이 정확히 하나에만
+                # 매칭될 때만 그걸로 폴백한다. 0개나 2개 이상이면 절대 찍지
+                # 않고 이 풀을 그대로 포기한다(기존 동작과 동일).
+                if item_name:
+                    matches = []
+                    for i in range(arr.Length):
+                        it = arr.GetElement(i)
+                        try:
+                            nm = it.CurrentName or ""
+                        except Exception:
+                            continue
+                        if nm == item_name:
+                            matches.append((i, it))
+                    if len(matches) == 1:
+                        fb_idx, fb_item = matches[0]
+                        if invoke_item(uia, mod, fb_item):
+                            print(f"[osExpandCollapse] {where}: falling back to "
+                                  f"unique name match {item_name!r} at live "
+                                  f"position {fb_idx} of {arr.Length} (recorded "
+                                  f"position {args.item_index} of "
+                                  f"{args.item_count})")
+                            sys.exit(0)
+                    elif matches:
+                        print(f"[osExpandCollapse] {where}: name {item_name!r} "
+                              f"matched {len(matches)} items — ambiguous, not "
+                              "falling back", file=sys.stderr)
                 continue
             if args.item_index >= arr.Length:
                 print(f"[osExpandCollapse] {where}: index {args.item_index} out of "

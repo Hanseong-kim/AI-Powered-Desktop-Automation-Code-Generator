@@ -235,7 +235,14 @@ def send_input_click(uia, el, tag, double=False):
     비시각적으로라도 동작하는 게 낫다는 2026-07-24 지시).
     """
     def bail(reason):
-        print("[COM-SendInput] fallback: " + reason + " - using programmatic Invoke/Select", file=sys.stderr)
+        # 2026-08-17 (VS 언어/플랫폼 필터 실측): 이 함수를 호출하는 스크립트가
+        # 결국 성공(exit 0)으로 끝나면, server.js의 execSync는 stdout만
+        # 돌려주고 stderr는 그냥 버린다 — 그래서 물리 클릭이 매번 폴백되고
+        # 있었는데도 사용자에게는 이유가 전혀 안 보였다(드롭다운은 열리는데
+        # 항목 클릭만 시각적으로 안 되는 증상으로만 나타남). stdout으로
+        # 옮긴다 — 실패(비정상 종료) 경로는 여전히 stdoutTxt로 그대로
+        # 보여지므로 그쪽 진단력은 잃지 않는다.
+        print("[COM-SendInput] fallback: " + reason + " - using programmatic Invoke/Select")
         return False
 
     if os.environ.get("QAFORGE_COM_CLICK") == "invoke":
@@ -288,8 +295,45 @@ def send_input_click(uia, el, tag, double=False):
         at_point = uia.ElementFromPoint(winpt)
     except Exception as e:
         return bail("element-from-point-failed (%s)" % e)
-    if not at_point or not _same_or_descendant(uia, el, at_point):
-        return bail("point-resolves-elsewhere")
+
+    def _fmt_elem(e2):
+        try:
+            return (f"name={e2.CurrentName!r} "
+                    f"automationId={e2.CurrentAutomationId!r} "
+                    f"className={e2.CurrentClassName!r} "
+                    f"controlType={e2.CurrentControlType!r}")
+        except Exception as e3:
+            return f"(read failed: {e3})"
+
+    if not at_point:
+        return bail("point-resolves-elsewhere -- wanted %s, "
+                    "ElementFromPoint(%d,%d) returned nothing"
+                    % (_fmt_elem(el), x, y))
+    if not _same_or_descendant(uia, el, at_point):
+        # 2026-08-17 (VS 콤보 팝업 항목 실측, VirtualizingStackPanel):
+        # ListBoxItem의 ClickablePoint가 그 자식 TextBlock 위에 찍히는데,
+        # WPF 가상화 목록은 스크롤/재렌더링 때마다 AutomationPeer를 새로
+        # 만들거나 재활용한다 — FindAll()로 찾은 el과 그 직후 같은 좌표를
+        # ElementFromPoint로 다시 찍어 얻은 결과가 논리적으로는 완전히 같은
+        # 화면상의 항목인데 COM 정체성만 달라, CompareElements 기반
+        # _same_or_descendant가 매번 "다른 요소"로 오판했다(실측: 92건 전부
+        # Name까지 정확히 일치, className만 ListBoxItem vs TextBlock).
+        # PID 검사(covered-by-other-window)는 이미 통과했으므로 같은
+        # 프로세스/창 안이라는 건 확정됐다 — 여기서 남은 위험은 "정말
+        # 엉뚱한 요소"가 아니라 "같은 항목의 재활용된 피어"뿐이므로, Name이
+        # 있고 정확히 일치하면 클릭을 진행한다(빈 Name끼리의 일치는 owner-drawn
+        # 항목 오인식을 막기 위해 여전히 거부).
+        try:
+            same_name = bool(el.CurrentName) and el.CurrentName == at_point.CurrentName
+        except Exception:
+            same_name = False
+        if not same_name:
+            return bail("point-resolves-elsewhere -- wanted %s, "
+                        "ElementFromPoint(%d,%d) returned %s"
+                        % (_fmt_elem(el), x, y, _fmt_elem(at_point)))
+        print(f"[COM-SendInput] identity check failed but Name matches "
+              f"({el.CurrentName!r}) -- treating as the same item under a "
+              "recycled virtualized AutomationPeer, proceeding with the click")
 
     nx = int(round((x - vx) * 65535.0 / (vw - 1)))
     ny = int(round((y - vy) * 65535.0 / (vh - 1)))
