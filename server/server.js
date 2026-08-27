@@ -33,7 +33,7 @@ app.use(express.json({ limit: '5mb' }));
 let events      = [];
 let sseClients  = [];
 let recording   = false;
-let sessionInfo = { appName: '', exePath: '' };
+let sessionInfo = { appName: '', exePath: '', exeArgs: [] };
 let sessionBackupFile = null;
 
 function broadcast(type, payload) {
@@ -58,7 +58,7 @@ async function callAgent(agentPath, body) {
 // ---------------------------------------------------------------------------
 app.post('/api/start', async (req, res) => {
   try {
-    const { appName, exePath, platform } = req.body;
+    const { appName, exePath, platform, exeArgs } = req.body;
     if (!exePath) return res.status(400).json({ ok: false, message: 'exePath is required' });
     // Clear events / set up the backup file BEFORE calling the agent — the
     // agent's worker thread starts discovering the target window and can
@@ -99,10 +99,10 @@ app.post('/api/start', async (req, res) => {
         console.warn('[start] app-state reset failed (non-fatal):', String(e.message || e).substring(0, 150));
       }
     }
-    const out = await callAgent('/start', { appName, exePath, platform });
+    const out = await callAgent('/start', { appName, exePath, platform, exeArgs: exeArgs || [] });
     if (out.ok) {
       recording   = true;
-      sessionInfo = { appName, exePath };
+      sessionInfo = { appName, exePath, exeArgs: exeArgs || [] };
       broadcast('status', { recording: true, eventCount: 0 });
     }
     res.status(out.ok ? 200 : 400).json(out);
@@ -5477,7 +5477,7 @@ async function _step(label, fn) {
 
 `;
 
-function generateWdio(strategy, appName, eventList, useSession, exePath) {
+function generateWdio(strategy, appName, eventList, useSession, exePath, exeArgs) {
   const base     = toPascal(appName);
   const suffix   = strategy === 'id' ? 'ById' : 'ByClass';
   const testName = `${base}Test${suffix}`;
@@ -6504,8 +6504,9 @@ ${segBoundary && useSession ? `            console.log('[STEP] switch to window:
   // 바로 아래 simpleWinTitle(3415행)은 이미 "windowTitle이 있는 첫 이벤트를
   // 찾는" 안전한 패턴을 쓰고 있었는데 이 session-mode 경로만 그 방어가
   // 빠져있었음 — 같은 패턴으로 맞춘다.
+  const resolvedLaunchArgs = (Array.isArray(exeArgs) && exeArgs.length) ? exeArgs : newWindowArgsFor(exePath);
   const launchCall = (useSession && exePath && launchFrag)
-    ? `        await launchApp(${JSON.stringify(exePath)}, ${JSON.stringify(newWindowArgsFor(exePath))}, ${JSON.stringify(launchFrag)}, ${JSON.stringify(recordedRect)});\n`
+    ? `        await launchApp(${JSON.stringify(exePath)}, ${JSON.stringify(resolvedLaunchArgs)}, ${JSON.stringify(launchFrag)}, ${JSON.stringify(recordedRect)});\n`
     : '';
 
   // Simple mode has no launchApp/foreground step of its own — the freshly
@@ -6705,6 +6706,9 @@ function saveFiles(files, dir, extraObsolete = []) {
 app.post('/api/generate', (req, res) => {
   const name  = req.body.appName  || sessionInfo.appName  || 'MyApp';
   const exe   = req.body.exePath  || sessionInfo.exePath  || '';
+  const exeArgs = (Array.isArray(req.body.exeArgs) && req.body.exeArgs.length)
+    ? req.body.exeArgs
+    : (sessionInfo.exeArgs || []);
   const targetEvents = (Array.isArray(req.body.events) && req.body.events.length > 0) ? req.body.events : events;
 
   if (targetEvents.length === 0)
@@ -6719,8 +6723,8 @@ app.post('/api/generate', (req, res) => {
     const useSession = needsSessionSwitching(targetEvents);
 
     // ── WebdriverIO ────────────────────────────────────────────────────────
-    const wdioById    = generateWdio('id',    name, targetEvents, useSession, exe);
-    const wdioByClass = generateWdio('class', name, targetEvents, useSession, exe);
+    const wdioById    = generateWdio('id',    name, targetEvents, useSession, exe, exeArgs);
+    const wdioByClass = generateWdio('class', name, targetEvents, useSession, exe, exeArgs);
     const wdioFiles   = [
       { filename: `${base}TestById.js`,    content: wdioById    },
       { filename: `${base}TestByClass.js`, content: wdioByClass },

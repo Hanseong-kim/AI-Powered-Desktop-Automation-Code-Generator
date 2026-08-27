@@ -2886,10 +2886,11 @@ class Recorder:
         self._last_emitted_hwnd_hex = ""
 
     # ---------------- control ----------------
-    def start(self, app_name, exe_path, platform):
+    def start(self, app_name, exe_path, platform, exe_args=None):
         if self.recording:
             return False, "Already recording"
-        self.session = {"appName": app_name, "exePath": exe_path, "platform": platform}
+        exe_args = exe_args or []
+        self.session = {"appName": app_name, "exePath": exe_path, "platform": platform, "exeArgs": exe_args}
         self.event_count = 0
         self.target_hwnds = set()
         self._popup_hwnds = set()
@@ -2930,8 +2931,8 @@ class Recorder:
                         ["explorer.exe", f"shell:AppsFolder\\{exe_path}"])
                     log(f"Launched UWP {exe_path} via shell:AppsFolder")
                 else:
-                    self.proc = subprocess.Popen([exe_path])
-                    log(f"Launched {exe_path} (pid={self.proc.pid})")
+                    self.proc = subprocess.Popen([exe_path] + exe_args)
+                    log(f"Launched {exe_path} {exe_args} (pid={self.proc.pid})")
             except Exception as e:
                 return False, f"Failed to launch '{exe_path}': {e}"
 
@@ -5491,6 +5492,7 @@ class Handler(BaseHTTPRequestHandler):
                 body.get("appName", "App"),
                 body.get("exePath", ""),
                 body.get("platform", "Windows"),
+                body.get("exeArgs", []),
             )
             self._json(200 if ok else 400, {"ok": ok, "message": msg})
         elif self.path == "/stop":

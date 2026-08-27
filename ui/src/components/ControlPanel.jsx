@@ -32,7 +32,11 @@ const PRESETS = [
   // 진짜 모달(정보 창 뜨면 메인 창 IsWindowEnabled=False) 확인됨. 컨트롤 74개 중
   // 이름/AutomationId 둘 다 없는 것 0개 — HeidiSQL(60개 중 31개 실패)보다 압도적으로 양호.
   { label: 'Visual Studio',    appName: 'VisualStudio',     exePath: 'C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\IDE\\devenv.exe' },
-  { label: 'Custom...',        appName: '',                 exePath: '' },
+  // 2026-08-27: 상사가 대체안으로 지급한 HTA 목업(Medflow) — mshta.exe로 구동,
+  // Login→Main 창 전환은 exeArgs로 넘긴 진입 .hta 인자에서 시작된다.
+  { label: 'Medflow (HTA)',    appName: 'Medflow',          exePath: 'C:\\Windows\\System32\\mshta.exe',
+    exeArgs: 'C:\\hansung\\project\\code-generator\\mock-app\\medflow-hta\\MedflowLogin.hta' },
+  { label: 'Custom...',        appName: '',                 exePath: '',                exeArgs: '' },
 ];
 
 export default function ControlPanel({
@@ -47,7 +51,7 @@ export default function ControlPanel({
 
   function handlePresetSelect(label) {
     const found = PRESETS.find((p) => p.label === label);
-    onPresetChange(label, found?.appName ?? '', found?.exePath ?? '');
+    onPresetChange(label, found?.appName ?? '', found?.exePath ?? '', found?.exeArgs ?? '');
   }
 
   function field(label, key, type = 'text', placeholder = '', locked = false) {
@@ -100,6 +104,7 @@ export default function ControlPanel({
 
         {field('App Name', 'appName', 'text', 'Calculator', !isCustom)}
         {field('Exe Path', 'exePath', 'text', 'C:\\Windows\\System32\\calc.exe', !isCustom)}
+        {field('Exe Args', 'exeArgs', 'text', '(optional, e.g. a file path to open)', !isCustom)}
 
         <div className="field">
           <label>Platform</label>
