@@ -15,7 +15,7 @@
       SHOWINTASKBAR="yes"
       SINGLEINSTANCE="no"
       SYSMENU="yes"
-      WINDOWSTATE="normal"
+      WINDOWSTATE="maximize"
       SCROLL="no"
   />
   <script src="shared/data.js" language="JScript"></script>
@@ -37,11 +37,7 @@
       font-family: Tahoma, Arial, sans-serif;
       font-size: 12px;
       color: #111;
-    }
-    .app {
-      width: 100%;
-      height: 100%;
-      table-layout: fixed; /* keep right panel from expanding; enable horizontal scroll inside list */ 
+      position: relative;
     }
 
     /* Title bar (internal) */
@@ -64,12 +60,9 @@
 
     /* Menu bar */
     .menubar {
-      height: 26px;
       background: #f3f3f3;
       border-bottom: 1px solid #9a9a9a;
       padding: 2px 4px;
-      white-space: nowrap;
-      overflow: hidden;
     }
     .menuBtn {
       font-family: Tahoma, Arial, sans-serif;
@@ -78,6 +71,7 @@
       background: #f3f3f3;
       padding: 2px 6px;
       margin-right: 2px;
+      margin-bottom: 2px;
       cursor: pointer;
     }
     .menuBtnHover {
@@ -95,16 +89,26 @@
       width: 100%;
       border-collapse: collapse;
     }
+    .contentRowWrap {
+      position: relative;
+    }
     .leftCell {
+      position: absolute;
+      left: 0;
+      top: 0;
+      right: 360px;
+      bottom: 0;
       background: #c9c9ff;
-      vertical-align: top;
       border-right: 2px solid #9a9a9a;
+      overflow: auto;
     }
     .rightCell {
+      position: absolute;
+      right: 0;
+      top: 0;
       width: 360px;
+      bottom: 0;
       background: #e8e8ff;
-      vertical-align: top;
-    
       overflow: hidden;
     }
 
@@ -180,7 +184,16 @@
 
     /* Footer */
     .footer {
-      height: 56px;
+      /* Pinned to the bottom of the viewport rather than left to sit at the
+         end of normal flow. In normal flow the footer's position depended on
+         contentRow's computed height being exactly right; whenever that
+         calculation ran even slightly long the whole footer slid below the
+         window edge and the SETTINGS/EXIT buttons became unreachable. Anchored
+         here it is always on screen no matter what contentRow does. */
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
       background: #f0f0ff;
       border-top: 2px solid #9a9a9a;
       padding: 6px 10px;
@@ -190,6 +203,13 @@
       border-collapse: collapse;
     }
     .footerTable td {
+      /* 2026-08-31: explicit font-size — this document is in quirks mode (no
+         DOCTYPE), where font-size is NOT inherited into a <table>. Without
+         this, "Doctor:"/"Technician:" render at the default ~16px instead of
+         the body's 12px, which both looked wrong and made the footer taller
+         than its old hardcoded 56px, pushing the SETTINGS/EXIT buttons off
+         the bottom of the window. Same quirk that hid the rx counts. */
+      font-size: 12px;
       vertical-align: middle;
       padding-right: 8px;
       white-space: nowrap;
@@ -218,20 +238,22 @@
       background: #1d6fb8;
       color: #e9f4ff;
       font-family: "Courier New", monospace;
-      font-size: 12px;
+      font-size: 17px;
       padding: 8px 10px;
     }
-    .rxRow {
-      width: 100%;
-      border-collapse: collapse;
-    }
-    .rxRow td {
+    .rxRowItem {
       padding: 1px 0;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+    .rxLabel {
+      /* fixed width keeps the four counts in a column without pinning them
+         to the far right edge of the 360px panel (that left a huge gap) */
+      display: inline-block;
+      width: 258px;
     }
     .rxNum {
-      text-align: right;
       font-weight: bold;
-      width: 60px;
     }
 
     .clockBox {
@@ -2469,15 +2491,29 @@
     var h = (document.documentElement && document.documentElement.clientHeight) ? document.documentElement.clientHeight : document.body.clientHeight;
     var w = (document.documentElement && document.documentElement.clientWidth) ? document.documentElement.clientWidth : document.body.clientWidth;
 
-    // Rows: title (28) + menu (26) + footer (56) + content remainder
-    var contentH = h - 28 - 26 - 56;
+    // 2026-08-31: titlebar/menubar/content row are plain divs, not a
+    // table.app anymore — this old IE=7 rendering mode's table-layout:fixed
+    // never reliably sized an undefined-width column against a colspan
+    // row's content (it measured natural content width instead of the
+    // spec's remaining-space rule), which pushed rightCell off the right
+    // edge of the window (live repro, screenshot-confirmed) no matter how
+    // the CSS was tuned. leftCell/rightCell are now CSS position:absolute
+    // (left:0/right:360px and right:0/width:360px — see .leftCell/.rightCell)
+    // so their width is correct with no JS involved at all. contentRow
+    // still needs an explicit pixel height from here (it's a plain block
+    // div, and leftCell/rightCell's bottom:0 needs a sized, position:relative
+    // ancestor to anchor to).
+    // Measure all three chrome bars rather than assuming fixed pixel heights.
+    // The footer in particular used to be hardcoded at 56px while its real
+    // rendered height was larger, so the bottom row of buttons (SETTINGS,
+    // EXIT) fell past the bottom edge of the window and got clipped.
+    var titlebarH = $("titlebarEl").offsetHeight;
+    var menubarH = $("menubarEl").offsetHeight;
+    var footerH = $("footerEl").offsetHeight;
+    var contentH = h - titlebarH - menubarH - footerH;
     if (contentH < 200) contentH = 200;
 
     $("contentRow").style.height = contentH + "px";
-
-    // Ensure the left/right cells adopt the calculated height
-    $("leftCell").style.height = contentH + "px";
-    $("rightCell").style.height = contentH + "px";
 
     // Left scroll area height
     // left header approx 126px (brand + selectors). Keep dynamic.
@@ -2630,39 +2666,29 @@
 </head>
 
 <body>
-  <table class="app" cellspacing="0" cellpadding="0">
-    <colgroup>
-      <col>
-      <col width="360">
-    </colgroup>
-    <tr>
-      <td colspan="2" class="titlebar">
-        Medflow Clinical System
-        <span class="meta">Copyright 1999-2025 Medflow, Inc. &nbsp;&nbsp; Database: MEDFLOW</span>
-      </td>
-    </tr>
+  <div id="titlebarEl" class="titlebar">
+    Medflow Clinical System
+    <span class="meta">Copyright 1999-2025 Medflow, Inc. &nbsp;&nbsp; Database: MEDFLOW</span>
+  </div>
 
-    <tr>
-      <td colspan="2" class="menubar">
-        <input type="button" class="menuBtn" id="nav_admin" value="Administration" />
-        <input type="button" class="menuBtn" id="nav_front_desk" value="Front Desk" />
-        <input type="button" class="menuBtn" id="nav_technician" value="Technician" />
-        <input type="button" class="menuBtn" id="nav_doctor_function" value="Doctor Function" />
-        <input type="button" class="menuBtn" id="nav_asc_surgery" value="ASC/Surgery" />
-        <input type="button" class="menuBtn" id="nav_contact_lenses" value="Contact Lenses" />
-        <input type="button" class="menuBtn" id="nav_billing" value="Billing" />
-        <input type="button" class="menuBtn" id="nav_file_maint" value="File Maint" />
-        <input type="button" class="menuBtn" id="nav_image_processing" value="Image Processing" />
-        <input type="button" class="menuBtn" id="nav_procedures" value="Procedures" />
-        <input type="button" class="menuBtn" id="nav_query_tool" value="Query Tool" />
-        <input type="button" class="menuBtn" id="nav_practice_mgmt" value="Practice Management" />
-        <input type="button" class="menuBtn" id="nav_quick_message" value="Quick Message" />
-        <input type="button" class="menuBtn" id="settingsBtn" value="Settings" style="float:right;" />
-      </td>
-    </tr>
+  <div id="menubarEl" class="menubar">
+    <input type="button" class="menuBtn" id="nav_admin" value="Administration" />
+    <input type="button" class="menuBtn" id="nav_front_desk" value="Front Desk" />
+    <input type="button" class="menuBtn" id="nav_technician" value="Technician" />
+    <input type="button" class="menuBtn" id="nav_doctor_function" value="Doctor Function" />
+    <input type="button" class="menuBtn" id="nav_asc_surgery" value="ASC/Surgery" />
+    <input type="button" class="menuBtn" id="nav_contact_lenses" value="Contact Lenses" />
+    <input type="button" class="menuBtn" id="nav_billing" value="Billing" />
+    <input type="button" class="menuBtn" id="nav_file_maint" value="File Maint" />
+    <input type="button" class="menuBtn" id="nav_image_processing" value="Image Processing" />
+    <input type="button" class="menuBtn" id="nav_procedures" value="Procedures" />
+    <input type="button" class="menuBtn" id="nav_query_tool" value="Query Tool" />
+    <input type="button" class="menuBtn" id="nav_practice_mgmt" value="Practice Management" />
+    <input type="button" class="menuBtn" id="nav_quick_message" value="Quick Message" />
+  </div>
 
-    <tr id="contentRow">
-      <td id="leftCell" class="leftCell">
+  <div id="contentRow" class="contentRowWrap">
+      <div id="leftCell" class="leftCell">
         <div id="leftHeader" class="leftHeader">
           <div class="brandBox">
             <div class="brandName">Medflow</div>
@@ -2720,16 +2746,14 @@
             </tr>
           </table>
         </div>
-      </td>
+      </div>
 
-      <td id="rightCell" class="rightCell" width="360">
+      <div id="rightCell" class="rightCell">
         <div id="rxBox" class="rxBox">
-          <table class="rxRow">
-            <tr><td>DrFirst Pending RX Count:</td><td class="rxNum" id="rxPending">0</td></tr>
-            <tr><td>Refill Request Count:</td><td class="rxNum" id="rxRefill">0</td></tr>
-            <tr><td>RxChange Count:</td><td class="rxNum" id="rxChange">0</td></tr>
-            <tr><td>RxNeedSigning Count:</td><td class="rxNum" id="rxNeedSigning">0</td></tr>
-          </table>
+          <div class="rxRowItem"><span class="rxLabel">DrFirst Pending RX Count:</span><span class="rxNum" id="rxPending">0</span></div>
+          <div class="rxRowItem"><span class="rxLabel">Refill Request Count:</span><span class="rxNum" id="rxRefill">0</span></div>
+          <div class="rxRowItem"><span class="rxLabel">RxChange Count:</span><span class="rxNum" id="rxChange">0</span></div>
+          <div class="rxRowItem"><span class="rxLabel">RxNeedSigning Count:</span><span class="rxNum" id="rxNeedSigning">0</span></div>
         </div>
 
         <div id="clockBox" class="clockBox">
@@ -2762,28 +2786,27 @@
           </div>
           <div id="detailsBody" style="color:#555;">Select a row in the list to view details.</div>
         </div>
-      </td>
-    </tr>
+      </div>
+  </div>
 
-    <tr>
-      <td colspan="2" class="footer">
-        <table class="footerTable">
-          <tr>
-            <td><b>Doctor:</b></td>
-            <td><input type="text" id="doctorInput" class="footerInput" value="William H Bartlett MD" /></td>
-            <td><input type="button" id="resetCliniciansBtn" class="footerBtn" value="RESET CLINICIANS" /></td>
-            <td style="width:18px;"></td>
-            <td><b>Technician:</b></td>
-            <td><input type="text" id="techInput" class="footerInput" value="CitrusBits" /></td>
-            <td style="width:18px;"></td>
-            <td><input type="text" id="searchInput" class="footerInput" style="width:220px;" value="" /></td>
-            <td><input type="button" id="searchBtn" class="footerBtn" value="SEARCH NAME" /></td>
-            <td><input type="button" id="exitBtn" class="footerBtn" value="EXIT" /></td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
+  <div id="footerEl" class="footer">
+    <table class="footerTable">
+      <tr>
+        <td><b>Doctor:</b></td>
+        <td><input type="text" id="doctorInput" class="footerInput" value="William H Bartlett MD" /></td>
+        <td><input type="button" id="resetCliniciansBtn" class="footerBtn" value="RESET CLINICIANS" /></td>
+        <td style="width:18px;"></td>
+        <td><b>Technician:</b></td>
+        <td><input type="text" id="techInput" class="footerInput" value="CitrusBits" /></td>
+        <td style="width:18px;"></td>
+        <td><input type="text" id="searchInput" class="footerInput" style="width:220px;" value="" /></td>
+        <td><input type="button" id="searchBtn" class="footerBtn" value="SEARCH NAME" /></td>
+        <td style="width:12px;"></td>
+        <td><input type="button" id="settingsBtn" class="footerBtn" value="SETTINGS" /></td>
+        <td><input type="button" id="exitBtn" class="footerBtn" value="EXIT" /></td>
+      </tr>
+    </table>
+  </div>
 
   <!-- Modal -->
   <div id="overlay" class="overlay"></div>
