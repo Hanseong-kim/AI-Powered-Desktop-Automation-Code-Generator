@@ -2540,6 +2540,39 @@ def pid_of_hwnd(hwnd):
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 
+def parent_pid_of(pid):
+    """Parent PID of `pid` via a Toolhelp32 process snapshot, or 0 if it
+    can't be determined (process gone, access denied, etc.)."""
+    if not pid:
+        return 0
+    TH32CS_SNAPPROCESS = 0x00000002
+
+    class PROCESSENTRY32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+            ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_char * 260),
+        ]
+
+    snap = ctypes.windll.kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snap == -1:
+        return 0
+    try:
+        entry = PROCESSENTRY32()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32)
+        if not ctypes.windll.kernel32.Process32First(snap, ctypes.byref(entry)):
+            return 0
+        while True:
+            if entry.th32ProcessID == pid:
+                return entry.th32ParentProcessID
+            if not ctypes.windll.kernel32.Process32Next(snap, ctypes.byref(entry)):
+                return 0
+    finally:
+        ctypes.windll.kernel32.CloseHandle(snap)
+
+
 def image_path_of_pid(pid):
     """Full exe path backing `pid`. Unlike window titles this is never
     localized, so it survives non-English Windows UI languages."""
@@ -2557,6 +2590,18 @@ def image_path_of_pid(pid):
         return ""
     finally:
         ctypes.windll.kernel32.CloseHandle(h)
+
+
+# Directories the whole OS shares — a window owned by ANY process living
+# here does not mean it belongs to an app merely because the app's own exe
+# also lives here (e.g. mshta.exe and ApplicationFrameHost.exe are both in
+# System32). Used by _app_install_dir() to disable the dir-match broadening
+# in _owned_by_app() for exes launched out of these directories.
+SHARED_SYSTEM_DIRS = {
+    os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "System32").lower(),
+    os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "SysWOW64").lower(),
+    os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "WindowsApps").lower(),
+}
 
 
 def match_keys_for_launch(exe_path, app_name):
@@ -3098,11 +3143,31 @@ class Recorder:
 
     def _app_install_dir(self):
         """Directory the launched exe lives in, lowercased, cached — or ''
-        for UWP/AUMID launches (no meaningful filesystem directory)."""
+        for UWP/AUMID launches (no meaningful filesystem directory) OR when
+        the exe lives in a directory the whole OS shares (System32,
+        SysWOW64, WindowsApps — see SHARED_SYSTEM_DIRS).
+
+        2026-08-31 (Medflow HTA recording, live repro): the directory-match
+        heuristic in _owned_by_app() was built for apps with their own
+        dedicated install dir (7-Zip's 7zFM.exe + 7zG.exe). mshta.exe lives
+        in C:\\Windows\\System32 — a directory every OS component shares —
+        so _watch_windows() adopted a completely unrelated background
+        window (ApplicationFrameHost.exe's "설정"/Settings window, also
+        System32-hosted) as belonging to the Medflow recording session.
+        Returning '' here for shared system dirs disables the dir-match
+        broadening for any exe that hosts arbitrary content out of System32
+        (mshta.exe, cmd.exe, powershell.exe, regedit.exe, mmc.exe, ...).
+        _owned_by_app()'s process-ancestry check covers the legitimate case
+        this used to also serve — a shared-system-dir exe spawning a sibling
+        process of itself (e.g. Medflow's Login->Main handoff via
+        WScript.Shell.Run, a NEW mshta.exe PID that is a child of the
+        tracked one, not a same-PID or same-target-dir match)."""
         if self._app_install_dir_cache is not None:
             return self._app_install_dir_cache
         exe_path = self.session.get("exePath", "")
         d = "" if (not exe_path or is_aumid(exe_path)) else os.path.dirname(exe_path).lower().rstrip("\\/")
+        if d in SHARED_SYSTEM_DIRS:
+            d = ""
         self._app_install_dir_cache = d
         return d
 
@@ -3116,14 +3181,35 @@ class Recorder:
         rejected its window forever, not just during the ~0.5s watcher-poll
         race. Directory match is a generic signal (works for any app that
         ships companion .exe helpers alongside the main one), not a 7-Zip
-        special case."""
+        special case. _app_install_dir() already returns '' for shared
+        system directories (System32 etc.), so this branch is inert there.
+
+        Falls back to process ancestry: is `pid` a descendant (within a few
+        hops, to tolerate an intermediate host like wscript.exe) of a
+        tracked PID? Needed for apps hosted by a shared-system-dir exe that
+        hand off to a sibling process of themselves — e.g. Medflow's HTA
+        Login->Main handoff (`WScript.Shell.Run('mshta.exe ...Main.hta')`
+        from inside the Login mshta.exe, then Login closes itself). Directory
+        match can't safely cover this (mshta.exe lives in System32, shared
+        by unrelated OS windows — 2026-08-31 live repro: a background
+        Windows Settings window got adopted this way) so ancestry is the
+        precise signal instead."""
         if pid in self._target_pids():
             return True
         app_dir = self._app_install_dir()
-        if not app_dir:
-            return False
-        img = image_path_of_pid(pid)
-        return bool(img) and os.path.dirname(img).lower().rstrip("\\/") == app_dir
+        if app_dir:
+            img = image_path_of_pid(pid)
+            if img and os.path.dirname(img).lower().rstrip("\\/") == app_dir:
+                return True
+        target_pids = self._target_pids()
+        ancestor = pid
+        for _ in range(4):
+            ancestor = parent_pid_of(ancestor)
+            if not ancestor:
+                return False
+            if ancestor in target_pids:
+                return True
+        return False
 
     def _settle_web_hosts(self, ins):
         """An embedded-Chromium app is not ready to be recorded the moment its
@@ -4114,9 +4200,35 @@ class Recorder:
                     if elem_hwnd and self._owned_by_app(pid_of_hwnd(elem_hwnd)):
                         self.target_hwnds.add(elem_hwnd)
                         self._popup_hwnds.add(elem_hwnd)
+                        # 2026-08-31 (Medflow HTA 실측 — 이 self-heal이 목적을
+                        # 달성하지 못하고 있었다): elem_hwnd는 요소가 실제로
+                        # 걸려 있는 hwnd이고, 그건 최상위 창이 아닐 수 있다.
+                        # mshta는 최상위 'HTML Application Host Window Class'
+                        # 아래에 'Internet Explorer_Server' 자식을 두므로 둘이
+                        # 항상 다르다. 그런데 _emit()의 드롭 게이트는
+                        # elem["rootHwnd"](= GetAncestor(GA_ROOT), 즉 최상위)로
+                        # 검사한다 — 그래서 여기서 자식만 등록하면 게이트는
+                        # 여전히 "untracked"로 보고 이벤트를 통째로 버렸다.
+                        # 실측 로그(3건 모두 동일 패턴):
+                        #   self-heal hwnd=4000544 accepted
+                        #   [skip] click ... hwnd=3541796 as untracked
+                        #   [watcher] added hwnd=3541796 'Medflow Settings'
+                        # — 왓처가 0.5초 뒤 결국 추가하지만 그땐 이미 늦었다.
+                        # 이 self-heal의 존재 이유가 바로 그 0.5초를 앞지르는
+                        # 것이므로, 게이트가 검사하는 값(최상위 조상)까지 같이
+                        # 등록해야 실제로 앞지르게 된다. 일반 Win32 앱은 보통
+                        # elem_hwnd 자체가 최상위라 root == elem_hwnd이고,
+                        # set.add()가 중복을 흡수하므로 동작이 바뀌지 않는다.
+                        root_hwnd = (ctypes.windll.user32.GetAncestor(elem_hwnd, GA_ROOT)
+                                     or elem_hwnd)
+                        if root_hwnd != elem_hwnd:
+                            self.target_hwnds.add(root_hwnd)
+                            self._popup_hwnds.add(root_hwnd)
                         log(f"[inspect] self-heal hwnd={elem_hwnd} "
                             f"(name={info.get('name')!r}) — accepted "
-                            "(pre-empts 0.5s watcher poll; PID or same install dir)")
+                            "(pre-empts 0.5s watcher poll; PID or same install dir)"
+                            + (f" [+ top-level root={root_hwnd}]"
+                               if root_hwnd != elem_hwnd else ""))
                         # 2026-08-12 (FileZilla STEP2/STEP3 불일치 실측): 이
                         # 값은 UIAInspector(ins)에서 초기화/기록되는데
                         # (286/1883행), 여기서 self(=Recorder)를 읽고 있었다
