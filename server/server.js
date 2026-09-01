@@ -401,10 +401,46 @@ if __name__ == "__main__":
 // process) so non-main dialogs (e.g. native "Open Folder") are found too.
 // Prints "left top width height". Used to re-base window-relative coordinates
 // at replay time (survives window repositioning).
-// NOTE: no SetProcessDPIAware call here — agent.py capture and osClick.ps1 are
-// both DPI-unaware, and adding awareness here would skew coordinates by the
-// DPI scale factor (verified: unaware rect matches agent-captured winLeft).
+// Raise a PowerShell helper to the SAME coordinate space the recording was
+// captured in. Must be emitted immediately after the script's param() block,
+// before any window API call.
+//
+// 2026-09-01: this replaces the note that used to sit here — "no
+// SetProcessDPIAware call here — agent.py capture and osClick.ps1 are both
+// DPI-unaware, and adding awareness here would skew coordinates by the DPI
+// scale factor (verified: unaware rect matches agent-captured winLeft)".
+// Both of its premises are gone: agent.py has called
+// _enable_per_monitor_dpi_awareness() since 2026-07-13 (its own docstring
+// records the same 1.25x skew being fixed on the capture side), and
+// osClick.ps1 is in OBSOLETE_FILES — coordinate injection was removed.
+//
+// Re-measured on the live Medflow main window at 125% scaling, one window,
+// one moment:
+//     PowerShell (unaware)  rect=(-7,-7,1543,823)    1550x830
+//     DPI-aware             rect=(-9,-9,1929,1029)   1938x1038
+//     recorded event        winLeft=-9 winTop=-9     1938x1038
+// The recorded values match the AWARE reading exactly, so the old note's
+// justification is now exactly inverted. Left unaware, osMoveWindow.ps1
+// compared 1550x830 against a 1938x1038 target, could never see "already at
+// the target geometry", and ran SW_RESTORE on every window switch — the
+// user-visible "the restore button gets pressed" bug.
+const PS_DPI_AWARE = `Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class DpiAware {
+  [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);
+  [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int v);
+}
+"@ -ErrorAction SilentlyContinue
+try {
+  # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (Win10 1703+) — same value
+  # agent.py passes.
+  [DpiAware]::SetProcessDpiAwarenessContext([IntPtr](-4)) | Out-Null
+} catch {
+  try { [DpiAware]::SetProcessDpiAwareness(2) | Out-Null } catch {}
+}`;
 const OS_WINRECT_PS1 = `param([string]$titleLike, [string]$hwnd, [switch]$listOnly, [switch]$ownerOnly, [string]$siblingOf, [switch]$pidOf, [string]$siblingOfPid, [string]$pidByImage)
+${PS_DPI_AWARE}
 Add-Type @"
 using System;
 using System.Text;
@@ -563,6 +599,7 @@ if ($matches.Count -gt 0) {
 // size by the measured ratio and retry (converges in 1 try when there's no
 // scaling, 2 when there is).
 const OS_MOVEWINDOW_PS1 = `param([string]$titleLike, [string]$hwnd, [int]$left, [int]$top, [int]$width, [int]$height)
+${PS_DPI_AWARE}
 Add-Type @"
 using System;
 using System.Text;
@@ -610,19 +647,33 @@ if ($hwnd) {
   }
 }
 if ($hWnd -ne [IntPtr]::Zero) {
-  # Idempotency fast-path: if the window is already at the target geometry
-  # (and not maximized), skip ShowWindow(RESTORE)+MoveWindow entirely — avoids
-  # a visible restore-then-resize flicker when replay finds the window already
-  # in the recorded position (e.g. the "already maximized" case reported
-  # 2026-07-07: recorded flow assumes a maximize step is needed, but the
-  # window is already there).
+  # Idempotency fast-path: if the window is already at the target geometry,
+  # skip ShowWindow(RESTORE)+MoveWindow entirely — avoids a visible
+  # restore-then-resize flicker when replay finds the window already in the
+  # recorded position (e.g. the "already maximized" case reported 2026-07-07:
+  # recorded flow assumes a maximize step is needed, but the window is
+  # already there).
+  #
+  # 2026-09-01 (Medflow 실측): the condition used to also require
+  # "-not IsZoomed($hWnd)", which excluded the very case the note above says
+  # this fast-path exists for. A window recorded WHILE MAXIMIZED stores the
+  # maximized rect (Medflow's main window: left/top -9, 1938x1038 — a
+  # maximized window overhangs the screen by the invisible resize border), and
+  # MedflowMain.hta opens with WINDOWSTATE="maximize", so replay found all four
+  # edges already matching and still ran SW_RESTORE + MoveWindow. The user sees
+  # the restore button being pressed: same pixels, but the window is no longer
+  # maximized — a state change the recording never made.
+  #
+  # Geometry already equal means there is nothing to do, maximized or not. A
+  # window recorded un-maximized whose live rect differs still falls through to
+  # the restore+move path below, unchanged.
   $already = New-Object WinMove+RECT
   [WinMove]::GetWindowRect($hWnd, [ref]$already) | Out-Null
   $sameW = [math]::Abs(($already.Right - $already.Left) - $width) -le 2
   $sameH = [math]::Abs(($already.Bottom - $already.Top) - $height) -le 2
   $sameL = [math]::Abs($already.Left - $left) -le 2
   $sameT = [math]::Abs($already.Top - $top) -le 2
-  if (-not [WinMove]::IsZoomed($hWnd) -and $sameW -and $sameH -and $sameL -and $sameT) {
+  if ($sameW -and $sameH -and $sameL -and $sameT) {
     exit
   }
   [WinMove]::ShowWindow($hWnd, 9) | Out-Null
@@ -698,6 +749,7 @@ public class WinActivate {
   [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr h);
   [DllImport("user32.dll", CharSet=CharSet.Auto)] public static extern int GetWindowText(IntPtr h, StringBuilder sb, int m);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
@@ -712,7 +764,16 @@ public class WinActivate {
     return f;
   }
   public static void Force(IntPtr h) {
-    ShowWindow(h, 9); // SW_RESTORE
+    // SW_RESTORE only to UN-MINIMIZE. 2026-09-01 (Medflow 실측): this used to
+    // be unconditional, and SW_RESTORE on a MAXIMIZED window un-maximizes it —
+    // so every window activation silently un-maximized the app. Visible at the
+    // step5->step6 switch: the recording never pressed the restore button, the
+    // replay did. _ensureDialog() calls normalizeWindow() then osActivate(),
+    // and this is the call that actually moved the window state (the
+    // osMoveWindow.ps1 helper next to it is a no-op — see its $hwnd/$hWnd
+    // note). A window that is not minimized needs no show-state change at all;
+    // BringWindowToTop/SetForegroundWindow below raise it either way.
+    if (IsIconic(h)) ShowWindow(h, 9); // SW_RESTORE
     uint fg = GetWindowThreadProcessId(GetForegroundWindow(), IntPtr.Zero);
     uint me = GetCurrentThreadId();
     if (fg != me) AttachThreadInput(me, fg, true);
@@ -5058,8 +5119,25 @@ async function _clickScoped(title, selector, dbl = false, controlTypeId = 0) {
     if (s0.hwnd && (s0.owned || !isInteractiveType)) {
         const target = _parseSelectorToTarget(selector);
         if (target) {
-            osScopedInvoke(s0.hwnd, target);
-            if (dbl) osScopedInvoke(s0.hwnd, target);
+            // 2026-09-01 (Medflow 실측): 더블클릭을 osScopedInvoke 두 번
+            // 호출로 재생하면 절대 더블클릭이 되지 않는다. 호출 하나가
+            // 독립된 python 프로세스이고, 그 기동 비용의 **하한**만 재도
+            // (python + comtypes + GetModule) 중앙값 461ms(334~556ms)인데
+            // GetDoubleClickTime()은 500ms다. 여기에 UIA 창 탐색·셀렉터
+            // 해석·ClickablePoint·offscreen/WindowFromPoint 검증이 더 붙으므로
+            // 두 클릭 간격은 항상 판정시간을 넘고, 앱은 단일 클릭 두 번으로
+            // 받는다. 실측 결과: 환자 행 더블클릭이 Detail 창을 열지 못했고
+            // (로그상 [COM-SendInput] ... clicked 두 줄은 정상으로 보인다),
+            // 그 창을 전제로 한 다음 스텝이 "osScopedInvoke: target not found
+            // (closeBtn)"로 무너졌다.
+            //
+            // osScopedInvoke.py는 이미 --double을 받아 한 프로세스 안에서
+            // 두 번 누른다(send_input_click(double=True)) — JS 래퍼도 이미
+            // double 인자를 받아 --double을 붙인다. 이 호출부만 그 경로를
+            // 쓰지 않고 있었다. 같은 증상이 7-Zip에서 이미 진단돼 있다
+            // (send_input_click 위 주석: "3:doubleClick 컴퓨터가 성공으로
+            // 보고되지만 폴더는 안 열리고").
+            osScopedInvoke(s0.hwnd, target, null, null, null, null, dbl);
             return;
         }
     }
@@ -5201,6 +5279,38 @@ function _listWindowHwnds(frag) {
     } catch {
         return [];
     }
+}
+
+// A cached hwnd can be DEAD by the time a later step uses it.
+//
+// _mainTitleFrag is fixed at codegen time to the LAUNCH window's title, and
+// _hwndCache holds the handle launchApp saw. For an app whose launch window
+// is destroyed and replaced — a login window that closes itself and spawns
+// the dashboard as a separate process — every later step that reaches for
+// the "main window" is pointing at a window that no longer exists, and the
+// COM helpers fail with ElementFromHandle (COMError -2147220991).
+//
+// Measured 2026-09-01 (Medflow): STEP 17-23 all failed this way while
+// STEP 16 in the same run succeeded — expandCollapse had already been given
+// a live re-lookup for exactly this reason (2026-08-18, Visual Studio), and
+// the other call sites had not. Rather than copy that preamble into each of
+// them, they all resolve through here.
+//
+// Falls back to the caller's hwnd when the title cannot be found live, so a
+// recording whose window really is the launch window behaves exactly as
+// before.
+function _liveHwnd(titleFrag, fallback) {
+    if (!titleFrag) return fallback;
+    let hs = _listWindowHwnds(titleFrag);
+    if (!hs.length) {
+        // Same tailFrag retry getWindowSession uses: a title carrying live
+        // content ("db - table - App") never reappears verbatim at replay.
+        const tail = titleFrag.split(' - ').pop();
+        if (tail !== titleFrag) hs = _listWindowHwnds(tail);
+    }
+    if (!hs.length) return fallback;
+    // Several windows can share a title — prefer the one in the foreground.
+    return hs.find(h => h === osForegroundHwnd()) || hs[0] || fallback;
 }
 
 // Owner hwnd of a window (0 = unowned). WinAppDriver rejects OWNED windows
@@ -5998,7 +6108,10 @@ function generateWdio(strategy, appName, eventList, useSession, exePath, exeArgs
       // 실제로 열리지 않았던 근본 원인).
       const target = comSafeTarget(e.element);
       const itemName = e.expandItemName || '';
-      const hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
+      // 2026-09-01: 죽은 런치-창 hwnd 방지 — _liveHwnd() 주석 참고.
+      const hwndArg = useSession
+        ? `_liveHwnd(${JSON.stringify(relTitle || '')}, _hwndCache[_mainTitleFrag])`
+        : '_appHwnd';
       // 2026-08-18 (Visual Studio 프로젝트 로드 후 메뉴바 실측, 재생 로그
       // STEP 4/6/8/10/12 전부 동일 실패): VS가 프로젝트를 열면서 첫 메인
       // 창(launchApp이 baseline-diff로 잡은 hwnd)을 새 창으로 갈아치우는데,
@@ -6161,8 +6274,28 @@ ${hwndPreamble}        osExpandCollapse(${finalHwndArg}, ${JSON.stringify(target
       // 동일 제목 창이 여러 개일 수 있어(리뷰 지적) 무조건 첫 번째를 집지
       // 않고, 그 중 지금 포그라운드인 것을 우선한다(osForegroundHwnd, 두
       // 헤더 모두에 정의돼 있음) — 못 찾으면 기존처럼 메인 창 hwnd로 폴백.
-      const isAncestorXWin = isCrossWindowEvent(e, recordedRect);
-      let hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
+      // 2026-09-01 (Medflow 실측): rect 휴리스틱만으로는 부족하다 — 위
+      // osExpandCollapse 분기가 2026-08-18에 이미 같은 결론에 도달해
+      // relTitle 비교로 갈아탔는데(그 주석 참고: "rect는 '다른 창인지'의
+      // 대리 신호일 뿐 진짜 신호가 아니었다"), 이 두 번째 호출부만 옛
+      // 판정을 그대로 쓰고 있었다. 완전히 같은 방식으로 재현됐다:
+      // Medflow는 로그인 성공 시 Login 창을 닫고 Main을 **별도 프로세스**로
+      // 띄우므로 _mainTitleFrag("Medflow Login")가 가리키는 hwnd는 5번
+      // 스텝 이후 죽은 핸들이다. 그런데 Main 창이 녹화·재생 모두 최대화라
+      // recordedRect와 rect가 같아서 isCrossWindowEvent가 false를 주고,
+      // 라이브 재탐색 preamble이 생성되지 않았다. 실측 결과 STEP 17~23이
+      // 전부 "osScopedInvoke: ElementFromHandle failed"로 실패(같은 녹화의
+      // STEP 16 expandCollapse는 이미 고쳐진 위 분기를 타서 성공 — 두
+      // 분기의 동작이 갈린 것이 결정적 단서였다).
+      //
+      // relTitle 조건을 OR로 더하기만 한다: preamble은 살아있는 창을 못
+      // 찾으면 기존 hwndArg로 폴백하므로 동작의 상위집합이고, 기존에
+      // isCrossWindowEvent가 참이던 케이스는 그대로 유지된다.
+      const isAncestorXWin = isCrossWindowEvent(e, recordedRect)
+        || (useSession && !!relTitle && relTitle !== mainTitleFrag);
+      let hwndArg = useSession
+        ? `_liveHwnd(${JSON.stringify(relTitle || '')}, _hwndCache[_mainTitleFrag])`
+        : '_appHwnd';
       let hwndPreamble = '';
       if (isAncestorXWin) {
         const relTitleArg = escapeStr(relTitle);
@@ -6273,7 +6406,10 @@ ${hwndPreamble}        osAncestorInvoke(${hwndArg}, ${JSON.stringify(ancestorTar
       // 메인 창 hwnd 변수: SIMPLE_HEADER는 _appHwnd(initAppHwnd()가 채움),
       // SESSION_HEADER는 _hwndCache[_mainTitleFrag](launchApp의 baseline-diff가
       // beforeAll에서 채움) — 둘 다 osScopedInvoke 호출 전에 이미 준비돼 있다.
-      const hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
+      // 2026-09-01: 죽은 런치-창 hwnd 방지 — _liveHwnd() 주석 참고.
+      const hwndArg = useSession
+        ? `_liveHwnd(${JSON.stringify(relTitle || '')}, _hwndCache[_mainTitleFrag])`
+        : '_appHwnd';
       // relY/triggerRelY (2026-07-29, HeidiSQL DropDown reuse): position
       // hints only used when osScopedInvoke.py's structural search finds
       // MORE THAN ONE candidate for the same selector — see pick_by_position.
@@ -6320,7 +6456,10 @@ ${hwndPreamble}        osAncestorInvoke(${hwndArg}, ${JSON.stringify(ancestorTar
       // 이제 doubleClick이면 --double을 넘겨 실제로 두 번 누른다.
       // 회귀 게이트: mock_events.py의 MockDoubleClickRow 시나리오.
       const target = comSafeTarget(e.element);
-      const hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
+      // 2026-09-01: 죽은 런치-창 hwnd 방지 — _liveHwnd() 주석 참고.
+      const hwndArg = useSession
+        ? `_liveHwnd(${JSON.stringify(relTitle || '')}, _hwndCache[_mainTitleFrag])`
+        : '_appHwnd';
       // 2026-08-10: activatesOnSingleClick — 위 ancestor-sibling 분기와 같은
       // 이유(FileZilla '..' 단일 클릭 실측). 이 분기는 이름이 있는 네이티브
       // ListView 행(bare Name 폴백 포함)을 다루므로 '..'가 구조적 셀렉터를
@@ -6346,7 +6485,10 @@ ${hwndPreamble}        osAncestorInvoke(${hwndArg}, ${JSON.stringify(ancestorTar
       // verified_toggle_click()이 클릭 전후 ToggleState를 비교하게 한다 —
       // 시각적 클릭(send_input_click, §6)은 그대로 유지하고 검증만 추가.
       const target = comSafeTarget(e.element);
-      const hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
+      // 2026-09-01: 죽은 런치-창 hwnd 방지 — _liveHwnd() 주석 참고.
+      const hwndArg = useSession
+        ? `_liveHwnd(${JSON.stringify(relTitle || '')}, _hwndCache[_mainTitleFrag])`
+        : '_appHwnd';
       pushMethod(
 `    async click${stepNum}() {
         osScopedInvoke(${hwndArg}, ${JSON.stringify(target)}, null, null, null, ${JSON.stringify(e.element?.windowTitle || '')}, false, true);
@@ -6375,7 +6517,10 @@ ${hwndPreamble}        osAncestorInvoke(${hwndArg}, ${JSON.stringify(ancestorTar
         dropNameIfStableId: true,
         forceDropName: isStateDependentValueDisplay(e.element),
       });
-      const hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
+      // 2026-09-01: 죽은 런치-창 hwnd 방지 — _liveHwnd() 주석 참고.
+      const hwndArg = useSession
+        ? `_liveHwnd(${JSON.stringify(relTitle || '')}, _hwndCache[_mainTitleFrag])`
+        : '_appHwnd';
       const relYArg = Number.isInteger(e.relY) ? e.relY : 'null';
       pushMethod(
 `    async click${stepNum}() {
@@ -6412,7 +6557,10 @@ ${hwndPreamble}        osAncestorInvoke(${hwndArg}, ${JSON.stringify(ancestorTar
       // comSafeTarget이 이미 렌더-카운터 id로 걸러내므로(isRenderCounterId,
       // Task 4) Name/ClassName 위주로 안정적으로 좁혀진다.
       const target = comSafeTarget(e.element);
-      const hwndArg = useSession ? '_hwndCache[_mainTitleFrag]' : '_appHwnd';
+      // 2026-09-01: 죽은 런치-창 hwnd 방지 — _liveHwnd() 주석 참고.
+      const hwndArg = useSession
+        ? `_liveHwnd(${JSON.stringify(relTitle || '')}, _hwndCache[_mainTitleFrag])`
+        : '_appHwnd';
       const isDbl = e.action === 'doubleClick';
       pushMethod(
 `    async click${stepNum}() {

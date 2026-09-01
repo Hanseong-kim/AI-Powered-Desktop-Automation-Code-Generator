@@ -2643,7 +2643,15 @@ def step_wdio_generate_session():
         )
         check(
             f"  {fname} replays expandCollapse via osExpandCollapse() even in session mode",
-            "osExpandCollapse(_hwndCache[_mainTitleFrag]" in content,
+            # 2026-09-01: the main-window handle is now resolved live at replay
+            # time (_liveHwnd(recordedTitle, _hwndCache[_mainTitleFrag])) because
+            # _mainTitleFrag can name a window that no longer exists — a login
+            # window that closes itself and spawns the dashboard as a separate
+            # process (Medflow). Both spellings satisfy what this check is
+            # actually about: the event must still produce an osExpandCollapse()
+            # call against the main window rather than being silently skipped.
+            ("osExpandCollapse(_hwndCache[_mainTitleFrag]" in content
+             or "osExpandCollapse(_liveHwnd(" in content),
             "session-mode expandCollapse events must not be silently skipped — "
             "FileZilla-style File-menu navigation never actually selected the "
             "target menu item in session mode (2026-07-16, root cause of the "

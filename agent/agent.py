@@ -132,8 +132,45 @@ def _enable_vt_processing():
 _enable_vt_processing()
 
 
+# Every [inspect]/[diag-click] line also goes here, so a capture problem can be
+# diagnosed after the fact instead of only while someone is watching the
+# console. Added 2026-09-01: three separate investigations (08-27, 08-31,
+# 09-01) each stalled at "please scroll back and paste the agent console",
+# and on 09-01 the console that held the answer had already been closed by an
+# agent restart.
+#
+# Opened in APPEND mode here and truncated only by main(): poc/ probes import
+# this module to call UIAInspector directly, and a "w" here would wipe the log
+# of an agent that is running and recording at that moment.
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.log")
+try:
+    _log_fh = open(LOG_FILE, "a", encoding="utf-8")
+except Exception:
+    _log_fh = None
+
+
+def _truncate_log():
+    """Start a fresh log for this agent run. Called from main() only."""
+    global _log_fh
+    try:
+        if _log_fh is not None:
+            _log_fh.close()
+        _log_fh = open(LOG_FILE, "w", encoding="utf-8")
+    except Exception:
+        _log_fh = None
+
+
 def log(*args):
-    print("[agent]", *args, flush=True)
+    line = " ".join(str(a) for a in args)
+    print("[agent]", line, flush=True)
+    # Logging must never be able to break capture — a full disk or a locked
+    # file costs a log line, not the recording.
+    if _log_fh is not None:
+        try:
+            _log_fh.write(f"{time.strftime('%H:%M:%S')} [agent] {line}\n")
+            _log_fh.flush()
+        except Exception:
+            pass
 
 
 def point_in_rect(rect, x, y):
@@ -841,7 +878,54 @@ class UIAInspector:
                     trace["root_hwnd"] = root_hwnd
                     trace["root_ok"] = bool(root)
                     if root:
-                        deeper = self.smallest_element_at(root, int(x), int(y))
+                        # 2026-09-01 (Medflow HTA, SETTINGS 버튼 실측):
+                        # axis_elem=elem — 후보는 히트테스트가 돌려준 elem의
+                        # 조상이거나 자손이어야 한다. 창 전체에서 면적만으로
+                        # 고르면 elem과 트리상 아무 관계도 없는 요소가 이긴다.
+                        #
+                        # 실측 (poc/probe_capture_identity.py, 재현 100%):
+                        #   aimed  Button aid='settingsBtn' rect=(1639,978,1756,1011)
+                        #   raw    id='settingsBtn' name='SETTINGS'   <- 히트테스트는 정답
+                        #   got    Text aid='' name='Glaucoma' rect=(1695,991,1753,1005)
+                        # 'Glaucoma'는 오른쪽 패널 표의 셀로 settingsBtn의
+                        # 자손이 아니다(settingsBtn의 서브트리는 자기 자신
+                        # 1개뿐). 그 표는 overflow:hidden으로 화면에서는 잘려
+                        # 안 보이지만 UIA는 잘리지 않은 rect를 그대로 보고해서
+                        # 푸터 위를 덮고, 면적 506 < 2444로 이긴다.
+                        #
+                        # IsOffscreen 필터로는 못 잡는다 — 클리핑된 그 요소들은
+                        # IsOffscreen=False로 보고된다(측정:
+                        # poc/diag_offscreen_hittest.py). UIA 자신의
+                        # ElementFromPoint는 클리핑을 존중해 정답을 준다.
+                        #
+                        # 검색 루트를 elem으로 바꾸는(= 서브트리 스코프) 더 단순한
+                        # 수정도 이 케이스는 고치지만, 정답이 raw hit의 **조상**인
+                        # 반대 케이스를 깨뜨린다 — 같은 창의 MenuBar에서 측정:
+                        #   raw  id='' name='시스템'   rect=(0,0,28,28)
+                        #   정답 aid='MenuBar'        rect=(0,0,28,28)  (raw의 조상)
+                        # 축(axis) 제한은 위/아래 양방향을 모두 허용하면서 옆으로만
+                        # 막으므로 두 케이스가 함께 통과한다.
+                        #
+                        # 스윕 측정(probe_capture_identity.py --sweep, 이 창의
+                        # AutomationId 보유 컨트롤 43개, 동일 조건):
+                        #   창 스코프   35/43  MISS={deptSelect, facilitySelect,
+                        #                            row×4, searchBtn, settingsBtn}
+                        #   서브트리    38/43  MISS={MenuBar, row×4}
+                        #   축 제한     37/43  MISS={deptSelect, facilitySelect, row×4}
+                        # 점수가 아니라 집합 관계가 판단 근거다: 축 제한의 MISS는
+                        # 창 스코프 MISS의 진부분집합이라 새로 깨지는 것이 없고,
+                        # 서브트리는 점수가 더 높은데도 MenuBar를 새로 깨뜨린다.
+                        # 남는 MISS는 전부 기존 동작이다 — ComboBox는 값 표시
+                        # 자식으로 히트테스트되고(_enclosing_combo가 하류에서
+                        # 되돌린다), 행은 이름 셀로 내려간다(CLAUDE.md §5).
+                        #
+                        # 이 버그가 캡처에서 어떻게 보이는지: 2026-08-31 녹화의
+                        # SETTINGS 클릭이 name='Department'(같은 표의 다른 셀)로,
+                        # 그 전 녹화에서는 'Glaucoma'로 잡혔다. 클릭 자체는
+                        # 정상 동작했으므로(Settings 창이 실제로 열림) 드롭도
+                        # 오류도 없이 조용히 틀린 셀렉터만 남는다.
+                        deeper = self.smallest_element_at(
+                            root, int(x), int(y), axis_elem=elem)
                         if deeper is not None:
                             trace["picked_by"] = "smallest_element_at"
                             # 2026-08-14 (VS "리포지토리 복제" 실측): raw_info와
@@ -1373,13 +1457,88 @@ class UIAInspector:
     # not a target — same threshold as server.js WINDOW_FILL_RATIO.
     WINDOW_FILL_RATIO = 0.80
 
-    def smallest_element_at(self, root, x, y):
+    # How far _element_key climbs before giving up. resolve_root_hwnd() and
+    # _nearest_named_ancestor() both cap at 15; a UIA tree deep enough to need
+    # more than this is the Chromium/React case, and those are handled by the
+    # subtree half of the axis test, not the ancestor half.
+    AXIS_MAX_CLIMB = 25
+
+    def _element_key(self, el):
+        """Identity tuple for "is this the same underlying element?".
+
+        Deliberately NOT IUIAutomation::CompareElements — see
+        _ancestor_sibling_selector()'s docstring: this codebase has never
+        called it and it gives false negatives across two separately-queried
+        references to the same element. Same rule used there: bounding rect +
+        ControlType + (native hwnd if there is one, else AutomationId/Name).
+        """
+        try:
+            r = el.CurrentBoundingRectangle
+            return (
+                (r.left, r.top, r.right, r.bottom),
+                el.CurrentControlType,
+                el.CurrentNativeWindowHandle or 0,
+                el.CurrentAutomationId or "",
+                el.CurrentName or "",
+            )
+        except Exception:
+            return None
+
+    def _on_hit_axis(self, axis_key, axis_ancestor_keys, cand):
+        """Is `cand` on the hit element's own ancestor-or-descendant axis?
+
+        2026-09-01 (Medflow HTA). smallest_element_at() ranks purely by area,
+        so before this it could adopt an element with NO tree relationship to
+        the one the hit test returned — it only had to contain the point and
+        be smaller. That is not a theoretical hole: a CSS `overflow:hidden`
+        region reports UNCLIPPED rects to UIA (and IsOffscreen=False, so an
+        offscreen filter does not see it either), so cells scrolled out of
+        view spill across the window and win on area over the real control.
+
+        Moving up or down the hit element's own chain is legitimate and both
+        directions are needed — measured on one window:
+          - down: a container hit-tests to itself, the real control is inside
+          - up:   the hit lands on an unnamed child whose ANCESTOR carries the
+                  AutomationId (MenuBar: raw name='시스템' id='' -> aid='MenuBar',
+                  identical rect)
+        Moving SIDEWAYS into an unrelated subtree never is.
+        """
+        ck = self._element_key(cand)
+        if ck is None:
+            return False
+        if ck == axis_key or ck in axis_ancestor_keys:
+            return True                     # cand is elem, or an ancestor of it
+        try:
+            walker = self._uia.ControlViewWalker
+        except Exception:
+            return False
+        cur, hops = cand, 0
+        while cur and hops < self.AXIS_MAX_CLIMB:
+            try:
+                parent = walker.GetParentElement(cur)
+            except Exception:
+                return False
+            if not parent:                  # NULL COM pointer, not None
+                return False
+            if self._element_key(parent) == axis_key:
+                return True                 # cand is a descendant of elem
+            cur, hops = parent, hops + 1
+        return False
+
+    def smallest_element_at(self, root, x, y, axis_elem=None):
         """The smallest element in root's subtree containing (x, y).
 
         Replaces the first-containing-child descent of _deepen(): that walk
         could not backtrack out of a dead-end branch, and its depth cap had to
         be retuned per UI framework. Selecting by area is independent of tree
         shape and depth.
+
+        axis_elem (2026-09-01): when given, only elements on axis_elem's own
+        ancestor-or-descendant axis are eligible, smallest-first — see
+        _on_hit_axis(). Callers that legitimately need to leave that axis pass
+        nothing: element_under_overlay() searches the window for a control
+        that is a SIBLING subtree of the light-dismiss scrim it hit, which is
+        the entire point of that function.
         """
         try:
             arr = root.FindAll(7, self._uia.CreateTrueCondition())
@@ -1406,8 +1565,45 @@ class UIAInspector:
                     continue        # a window-filling container is not a target
             els.append(el)
             rects.append(rect)
-        idx = smallest_rect_index(rects, x, y)
-        return els[idx] if idx is not None else None
+        if axis_elem is None:
+            idx = smallest_rect_index(rects, x, y)
+            return els[idx] if idx is not None else None
+
+        # Axis-restricted: same smallest-area-wins rule, but walk the
+        # candidates in ascending area order and take the first one that is
+        # actually related to the hit element. Only candidates containing the
+        # point can win at all, so the (expensive) tree climb runs on a
+        # handful of elements, not on the whole subtree.
+        axis_key = self._element_key(axis_elem)
+        if axis_key is None:
+            idx = smallest_rect_index(rects, x, y)
+            return els[idx] if idx is not None else None
+        axis_ancestor_keys = set()
+        try:
+            walker = self._uia.ControlViewWalker
+            cur, hops = axis_elem, 0
+            while cur and hops < self.AXIS_MAX_CLIMB:
+                parent = walker.GetParentElement(cur)
+                if not parent:              # NULL COM pointer, not None
+                    break
+                k = self._element_key(parent)
+                if k is None:
+                    break
+                axis_ancestor_keys.add(k)
+                cur, hops = parent, hops + 1
+        except Exception:
+            pass
+        cands = []
+        for el, rect in zip(els, rects):
+            if not point_in_rect(rect, x, y):
+                continue
+            cands.append((max(0, rect[2] - rect[0]) * max(0, rect[3] - rect[1]),
+                          el))
+        cands.sort(key=lambda t: t[0])
+        for _area, el in cands:
+            if self._on_hit_axis(axis_key, axis_ancestor_keys, el):
+                return el
+        return None
 
     def _inner_expandable_combo(self, elem):
         """The control that actually owns the dropdown. For a ComboBoxEx the
@@ -3043,12 +3239,29 @@ class Recorder:
         # 같은 순수 win32 호출(COM/UIA 아님)이라 여기서 같이 읽어 큐에 실어
         # 보낸다 — describe()가 나중에 다시 조회하는 대신 이 값을 쓴다.
         fg_hwnd = ctypes.windll.user32.GetForegroundWindow()
+        # 2026-09-01 (Medflow Detail CLOSE 실측): 이 좌표를 소유한 창도 여기서
+        # 같이 읽는다. 같은 이유다 — 워커가 나중에 다시 물으면 답이 달라진다.
+        # 창을 스스로 닫는 버튼(CLOSE/취소/닫기)을 누르면, 워커가 처리할 때쯤
+        # 그 픽셀의 주인은 이미 그 밑에 있던 바탕 화면이나 다른 앱이다:
+        #   [trace] pt=(1545,320) raw=[name='바탕 화면' rect=(0,0,3840,1080)
+        #           hwnd=65864] targets=[262304, 1769560]
+        #   [skip] click _inspect() already identified the owning window
+        #          hwnd=65858 as untracked
+        # 클릭 지점은 Detail 창(1769560, rect=(192,192,1632,932)) 안이었는데도
+        # 이벤트가 통째로 사라졌다(gap=0.6054s). _emit()의 드롭 게이트가 쓰는
+        # 두 신호(_inspect()의 판정, top_window_at())가 **둘 다 사후 조회**라
+        # 캡처 시점의 진실을 아무도 갖고 있지 않은 게 원인이다.
+        # top_window_at()은 WindowFromPoint+GetAncestor뿐인 순수 win32라
+        # (GetCursorPos/GetForegroundWindow와 같은 부류) 콜백에서 호출해도
+        # 두-스레드 규칙에 걸리지 않는다.
+        win_hwnd = top_window_at(cursor_pt.x, cursor_pt.y)
         # Both press ("click") and release ("release") are enqueued — still
         # enqueue-only, no UIA/COM here. The worker pairs them to tell a plain
         # click apart from a press-hold-move-release drag (text selection).
         self.raw_queue.put({"kind": "click" if pressed else "release", "x": x, "y": y,
                             "cursor_x": cursor_pt.x, "cursor_y": cursor_pt.y,
                             "fg_hwnd_at_capture": fg_hwnd,
+                            "win_hwnd_at_capture": win_hwnd,
                             "button": button.name, "ts": time.time()})
 
     def _on_scroll(self, x, y, dx, dy, injected=False):
@@ -3588,7 +3801,9 @@ class Recorder:
             log(f"[diag-click] pynput_pt=({x},{y}) cursor_pt=({cx},{cy}) "
                 f"delta={delta} gap={gap:.4f}s "
                 f"elem_name='{elem.get('name', '')}' elem_rect={elem.get('rect')}")
-            self._pending_press = {"x": cx, "y": cy, "ts": ts, "elem": elem, "com_elem": com_elem}
+            self._pending_press = {"x": cx, "y": cy, "ts": ts, "elem": elem,
+                                   "com_elem": com_elem,
+                                   "win": item.get("win_hwnd_at_capture") or 0}
             return
 
         if kind == "release":
@@ -4260,6 +4475,35 @@ class Recorder:
             # Treat exactly like an unresolvable light-dismiss hit: drop the
             # selector entirely rather than emit an anchor path that would
             # just re-target the same wrong node through a different XPath.
+            # 2026-09-01 (Medflow CANCEL/CLOSE 실측): rect가 튜플이 아니면
+            # describe()가 BoundingRectangle 읽기 실패 사유를 "ERR:..."
+            # 문자열로 저장한 것이다 — 요소의 provider가 이미 사라졌다는 뜻.
+            # 아래 블록은 isinstance(tuple) 가드가 걸려 있어서 이 경우 통째로
+            # 건너뛰고, 그러면 light_dismiss가 켜지지 않아 죽은-요소 복구
+            # (`if light_dismiss and elem is not None:`)가 **실행조차 되지
+            # 않았다** — _raw에 정답이 온전히 들어 있는데도.
+            #
+            # 같은 녹화 로그 안에 두 결과가 나란히 찍혔다:
+            #   닫기  rect=(0, 0, 0, 0)   -> 튜플이라 가드 통과 -> 복구 성공
+            #         "#1 click name='닫기' [name]"
+            #   CLOSE rect="ERR:COMError:(-2147220991, ...)" -> 가드 탈락
+            #         raw=[name='CLOSE' ct='Button' id='closeBtn'
+            #              rect=(1491,675,1603,709)]  <- 살아있을 때 정확히 읽음
+            #         "#14 click id='' name='' [coordinate]"   <- 그런데 버려짐
+            # 같은 죽음인데 provider가 예외를 던졌느냐 0을 돌려줬느냐는 자의적
+            # 차이로 갈렸다. CANCEL(cancelBtn)도 동일하게 유실됐다.
+            #
+            # 복구 로직 자체는 이미 이 경우를 처리할 줄 안다 — 그쪽 _dead는
+            # `(not isinstance(_r, tuple)) or _r == (0,0,0,0)`으로 문자열도
+            # 죽음으로 친다. 여기서 문을 열어주기만 하면 된다.
+            if (not light_dismiss and elem is not None
+                    and not isinstance(info.get("rect"), tuple)):
+                log(f"[inspect] pt=({x},{y}) adopted element has an unreadable "
+                    f"rect={info.get('rect')!r} — its UIA provider went away "
+                    "between element_at()'s read and this one. Treating it as "
+                    "dead so the dead-element recovery below can use the "
+                    "earliest observation (same handling as a (0,0,0,0) rect).")
+                light_dismiss = True
             if (not light_dismiss and elem is not None
                     and isinstance(info.get("rect"), tuple)):
                 if not point_in_rect(info["rect"], x, y):
@@ -4856,6 +5100,9 @@ class Recorder:
         flag — never worse than before this feature existed)."""
         cx, cy, ts, elem = press["x"], press["y"], press["ts"], press["elem"]
         com_elem = press.get("com_elem")
+        # Window that owned this point when the button went DOWN — see
+        # _on_click(). The only pre-navigation observation of ownership.
+        _cw = press.get("win") or 0
         self._last_click_xy = (cx, cy)
 
         ll = self._last_left_click
@@ -4870,8 +5117,8 @@ class Recorder:
             # doubleClick으로 확정됐으니 검증 없이 그대로 흘려보낸다. 물리
             # 더블클릭은 실제 동작을 일으키므로 플래그가 필요 없다.
             self._flush_pending_activation(verify=False)
-            self._emit("click", elem, x=cx, y=cy, ts=ts)
-            self._emit("doubleClick", elem, x=cx, y=cy, ts=ts)
+            self._emit("click", elem, x=cx, y=cy, ts=ts, capture_win=_cw)
+            self._emit("doubleClick", elem, x=cx, y=cy, ts=ts, capture_win=_cw)
             self._last_left_click = None  # consume; avoid chaining triples
             return
         # 페어링되지 않은(적어도 지금까지는) 단독 클릭. 이름 없는(또는
@@ -4893,6 +5140,7 @@ class Recorder:
                 self._flush_pending_activation(verify=False)
             self._pending_activation = {
                 "elem": elem, "com_elem": com_elem, "x": cx, "y": cy, "ts": ts,
+                "win": _cw,
                 "due": time.time() + ACTIVATION_CHECK_DELAY,
                 "snapshot": self._activation_snapshot(ins, com_elem),
             }
@@ -4901,7 +5149,7 @@ class Recorder:
             # presses like "9999" -> num9Button x4). A genuine fast
             # double-click is recognised IN ADDITION, never by
             # merging/dropping the clicks.
-            self._emit("click", elem, x=cx, y=cy, ts=ts)
+            self._emit("click", elem, x=cx, y=cy, ts=ts, capture_win=_cw)
         self._last_left_click = {"x": cx, "y": cy, "ts": ts, "elem": elem, "com_elem": com_elem}
 
     @staticmethod
@@ -4987,6 +5235,7 @@ class Recorder:
                     f"name={pa['elem'].get('name')!r} actually changed the view — "
                     f"tagging activatesOnSingleClick")
         self._emit("click", pa["elem"], x=pa["x"], y=pa["y"], ts=pa["ts"],
+                    capture_win=pa.get("win") or 0,
                     extra={"activatesOnSingleClick": True} if flag else None)
 
     def _flush_pending_click(self, ins=None):
@@ -5150,7 +5399,8 @@ class Recorder:
         except Exception as e:
             log(f"WARN: could not POST session_meta: {e}")
 
-    def _emit(self, action, elem, x=None, y=None, value=None, delta=None, ts=None, end=None, extra=None):
+    def _emit(self, action, elem, x=None, y=None, value=None, delta=None, ts=None,
+              end=None, extra=None, capture_win=0):
         elem = elem or {}
         # Drop events captured before _discover_target_windows() resolved
         # target_hwnds. Mouse/keyboard hooks go live at recording=True, before
@@ -5192,15 +5442,40 @@ class Recorder:
             # 아래 게이트를 그냥 통과시켰다 — VS와 무관한 드래그가 좌표 전용
             # 이벤트로 그대로 캡처됨. contradiction-confirmed(반대 방향 —
             # elem은 추적 대상이라는데 top이 부정하는 경우)의 대칭 케이스.
+            # 2026-09-01 (Medflow Detail CLOSE 실측): 위 판정과 top_window_at()은
+            # 둘 다 **사후** 조회다. 자기 창을 닫는 버튼을 누르면 워커가 볼 때쯤
+            # 그 픽셀의 주인이 바뀌어 있어, 우리 앱에서 일어난 진짜 클릭이
+            # "무관한 창"으로 오판돼 통째로 사라진다 — 실측 로그:
+            #   [trace] pt=(1545,320) raw=[name='바탕 화면' hwnd=65864]
+            #           targets=[262304, 1769560]
+            #   [skip] click ... owning window hwnd=65858 as untracked
+            # 클릭 지점은 Detail 창(1769560, rect=(192,192,1632,932)) 안이었다.
+            # capture_win은 버튼이 눌린 그 순간 _on_click()이 읽어둔 소유 창이라
+            # 유일하게 pre-navigation 관측값이다. 그게 추적 대상이면 이 클릭은
+            # 확실히 우리 앱의 것이므로 버리지 않는다. 셀렉터는 이미 _inspect()가
+            # 지웠으므로 코드젠은 이걸 명시적 FAIL 스텝으로 만든다(§3) — 조용히
+            # 사라지는 것보다 언제나 낫다.
+            # Alt+Tab/크롬 오염 케이스(2026-08-17, 아래 원문 주석)는 capture_win도
+            # 추적 대상이 아니라 그대로 걸러진다 — 동작 무변화.
+            capture_win_tracked = bool(capture_win) and (
+                capture_win in self.target_hwnds or capture_win in self._popup_hwnds)
             root_hwnd_from_inspect = elem.get("rootHwnd")
             if (root_hwnd_from_inspect
                     and root_hwnd_from_inspect not in self.target_hwnds
                     and root_hwnd_from_inspect not in self._popup_hwnds):
-                log(f"[skip] {action} _inspect() already identified the "
-                    f"owning window hwnd={root_hwnd_from_inspect} as "
-                    "untracked — trusting that over a freshly re-queried "
-                    f"top_window_at()={top}")
-                return
+                if capture_win_tracked:
+                    log(f"[keep] {action} _inspect() says the owning window "
+                        f"hwnd={root_hwnd_from_inspect} is untracked, but at "
+                        f"button-down the point belonged to tracked window "
+                        f"hwnd={capture_win} — the click destroyed its own "
+                        "window. Keeping it as an explicit FAIL step instead "
+                        "of dropping the event.")
+                else:
+                    log(f"[skip] {action} _inspect() already identified the "
+                        f"owning window hwnd={root_hwnd_from_inspect} as "
+                        "untracked — trusting that over a freshly re-queried "
+                        f"top_window_at()={top}")
+                    return
 
             # UWP lazy frame adoption: the ApplicationFrameWindow that input
             # actually routes to is owned by ApplicationFrameHost.exe (a
@@ -5654,9 +5929,11 @@ def _build_marker():
 
 
 def main():
+    _truncate_log()
     _enable_per_monitor_dpi_awareness()
     is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
     log(f"Capture agent listening on http://localhost:{AGENT_PORT}")
+    log(f"log file: {LOG_FILE}")
     log(f"build: agent.py {_build_marker()}")
     log(f"Administrator rights: {'YES' if is_admin else 'NO  <-- element properties will be EMPTY!'}")
     if not is_admin:
