@@ -170,3 +170,15 @@ AGENTS.md
 
 # 루트에서 임시로 만든 디버그 스크립트가 남기는 Appium 로그
 /appium.log
+
+# 루트에서 node server.js 를 백그라운드로 띄울 때 남는 로그
+# (server/*.log 규칙은 server/ 안에서 띄운 경우만 잡는다)
+/server.log
+
+# 녹화 중 저장한 스크린샷 / 부분 녹화 스냅샷 — 전부 스크래치
+/*.png
+/.tmp_*.json
+
+# mock_events.py 게이트 산출물 (위 Mock* 목록에서 누락돼 있던 항목)
+generated-wdio/MockNamedComboIndex/
+generated-wdio/_debug-helpers/MockNamedComboIndex/
