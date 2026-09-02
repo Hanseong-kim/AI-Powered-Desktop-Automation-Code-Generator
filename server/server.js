@@ -3566,15 +3566,39 @@ function isVolatileMenuItemId(el) {
 // AND에 들어가는 바람에 매칭 자체가 막혔다. isRenderCounterId가
 // automationId에 대해 하는 것과 같은 원리로, isWebContent 요소는
 // className을 통째로 버린다.
-function comSafeTarget(el, { dropNameIfStableId = false, forceDropName = false } = {}) {
+// 2026-09-02: dropNameIfStableId asked only "does a trustworthy-LOOKING id
+// exist", never "is that id unique in this recording". A Win32 dialog that
+// reuses one numeric AutomationId across many fields (FileZilla Site Manager:
+// "5999" on ~12 Edit controls) therefore lost the only thing that told the
+// fields apart, and resolve_cond()'s FindFirst returns the FIRST match — so
+// the Host: click, the User: click and their type() steps all landed on the
+// same field. The XPath path has guarded this since 2026-07-17 via
+// wdioSelectorById's ambiguousIds, computed once per generate; this COM path
+// simply never consulted it. Pass the same set here and keep the Name when
+// the id is one of the reused ones. forceDropName still wins: a
+// state-dependent Name (TComboBoxEx, DropDown 열기/닫기) is untrustworthy no
+// matter how ambiguous the id is.
+function comSafeTarget(el, { dropNameIfStableId = false, forceDropName = false, ambiguousIds = null } = {}) {
   el = el || {};
   const stableId = (el.automationId && !isWindowHandleId(el) && !isRenderCounterId(el)
     && !isVolatileMenuItemId(el)) ? el.automationId : '';
   const className = el.isWebContent ? '' : (el.className || '');
+  // ...but a control whose Name is STATE-DEPENDENT lands in ambiguousIds for
+  // the wrong reason. A DropDown arrow's id is literally "DropDown" on every
+  // combo in the window and its Name flips 열기/닫기 as it opens and closes, so
+  // "one id, several names" is true of it without the names ever identifying
+  // anything. Resurrecting a Name there is the exact regression the gate's
+  // "does NOT resurrect Name on the reused DropDown arrow" checks guard — and
+  // on a Korean Windows 닫기 is also the titlebar Close button, so replay
+  // would close the app (2026-07-14, PuTTY ByClass STEP 5). Reuse only earns
+  // the Name back when the Name is a real, fixed label like "Host:"/"User:".
+  const nameIsStateDependent = isComboDropDownArrow(el) || isStateDependentValueDisplay(el);
+  const idIsReused = !!(stableId && ambiguousIds && ambiguousIds.has(stableId)
+    && !nameIsStateDependent);
   const target = {
     automationId: stableId,
     className,
-    name: forceDropName ? '' : ((dropNameIfStableId && stableId) ? '' : (el.name || '')),
+    name: forceDropName ? '' : ((dropNameIfStableId && stableId && !idIsReused) ? '' : (el.name || '')),
   };
   // 2026-08-10 (FileZilla "C:" 트리 vs 리스트 혼동 실측): automationId도
   // className도 없는(owner-drawn) 행은 Name만으로 매칭하면 원천적으로
@@ -3786,10 +3810,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // still writes the standalone .ps1/.py copies alongside this file (so they
 // stay inspectable/debuggable), but this file no longer depends on them
 // being there.
-async function _typeVerified(title, selector, text) {
-    return await _typeScopedOrCom(title || '', selector, text);
-}
-
 const _H = {
     'osWindowRect.ps1': ${JSON.stringify(OS_WINRECT_PS1)},
     'osMoveWindow.ps1': ${JSON.stringify(OS_MOVEWINDOW_PS1)},
@@ -4136,6 +4156,22 @@ function osForegroundHwnd() {
 `;
 
 const SIMPLE_HEADER = STANDALONE_PREAMBLE + `
+// 값 확인까지 마친 타이핑. 2026-09-02: 이 함수는 STANDALONE_PREAMBLE(두 모드
+// 공용)에 있으면서 본문이 _typeScopedOrCom() — SESSION_HEADER에만 있는 함수 —
+// 를 부르고 있었다. 그래서 simple 모드로 생성된 파일에는 "정의되지 않은 함수를
+// 부르는 함수"가 그대로 들어갔다(호출되는 순간 ReferenceError). 지금까지 안
+// 터진 이유는 simple 모드의 type 스텝이 이 함수를 아예 안 거치고 _typeScoped()를
+// 직접 불렀기 때문 — 즉 죽은 코드였고, 동시에 b09b460이 노린 값 검증이 simple
+// 모드에는 적용되지 않고 있었다는 뜻이기도 하다. 모드별로 갈라서 각자 자기
+// 모드에 존재하는 함수만 부르게 한다.
+//
+// 실제 검증은 _typeScoped() 안에 있다(REST element/value 뒤 /text 재판독,
+// 값이 일치할 때만 true). simple 모드에는 창별 세션 캐시가 없으므로 _appSid를
+// 직접 넘긴다 — 기존 type 스텝이 하던 호출과 인자까지 동일하다.
+async function _typeVerified(title, selector, text) {
+    return await _typeScoped(_appSid, null, selector, text);
+}
+
 // 프로그래매틱 스크롤 — osScroll.py가 추적된 top-level hwnd 아래에서 녹화된
 // 컨테이너를 UIA로 찾아 ScrollPattern.Scroll()을 호출하고, ScrollPattern
 // 미지원 레거시 컨트롤에만 hwnd-scoped WM_MOUSEWHEEL을 PostMessageW로
@@ -4598,6 +4634,13 @@ async function _step(label, fn) {
 
 // ── 세션 전환 헤더 (Electron / 다중 창 앱) ────────────────────────────────
 const SESSION_HEADER = STANDALONE_PREAMBLE + `
+// 값 확인까지 마친 타이핑 (session 모드) — SIMPLE_HEADER의 같은 이름 함수와
+// 짝이다. 자세한 배경은 그쪽 주석 참고. 여기서는 창별 세션 캐시를 타야 하므로
+// _typeScopedOrCom()으로 보낸다(owned 다이얼로그면 COM, 아니면 _typeScoped).
+async function _typeVerified(title, selector, text) {
+    return await _typeScopedOrCom(title || '', selector, text);
+}
+
 // 프로그래매틱 스크롤 — osScroll.py가 대상 창 hwnd 아래에서 녹화된 컨테이너를
 // UIA로 찾아 ScrollPattern.Scroll()을 호출하고, ScrollPattern 미지원 레거시
 // 컨트롤에만 hwnd-scoped WM_MOUSEWHEEL을 PostMessageW로 전달한다. 픽셀
@@ -6107,7 +6150,7 @@ function generateWdio(strategy, appName, eventList, useSession, exePath, exeArgs
           const elSel = sel || `'//*[@Name="${escapeAttr(e.element?.name)}"]'`;
           pushMethod(
 `    async type${stepNum}(value) {
-        const ok = await _typeScoped(_appSid, null, ${elSel}, value);
+        const ok = await _typeVerified('', ${elSel}, value);
         if (!ok) {
             // WinAppDriver's element/value endpoint rejects some native edit
             // controls outright (confirmed 2026-07-08: Win11 Notepad's
@@ -6430,7 +6473,7 @@ ${hwndPreamble}        osAncestorInvoke(${hwndArg}, ${JSON.stringify(ancestorTar
       // 근본 원인이 병합 여부에 따라 다른 코드 경로에 다시 나타난 것).
       // automationId가 있는 컨트롤은 그것만으로 충분히 특정되므로 병합
       // 여부와 무관하게 항상 이 보호를 적용한다.
-      const target = comSafeTarget(e.element, { dropNameIfStableId: true });
+      const target = comSafeTarget(e.element, { dropNameIfStableId: true, ambiguousIds });
       const trig = e.crossWindowTrigger;
       // 트리거의 Name은 신뢰하지 않는다 — Win32 ComboBox 드롭다운 버튼처럼
       // 열림/닫힘 상태에 따라 접근성 Name이 바뀌는 컨트롤은, 캡처가 클릭
@@ -6447,7 +6490,7 @@ ${hwndPreamble}        osAncestorInvoke(${hwndArg}, ${JSON.stringify(ancestorTar
       // (HeidiSQL "더보기" SplitButton): automationId가 자기 hwnd라 실행마다
       // 바뀌는 트리거를 "안정적"으로 오판해 name까지 같이 버리면 트리거를
       // 영원히 못 찾는다 — comSafeTarget이 이 경우를 걸러낸다.
-      const triggerTarget = trig ? comSafeTarget(trig, { dropNameIfStableId: true }) : null;
+      const triggerTarget = trig ? comSafeTarget(trig, { dropNameIfStableId: true, ambiguousIds }) : null;
       // 메인 창 hwnd 변수: SIMPLE_HEADER는 _appHwnd(initAppHwnd()가 채움),
       // SESSION_HEADER는 _hwndCache[_mainTitleFrag](launchApp의 baseline-diff가
       // beforeAll에서 채움) — 둘 다 osScopedInvoke 호출 전에 이미 준비돼 있다.
@@ -6561,6 +6604,7 @@ ${hwndPreamble}        osAncestorInvoke(${hwndArg}, ${JSON.stringify(ancestorTar
       const target = comSafeTarget(e.element, {
         dropNameIfStableId: true,
         forceDropName: isStateDependentValueDisplay(e.element),
+        ambiguousIds,
       });
       // 2026-09-01: 죽은 런치-창 hwnd 방지 — _liveHwnd() 주석 참고.
       const hwndArg = useSession

@@ -69,8 +69,12 @@ python agent\sweep\run.py live      --app SevenZip --max-controls 2 --yes
 Regression gate (server must be running, agent not needed):
 
 ```powershell
-python agent\mock_events.py      # 460/480 as of 2026-09-02 — the 20 FAILs are a PRE-EXISTING backlog
-                                 # (measured A/B, unrelated to any recent change), not a regression
+python agent\mock_events.py      # 480/480 as of 2026-09-02. It must STAY 480/480 —
+                                 # the 20 "pre-existing failures" carried since b09b460
+                                 # were real defects, not noise (see §5), and a red gate
+                                 # is never to be labelled pre-existing without bisecting
+                                 # it first: `git checkout <commit> -- server/server.js
+                                 # agent/mock_events.py agent/golden` + restart + rerun.
 ```
 
 > `mock_events.py` POSTs synthetic events to the live server. If you called
@@ -358,6 +362,30 @@ has no mouse position and must search downward from the window.
   `System.Windows.Automation`.
 - **comtypes `FindFirst` returns a NULL COM pointer, not `None`, on a miss.**
   `if el is not None` is always true; test truthiness (`if el:`).
+- **A red gate check is a defect until you have bisected it.** Twenty checks
+  went red in one commit (`b09b460`) and were carried for weeks as
+  "pre-existing failures" in two later commit messages. Re-measured
+  2026-09-02 by running each commit's own `server.js` + `mock_events.py`:
+  `f763155` was **419/419 green**, `b09b460` **419/439** — same 20, unchanged
+  through HEAD. All twenty were real: a `!== null` that also matched an
+  *absent* field and threw away every numeric AutomationId; a `_typeVerified()`
+  emitted into simple mode whose body called a session-only helper; a
+  reused-id Name drop the COM path never guarded; one genuinely stale
+  expectation. Gate is 480/480 again — keep it there.
+  - To bisect: `git checkout <commit> -- server/server.js agent/mock_events.py
+    agent/golden`, restart the server (no hot reload), rerun, then
+    `git checkout HEAD -- <same paths>`. `node_modules` stays at HEAD so
+    nothing needs reinstalling.
+  - **Passed-count arithmetic tells you which kind of break it is.**
+    419/419 → 419/439 means twenty checks were *added already failing*; a
+    drop in the passed count would have meant existing behaviour regressed.
+    Here it was both, and only splitting them (does this check title exist in
+    the parent commit's `mock_events.py`?) showed 13 broken + 7 born red.
+  - **A comment is not a call site.** The "no undefined helper call sites"
+    scan matched `_typeScopedOrCom()` inside prose, so it must strip comments
+    first — but skipping string literals while doing so, because generated
+    XPath selectors start with `//` and a naive strip deletes the real call
+    that follows one on the same line.
 - **PowerShell variable names are case-INSENSITIVE — `$hWnd` IS `$hwnd`.** A
   `param([string]$hwnd)` therefore type-constrains every later `$hWnd`, and
   `$hWnd = [IntPtr]([int64]$hwnd)` silently converts straight back to String.

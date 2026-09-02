@@ -94,13 +94,45 @@ _DEF_RE = re.compile(r"(?:function\s+([A-Za-z_]\w*)\s*\(|(?:const|let)\s+([A-Za-
 # JS-content check.
 _EMBEDDED_HELPERS_RE = re.compile(r"const _H = \{[\s\S]*?\n\};\n")
 
+# 2026-09-02: a COMMENT is not a call site. This scan counted one, so a line
+# like "// 호출자 _typeScopedOrCom()은 이 함수의 리턴값과 무관하게" — prose
+# explaining who calls whom, which this codebase writes constantly — reported
+# _typeScopedOrCom as "called but never defined" in every simple-mode file.
+# That false positive was part of the 20 standing gate failures (found while
+# bisecting them, 2026-09-02): the real half was a genuine undefined call in
+# _typeVerified's body, and after fixing it this comment-only half remained.
+# Forbidding "name()" inside comments would be the wrong fix — it is the
+# clearest way to write about a function — so strip comments before scanning.
+# Deleting text can only hide a call site, never invent one, so this cannot
+# turn a real defect into a pass for anything but a call written inside a
+# comment, which by definition does not run.
+#
+# It must skip string literals, not just match "//": the generated code is full
+# of XPath selectors that START with "//" —
+#     await _typeVerified('', '//Text[@AutomationId="X"]', value) || await _typeScopedOrCom(...)
+# — so a naive "// to end of line" strip would delete the REAL call site that
+# follows one on the same line and quietly weaken this check into uselessness.
+# Alternating string-literal and comment alternatives makes the string win
+# whenever it starts first, so only genuine comments are removed.
+_JS_TOKEN_RE = re.compile(
+    r"""(?P<str>'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`)"""
+    r"""|(?P<comment>/\*[\s\S]*?\*/|//[^\n]*)""",
+    re.VERBOSE,
+)
+
+
+def _strip_js_comments(content):
+    return _JS_TOKEN_RE.sub(lambda m: "" if m.group("comment") else m.group(0), content)
+
 
 def _strip_embedded_helpers(content):
     return _EMBEDDED_HELPERS_RE.sub("", content)
 
 
 def check_helpers_defined(fname, content):
-    content = _strip_embedded_helpers(content)
+    # Order matters: the embedded _H block is stripped first (it is not JS at
+    # all), then comments (see _strip_js_comments).
+    content = _strip_js_comments(_strip_embedded_helpers(content))
     called = set(_CALL_SITE_RE.findall(content))
     defined = set()
     for a, b in _DEF_RE.findall(content):
@@ -2067,14 +2099,30 @@ def step_wdio_generate():
             "(PuTTY 2026-07-13)",
         )
         step_count = content.count("_step('")
-        # 13 mock events: 2 "type" events skip (control_type=Text, not
-        # editable); 2 constituent clicks before the doubleClick are merged
-        # away by dedupeDoubleClicks(); rightClick + drag are scope-out.
-        # Remaining steps: click(Five/Plus/Three/Equals)=4, doubleClick=1,
-        # scroll=1, anchor click=1 -> 7.
+        # 13 mock events: 2 constituent clicks before the doubleClick are
+        # merged away by dedupeDoubleClicks(); rightClick + drag are scope-out.
+        # Steps: click(Five/Plus/Three/Equals)=4, type=2, doubleClick=1,
+        # scroll=1, anchor click=1 -> 9.
+        #
+        # This expected 7 until 2026-09-02, on the premise that the 2 "type"
+        # events are skipped because their control_type is Text and Text is
+        # not in EDITABLE_CONTROL_TYPES. b09b460 deliberately widened the
+        # test to `EDITABLE_CONTROL_TYPES.has(controlType) || action ===
+        # 'type'` and this check was not updated with it, so it has been red
+        # ever since (found by bisecting the gate across commits 2026-09-02).
+        #
+        # The widened rule is the correct one and the check was the stale
+        # half: a recorded "type" action is direct evidence the user typed
+        # into that control, while controlType is only the provider's opinion
+        # about it -- Text/TextBlock is exactly what an edit surface reports
+        # in WebView2 and in several custom frameworks. Gating on controlType
+        # silently DROPS a real user action, which §3 forbids; emitting it
+        # costs nothing when it cannot work, because the step tries
+        # _typeScoped() (WAD element/value) and then falls back to osType()
+        # real keystrokes, which do not care what controlType claims.
         check(
-            f"  {fname} step count (13 events -> 7 steps: dedupe + scope-out)",
-            step_count == 7,
+            f"  {fname} step count (13 events -> 9 steps: dedupe + scope-out)",
+            step_count == 9,
             f"got {step_count} _step(...) invocations",
         )
         check(
