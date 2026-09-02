@@ -3524,7 +3524,16 @@ function isVolatileMenuItemId(el) {
   // 그 결과 리플레이가 트리의 아무 Button이나 잡아(실측: '빠른 연결(Q)' 버튼을
   // 대신 클릭) 엉뚱한 요소를 눌렀다.
   if (el?.hwnd) return false;
-  if (el?.controlType === 'MenuItem' || el?.menuItemIndex !== null || el?.expandItemName || el?.hwnd === 0) {
+  // `!= null`, NOT `!== null`: the test means "this element HAS a menu index".
+  // With `!==`, an element whose menuItemIndex is *absent* (undefined) reads as
+  // "has one" and every purely numeric AutomationId on it is thrown away —
+  // exactly the destruction the comment above warns about. Measured 2026-09-02:
+  // that is why MockNative's 1049/5999/1044 came out as automationId:"" and the
+  // gate has carried those failures since this guard was widened. Real agent.py
+  // recordings always emit the key (null or an int) so they never hit it; the
+  // same file already uses the correct `!== null && !== undefined` form
+  // elsewhere.
+  if (el?.controlType === 'MenuItem' || el?.menuItemIndex != null || el?.expandItemName || el?.hwnd === 0) {
     return /^[-+]?\d+$/.test(el.automationId);
   }
   return false;
