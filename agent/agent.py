@@ -5207,6 +5207,7 @@ class Recorder:
             # 좁게 건다 — 소유 창에서 그 좌표를 다시 풀었을 때 나오는 것이
             # 실제로 ExpandCollapse 가능한 콤보일 때만 바꾼다. 아니면 원래
             # 판정을 그대로 둔다(메뉴 팝업/일반 리스트는 건드리지 않는다).
+            reattributed_combo = False
             if (not light_dismiss and elem is not None
                     and info.get("controlType") == "ListItem"):
                 item_root = info.get("rootHwnd") or 0
@@ -5230,6 +5231,22 @@ class Recorder:
                             "name is the previously-selected value, which is what "
                             "a <select> renders under the cursor when it opens.)")
                         elem, info = combo, combo_info
+                        # combo_under_dropdown() only ever returns an element
+                        # that advertises ExpandCollapse — that is its filter —
+                        # so the tag is already earned. It has to be set here
+                        # rather than left to EXPAND_COLLAPSE_ALWAYS below,
+                        # which keys on controlType and lists only
+                        # ComboBox/MenuItem: an OPEN <select> is republished as
+                        # 'Text', so it would miss exactly this case. Measured
+                        # 2026-09-02 — the facility open click came out as a
+                        # plain click while the dept one (still a ComboBox at
+                        # hit-test time) became expandCollapse, from the same
+                        # recording:
+                        #   6:click           -> osScopedInvoke(facilitySelect)
+                        #   8:expandCollapse  -> osExpandCollapse(deptSelect)
+                        # Without the tag, mergeExpandCollapseClicks() has no
+                        # trigger to pair the item click with.
+                        reattributed_combo = True
                     else:
                         # 2026-09-02: 이게 없어서 첫 라이브 실행의 실패가 통째로
                         # 조용했다 — 재귀속이 안 걸린 건 로그에 아무 흔적도 남기지
@@ -5258,6 +5275,7 @@ class Recorder:
             wants_expand_collapse = (
                 ct in EXPAND_COLLAPSE_ALWAYS
                 or (ct == "TreeItem" and treeitem_glyph_fallback)
+                or reattributed_combo
             )
             if (not light_dismiss and elem is not None and wants_expand_collapse
                     and ins.has_expand_collapse(elem)):
