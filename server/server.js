@@ -570,11 +570,17 @@ if ($listOnly) {
   exit
 }
 if ($matches.Count -gt 0) {
+  # $targetHwnd, NOT $hWnd: PowerShell variable names are case-insensitive, so
+  # $hWnd would be the [string]-typed $hwnd parameter and the assignment would
+  # convert the handle back to String — measured 2026-09-02, this exact bug
+  # made THIS branch (the -titleLike rect lookup) throw on every call while the
+  # -hwnd branch above, which uses the untyped local $h, kept working. Same
+  # root cause as osMoveWindow.ps1; see its note and CLAUDE.md §5.
   $fg = [WinEnum]::GetForegroundWindow()
-  $hWnd = $matches[0]
-  foreach ($h in $matches) { if ($h -eq $fg) { $hWnd = $h; break } }
+  $targetHwnd = $matches[0]
+  foreach ($h in $matches) { if ($h -eq $fg) { $targetHwnd = $h; break } }
   $r = New-Object WinEnum+RECT
-  [WinEnum]::GetWindowRect($hWnd, [ref]$r) | Out-Null
+  [WinEnum]::GetWindowRect($targetHwnd, [ref]$r) | Out-Null
   Write-Output ("{0} {1} {2} {3}" -f $r.Left, $r.Top, ($r.Right - $r.Left), ($r.Bottom - $r.Top))
 }
 `;
@@ -585,9 +591,13 @@ if ($matches.Count -gt 0) {
 // window (which may open maximized, at a different size than recording) back
 // to the exact rect the events were captured against — rel-coordinate replay
 // is only valid if the window size matches the recording, not just position.
-// NOTE: no SetProcessDPIAware — same DPI-unaware coordinate space as
-// osClick.ps1/osWindowRect.ps1 (see OS_WINRECT_PS1 comment above). Position
-// (left/top) passed to MoveWindow lands unscaled, matching GetWindowRect —
+// NOTE (superseded 2026-09-01, corrected here 2026-09-02): this used to read
+// "no SetProcessDPIAware — same DPI-unaware coordinate space as
+// osClick.ps1/osWindowRect.ps1". Both helpers are DPI-AWARE now (this one
+// interpolates ${PS_DPI_AWARE} on its very next line) and osClick.ps1 is in
+// OBSOLETE_FILES — see the PS_DPI_AWARE block above for the re-measurement
+// that inverted the original justification. Position (left/top) passed to
+// MoveWindow lands unscaled, matching GetWindowRect —
 // but WIDTH/HEIGHT can be silently scaled by the target window (verified:
 // the FIRST MoveWindow after ShowWindow(RESTORE) scaled 1200x700 up to an
 // actual 1500x875 — a 1.25x factor — but a second MoveWindow issued right

@@ -333,6 +333,20 @@ has no mouse position and must search downward from the window.
   `System.Windows.Automation`.
 - **comtypes `FindFirst` returns a NULL COM pointer, not `None`, on a miss.**
   `if el is not None` is always true; test truthiness (`if el:`).
+- **PowerShell variable names are case-INSENSITIVE — `$hWnd` IS `$hwnd`.** A
+  `param([string]$hwnd)` therefore type-constrains every later `$hWnd`, and
+  `$hWnd = [IntPtr]([int64]$hwnd)` silently converts straight back to String.
+  This made `osMoveWindow.ps1` a **total no-op** from the day the `-hwnd`
+  param was added (fixed 2026-09-02): both the `-hwnd` and the `-titleLike`
+  path resolve the correct handle and then lose it on that one assignment.
+  It was invisible three times over — PowerShell method exceptions are
+  non-terminating so the **exit code stays 0**, `execSync` runs with
+  `stdio: 'pipe'`, and the callers' `catch` blocks (the ones that push to
+  `_failures`) therefore never ran. **A helper that pushes nothing to
+  `_failures` is not evidence that it worked.** Cast inline with no
+  intermediate variable, the way `osActivate.ps1` does
+  (`[WinActivate]::Force([IntPtr]([int64]$hwnd))`), or name the local
+  something that cannot collide (`$targetHwnd`).
 - **PowerShell `-File` reads a BOM-less script as CP949**, mangling Korean button
   names. Every emitted `.ps1` needs a UTF-8 BOM (both `saveFiles()` and the
   runtime temp extraction).
