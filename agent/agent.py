@@ -1644,17 +1644,38 @@ class UIAInspector:
         top-level windows and whose rect still contains the point.
 
         Scoped tightly on purpose — a match must be a ComboBox that actually
-        supports ExpandCollapse, in a tracked window that is NOT the popup.
-        Returns None for anything else (Win32 menus, plain list popups), so
-        the caller keeps whatever the hit test decided.
+        supports ExpandCollapse, in a window of the SAME PROCESS that is NOT
+        the popup. Returns None for anything else (Win32 menus, plain list
+        popups), so the caller keeps whatever the hit test decided.
+
+        Candidate windows are same-PID, NOT `target_hwnds` (2026-09-02, first
+        live run of this fix): target_hwnds is filled by _watch_windows(),
+        which polls every 0.5s, so a window that appeared moments earlier is
+        not in it yet. Measured — the click that opened facilitySelect right
+        after login was inspected while target_hwnds still held only the login
+        window, so this lookup found nothing and the re-attribution silently
+        did not happen:
+            [trace] pt=(1471,175) raw=[name='TC1'] root_hwnd=2426024
+                    fg=2558784 targets=[1575470, 3017542, 3083046]
+                                        ^ main window 2558784 missing
+        PID is the durable link — the popup belongs to the same process as
+        the window hosting the combo (verified with
+        poc/probe_select_dropdown.py: the list window reports the main
+        window's PID).
 
         Smallest containing candidate wins, for the same reason
         smallest_element_at() picks by area: two nested combos (a Win32
         ComboBoxEx is literally two stacked controls, CLAUDE.md §5) must
         resolve to the inner, drivable one.
         """
+        popup_pid = pid_of_hwnd(popup_hwnd)
+        cands_win = set(target_hwnds or ())
+        if popup_pid:
+            for h in visible_toplevel_windows():
+                if pid_of_hwnd(h) == popup_pid:
+                    cands_win.add(h)
         best, best_area = None, None
-        for hwnd in sorted(target_hwnds or ()):
+        for hwnd in sorted(cands_win):
             if not hwnd or hwnd == popup_hwnd:
                 continue
             try:
@@ -5138,6 +5159,18 @@ class Recorder:
                             "name is the previously-selected value, which is what "
                             "a <select> renders under the cursor when it opens.)")
                         elem, info = combo, combo_info
+                    else:
+                        # 2026-09-02: 이게 없어서 첫 라이브 실행의 실패가 통째로
+                        # 조용했다 — 재귀속이 안 걸린 건 로그에 아무 흔적도 남기지
+                        # 않았고, 녹화 결과(맨몸 ListItem)만 보고는 "분기가 안
+                        # 돌았는지 콤보를 못 찾았는지" 구분할 수 없었다.
+                        log(f"[inspect] pt=({x},{y}) hit ListItem "
+                            f"name={info.get('name')!r} in popup hwnd={item_root} "
+                            "with no dropdown known open, but no ExpandCollapse "
+                            "ComboBox contains that point in any same-PID window "
+                            "— leaving the hit test's verdict alone. If this WAS "
+                            "a combo-open click, replay will have no step that "
+                            "opens the list and the item click will fail.")
                     self._open_dropdown_hwnd = item_root
                 else:
                     # 이미 열려 있던 목록 안에서의 진짜 선택 — 목록은 닫힌다.

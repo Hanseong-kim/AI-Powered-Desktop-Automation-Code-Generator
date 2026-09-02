@@ -211,6 +211,28 @@ def phase_expand(args):
               % (u32.GetParent(t[1]) or 0, u32.GetAncestor(t[1], 2) or 0,
                  u32.GetWindow(t[1], 4) or 0))
 
+    # The capture-side fix (agent.py, 2026-09-02): given the open list window
+    # and the point the user clicked to open it, can we get back to the combo?
+    # That click hit-tests to a ListItem, so this is the lookup that decides
+    # whether the open click is recorded as a combo or lost.
+    for t in new:
+        try:
+            cr = combo.CurrentBoundingRectangle
+        except Exception:
+            break
+        px, py = (cr.left + cr.right) // 2, (cr.top + cr.bottom) // 2
+        found = ins.combo_under_dropdown(t[1], px, py, set())
+        if found:
+            print("[reattr] combo_under_dropdown(popup=0x%X, pt=(%d,%d)) -> "
+                  "aid=%r name=%r ct=%s"
+                  % (t[1], px, py, str(found.CurrentAutomationId),
+                     str(found.CurrentName), found.CurrentControlType))
+            print("[reattr] MATCHES the combo we expanded: %s"
+                  % (str(found.CurrentAutomationId) == args.aid))
+        else:
+            print("[reattr] combo_under_dropdown(popup=0x%X, pt=(%d,%d)) -> None "
+                  "— the open click would still be lost" % (t[1], px, py))
+
     with open(HANDOFF, "w") as f:
         json.dump({"hwnd": win[1], "new": [t[1] for t in new]}, f)
     print("[handoff] wrote %s" % HANDOFF)
