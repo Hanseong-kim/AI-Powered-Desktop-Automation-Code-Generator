@@ -1674,37 +1674,59 @@ class UIAInspector:
             for h in visible_toplevel_windows():
                 if pid_of_hwnd(h) == popup_pid:
                     cands_win.add(h)
+        # 2026-09-02: 이 함수가 왜 못 찾았는지는 결과만 봐서는 알 수 없었다.
+        # deptSelect는 세 번 다 찾고 facilitySelect는 네 번 다 못 찾았는데,
+        # 같은 앱을 단독 실행한 프로브에서는 바로 그 좌표로 facilitySelect가
+        # 정상 조회됐다(rect=(1424,165,1544,185), pt=(1474,174)). 재현이 안 되는
+        # 차이는 실행 환경 쪽이므로, 실패한 그 순간에 무엇을 후보로 봤고 각
+        # 콤보의 rect가 무엇이었는지를 남긴다. 진단은 실패 경로에서만 찍는다.
+        seen = []
         best, best_area = None, None
         for hwnd in sorted(cands_win):
             if not hwnd or hwnd == popup_hwnd:
                 continue
             try:
                 root = self._uia.ElementFromHandle(hwnd)
-            except Exception:
+            except Exception as e:
+                seen.append("win=%d ElementFromHandle raised: %s" % (hwnd, e))
                 continue
             if not root:                      # comtypes returns a NULL pointer
+                seen.append("win=%d ElementFromHandle -> NULL" % hwnd)
                 continue
             try:
                 wr = root.CurrentBoundingRectangle
                 if not (wr.left <= x < wr.right and wr.top <= y < wr.bottom):
+                    seen.append("win=%d rect=(%d,%d,%d,%d) does not contain pt"
+                                % (hwnd, wr.left, wr.top, wr.right, wr.bottom))
                     continue
                 cands = root.FindAll(7, self._uia.CreatePropertyCondition(
                     30003, self.CT_COMBO_BOX))          # TreeScope_Subtree
-            except Exception:
+            except Exception as e:
+                seen.append("win=%d FindAll/rect raised: %s" % (hwnd, e))
                 continue
+            seen.append("win=%d combos=%d" % (hwnd, cands.Length))
             for i in range(cands.Length):
                 c = cands.GetElement(i)
                 try:
                     cr = c.CurrentBoundingRectangle
-                    if not (cr.left <= x < cr.right and cr.top <= y < cr.bottom):
-                        continue
-                    if not c.GetCurrentPattern(self.EXPAND_COLLAPSE_PATTERN_ID):
+                    aid = str(c.CurrentAutomationId)
+                    inside = (cr.left <= x < cr.right and cr.top <= y < cr.bottom)
+                    ec = bool(c.GetCurrentPattern(self.EXPAND_COLLAPSE_PATTERN_ID))
+                    seen.append("    aid=%r rect=(%d,%d,%d,%d) inside=%s ec=%s"
+                                % (aid, cr.left, cr.top, cr.right, cr.bottom,
+                                   inside, ec))
+                    if not inside or not ec:
                         continue
                     area = max(0, cr.right - cr.left) * max(0, cr.bottom - cr.top)
-                except Exception:
+                except Exception as e:
+                    seen.append("    combo #%d unreadable: %s" % (i, e))
                     continue
                 if best is None or area < best_area:
                     best, best_area = c, area
+        if best is None:
+            log("[inspect] combo_under_dropdown(popup=%d, pt=(%d,%d)) found nothing; "
+                "candidates(%d): %s"
+                % (popup_hwnd, x, y, len(cands_win), " | ".join(seen) or "(none)"))
         return best
 
     def _enclosing_combo(self, elem, x, y):

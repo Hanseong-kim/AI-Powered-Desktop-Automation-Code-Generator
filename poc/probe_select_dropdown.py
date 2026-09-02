@@ -215,6 +215,42 @@ def phase_expand(args):
     # and the point the user clicked to open it, can we get back to the combo?
     # That click hit-tests to a ListItem, so this is the lookup that decides
     # whether the open click is recorded as a combo or lost.
+    # Every ComboBox visible from the same process, with its rect, while the
+    # list is open. This is what combo_under_dropdown() walks, so a point it
+    # reports as "contained by nothing" can be checked directly against these.
+    u32d = ctypes.windll.user32
+    ppid = ctypes.wintypes.DWORD()
+    u32d.GetWindowThreadProcessId(win[1], ctypes.byref(ppid))
+    print("[combos] every ComboBox in same-PID windows while the list is open:")
+    for t2 in top_level(ins._uia):
+        p2 = ctypes.wintypes.DWORD()
+        u32d.GetWindowThreadProcessId(t2[1], ctypes.byref(p2))
+        if p2.value != ppid.value:
+            continue
+        try:
+            arr = t2[3].FindAll(TreeScope_Subtree, ins._uia.CreatePropertyCondition(
+                UIA_ControlTypePropertyId, 50003))
+        except Exception:
+            continue
+        for i in range(arr.Length):
+            c = arr.GetElement(i)
+            try:
+                cr2 = c.CurrentBoundingRectangle
+                ec = bool(c.GetCurrentPattern(10005))
+                print("   win=0x%-8X aid=%-16r rect=(%d,%d,%d,%d) expandCollapse=%s"
+                      % (t2[1], str(c.CurrentAutomationId), cr2.left, cr2.top,
+                         cr2.right, cr2.bottom, ec))
+            except Exception as e:
+                print("   win=0x%-8X <unreadable: %s>" % (t2[1], e))
+
+    if args.point:
+        px, py = [int(v) for v in args.point.split(",")]
+        for t in new:
+            found = ins.combo_under_dropdown(t[1], px, py, set())
+            print("[reattr] --point (%d,%d) popup=0x%X -> %s"
+                  % (px, py, t[1],
+                     ("aid=%r" % str(found.CurrentAutomationId)) if found else "None"))
+
     for t in new:
         try:
             cr = combo.CurrentBoundingRectangle
@@ -286,6 +322,8 @@ def main():
     ap.add_argument("--aid", default="deptSelect")
     ap.add_argument("--item", default="Pediatrics")
     ap.add_argument("--settle", type=float, default=0.8)
+    ap.add_argument("--point", default="",
+                    help="x,y to test combo_under_dropdown against directly")
     ap.add_argument("--phase", choices=["expand", "find", "both"], default="both")
     ap.add_argument("--launch", action="store_true")
     ap.add_argument("--keep", action="store_true",
