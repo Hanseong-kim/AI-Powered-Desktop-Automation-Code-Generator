@@ -1680,10 +1680,26 @@ class UIAInspector:
         # 정상 조회됐다(rect=(1424,165,1544,185), pt=(1474,174)). 재현이 안 되는
         # 차이는 실행 환경 쪽이므로, 실패한 그 순간에 무엇을 후보로 봤고 각
         # 콤보의 rect가 무엇이었는지를 남긴다. 진단은 실패 경로에서만 찍는다.
+        # 2026-09-02 (진단으로 확정): 열려 있는 <select>는 **메인 창 트리에서
+        # 사라진다**. 실패한 그 순간의 메인 창이 publish한 ComboBox는
+        # deptSelect(닫혀 있던 쪽) 하나뿐이었고 facilitySelect(열려 있던 쪽)는
+        # 어디에도 없었다:
+        #   combo_under_dropdown(popup=7144652, pt=(1465,175)) found nothing;
+        #     win=855162 combos=1 | aid='deptSelect' rect=(...) inside=False
+        #     win=986034/4787436/6621986 ElementFromHandle raised: COMError
+        #     win=10816942 rect=(0,0,0,0) does not contain pt
+        # 그러니 팝업 창 자신과 rect를 못 읽는 창까지 포함해서 봐야 한다 —
+        # 열린 콤보가 남아 있을 수 있는 곳이 정확히 그 두 군데다.
+        #
+        # 창 rect로 미리 거르지 않는다: 창이 (0,0,0,0)을 보고해도(아직 배치 전,
+        # 또는 호스트 창) 그 안의 요소는 제대로 된 좌표를 보고할 수 있다. 진짜
+        # 필터는 아래 콤보별 rect 검사이고, 그건 그대로 있다 — 즉 판정 기준은
+        # 느슨해지지 않고 탐색 범위만 넓어진다.
         seen = []
         best, best_area = None, None
-        for hwnd in sorted(cands_win):
-            if not hwnd or hwnd == popup_hwnd:
+        fallback, fallback_area = None, None
+        for hwnd in sorted(cands_win | {popup_hwnd}):
+            if not hwnd:
                 continue
             try:
                 root = self._uia.ElementFromHandle(hwnd)
@@ -1694,17 +1710,14 @@ class UIAInspector:
                 seen.append("win=%d ElementFromHandle -> NULL" % hwnd)
                 continue
             try:
-                wr = root.CurrentBoundingRectangle
-                if not (wr.left <= x < wr.right and wr.top <= y < wr.bottom):
-                    seen.append("win=%d rect=(%d,%d,%d,%d) does not contain pt"
-                                % (hwnd, wr.left, wr.top, wr.right, wr.bottom))
-                    continue
                 cands = root.FindAll(7, self._uia.CreatePropertyCondition(
                     30003, self.CT_COMBO_BOX))          # TreeScope_Subtree
             except Exception as e:
-                seen.append("win=%d FindAll/rect raised: %s" % (hwnd, e))
+                seen.append("win=%d FindAll raised: %s" % (hwnd, e))
                 continue
-            seen.append("win=%d combos=%d" % (hwnd, cands.Length))
+            is_popup = (hwnd == popup_hwnd)
+            seen.append("win=%d%s combos=%d"
+                        % (hwnd, " (POPUP)" if is_popup else "", cands.Length))
             for i in range(cands.Length):
                 c = cands.GetElement(i)
                 try:
@@ -1721,8 +1734,20 @@ class UIAInspector:
                 except Exception as e:
                     seen.append("    combo #%d unreadable: %s" % (i, e))
                     continue
-                if best is None or area < best_area:
+                # 팝업 밖(= 앱의 진짜 창)에서 찾은 것을 항상 우선한다. 팝업은
+                # 항목을 하나 받고 사라지는 일회성 창이라, 거기서 집어온 요소를
+                # 그대로 쓰면 emit되는 rootHwnd가 곧 죽을 창을 가리킨다.
+                # 팝업 쪽 후보는 다른 데서 아무것도 못 찾았을 때의 폴백이다.
+                if is_popup:
+                    if fallback is None or area < fallback_area:
+                        fallback, fallback_area = c, area
+                elif best is None or area < best_area:
                     best, best_area = c, area
+        if best is None and fallback is not None:
+            log("[inspect] combo_under_dropdown(popup=%d, pt=(%d,%d)) found the "
+                "combo only INSIDE the popup itself — an open <select> leaves the "
+                "app window's tree. Using it." % (popup_hwnd, x, y))
+            best = fallback
         if best is None:
             log("[inspect] combo_under_dropdown(popup=%d, pt=(%d,%d)) found nothing; "
                 "candidates(%d): %s"
