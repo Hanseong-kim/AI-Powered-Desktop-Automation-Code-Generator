@@ -227,6 +227,7 @@ def phase_expand(args):
         u32d.GetWindowThreadProcessId(t2[1], ctypes.byref(p2))
         if p2.value != ppid.value:
             continue
+        print("   -- window 0x%X cls=%s" % (t2[1], t2[2]))
         try:
             arr = t2[3].FindAll(TreeScope_Subtree, ins._uia.CreatePropertyCondition(
                 UIA_ControlTypePropertyId, 50003))
@@ -237,9 +238,9 @@ def phase_expand(args):
             try:
                 cr2 = c.CurrentBoundingRectangle
                 ec = bool(c.GetCurrentPattern(10005))
-                print("   win=0x%-8X aid=%-16r rect=(%d,%d,%d,%d) expandCollapse=%s"
-                      % (t2[1], str(c.CurrentAutomationId), cr2.left, cr2.top,
-                         cr2.right, cr2.bottom, ec))
+                print("   win=0x%-8X cls=%-32s aid=%-16r rect=(%d,%d,%d,%d) ec=%s"
+                      % (t2[1], t2[2], str(c.CurrentAutomationId), cr2.left,
+                         cr2.top, cr2.right, cr2.bottom, ec))
             except Exception as e:
                 print("   win=0x%-8X <unreadable: %s>" % (t2[1], e))
 
