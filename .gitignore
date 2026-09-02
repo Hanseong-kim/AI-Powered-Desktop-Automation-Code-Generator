@@ -140,6 +140,7 @@ poc/*
 !poc/probe_click_replay.py
 !poc/probe_dead_element_recovery.py
 !poc/probe_filezilla_quickconnect_dropdown.py
+!poc/probe_select_dropdown.py
 PoC2/
 .claude/commands/
 .claude/hooks/

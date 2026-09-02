@@ -324,6 +324,31 @@ has no mouse position and must search downward from the window.
   the same `osScopedInvoke(..., null, relY)` COM path as the DropDown arrow.
   Verified end to end 2026-07-31 against the live app. Regression gate:
   `MockComboBoxExReclick` scenario in `mock_events.py`.
+- **An MSHTML `<select>` publishes its `<option>`s only while OPEN, in a real
+  top-level `Internet Explorer_Server` window** (Medflow HTA, measured
+  2026-09-02 — `poc/probe_select_dropdown.py`). Closed, the combo has **0**
+  `ListItem` descendants and so does the whole main window. Expanded, a new
+  window appears carrying every option as `ListItem` (ct=50007) with correct
+  `Name` and empty `AutomationId`. That window is **not** a nuisance popup:
+  `GetParent=0`, `GA_ROOT=itself`, `IsWindowVisible=True`, present in
+  `EnumWindows`, **same PID** as the main window — it passes every filter
+  `osScopedInvoke`'s stage-(b) applies, and it **survives the expanding process
+  exiting**, so the expand and the item click may legitimately live in separate
+  processes. Consequences:
+  - "Replay can't reach the options" is **not** an app limitation. When the
+    matching list is open, the recorded `Name` + `controlTypeId=50007` selector
+    resolves. Verified: with `deptSelect` open, `Pediatrics` → ct=50007 in the
+    list window; `TC1` (a `facilitySelect` option) → only ct=50029, the
+    right-panel label, which the controlTypeId guard correctly rejects.
+  - **The real failure mode is opening the wrong list**, because capture
+    records far fewer combo-open clicks than there were selections. A replay
+    that expands `deptSelect` and then looks for `TC1` can never succeed.
+  - `comboItemIndex`/`comboItemCount` are **not** captured here. The
+    `open_dropdown_item_at()` route fires only from the "click point outside
+    the adopted element's rect" branch (`agent.py`) — the Win32 `ComboBoxEx`
+    shape, where the open list hit-tests to the collapsed box. In MSHTML the
+    click lands *inside* a correctly-identified `ListItem`, so that branch never
+    runs and the selector stays Name-only with no positional anchor.
 - **A Korean titlebar Close button is `Button[@Name="닫기"]`** — the same name a
   Win32 ComboBox dropdown arrow can carry. Dropdown arrows must always resolve by
   AutomationId (`~DropDown`), never by a bare name, or replay closes the app.

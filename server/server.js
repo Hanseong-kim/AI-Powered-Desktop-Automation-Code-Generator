@@ -1039,8 +1039,20 @@ def force_foreground(hwnd):
     if not hwnd:
         return
     try:
-        SW_RESTORE = 9
-        user32.ShowWindow(hwnd, SW_RESTORE)
+        # SW_RESTORE only to UN-MINIMIZE. 2026-09-02 (Medflow 실측): this was
+        # unconditional, and SW_RESTORE on a MAXIMIZED window un-maximizes it.
+        # osExpandCollapse.py calls force_foreground() right before Expand(),
+        # so every dropdown/menu step silently un-maximized the app — the user
+        # sees the restore button being pressed at that step, a state change
+        # the recording never made. This is the exact bug fixed in the
+        # PowerShell twin (osActivate.ps1's WinActivate.Force) on 2026-09-01;
+        # that fix landed at one of the two sites, and this Python copy — which
+        # the same commit's comment even points at as "같은 로직" — kept the
+        # unguarded call. BringWindowToTop/SetForegroundWindow below raise the
+        # window either way, so a non-minimized window needs no show-state
+        # change at all.
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)   # SW_RESTORE
         fg = user32.GetForegroundWindow()
         fg_tid = user32.GetWindowThreadProcessId(fg, None)
         me_tid = ctypes.windll.kernel32.GetCurrentThreadId()
