@@ -635,18 +635,32 @@ public class WinMove {
 "@ -ErrorAction SilentlyContinue
 # -hwnd bypasses title matching — see OS_WINRECT_PS1 for why ambiguous title
 # substrings (e.g. any two VS Code windows) are unsafe to move/resize by.
+#
+# 2026-09-02: the handle MUST NOT be stored in a variable named $hWnd. PowerShell
+# variable names are case-INSENSITIVE, so $hWnd and the [string]-typed $hwnd
+# parameter above are the SAME variable, and the param's type constraint follows
+# it: assigning [IntPtr] converts straight back to String. Every later P/Invoke
+# then threw "Cannot convert the \"68436\" value of type System.String to type
+# System.IntPtr" — measured on a live window, both the -hwnd and the -titleLike
+# path (the latter finds the right handle and dies on the same assignment), so
+# this whole helper was a no-op from the day the $hwnd param was added.
+# It was invisible three times over: PowerShell method exceptions are
+# non-terminating (exit code stays 0), execSync runs with stdio:'pipe', and the
+# callers' catch blocks — which push 'moveWindow'/'normalize' to _failures —
+# therefore never ran. osActivate.ps1 avoids this by casting inline
+# ([WinActivate]::Force([IntPtr]([int64]$hwnd))) with no intermediate variable.
 if ($hwnd) {
-  $hWnd = [IntPtr]([int64]$hwnd)
+  $targetHwnd = [IntPtr]([int64]$hwnd)
 } else {
   $matches = [WinMove]::Find($titleLike)
-  $hWnd = [IntPtr]::Zero
+  $targetHwnd = [IntPtr]::Zero
   if ($matches.Count -gt 0) {
     $fg = [WinMove]::GetForegroundWindow()
-    $hWnd = $matches[0]
-    foreach ($h in $matches) { if ($h -eq $fg) { $hWnd = $h; break } }
+    $targetHwnd = $matches[0]
+    foreach ($h in $matches) { if ($h -eq $fg) { $targetHwnd = $h; break } }
   }
 }
-if ($hWnd -ne [IntPtr]::Zero) {
+if ($targetHwnd -ne [IntPtr]::Zero) {
   # Idempotency fast-path: if the window is already at the target geometry,
   # skip ShowWindow(RESTORE)+MoveWindow entirely — avoids a visible
   # restore-then-resize flicker when replay finds the window already in the
@@ -655,7 +669,7 @@ if ($hWnd -ne [IntPtr]::Zero) {
   # already there).
   #
   # 2026-09-01 (Medflow 실측): the condition used to also require
-  # "-not IsZoomed($hWnd)", which excluded the very case the note above says
+  # "-not IsZoomed($targetHwnd)", which excluded the very case the note above says
   # this fast-path exists for. A window recorded WHILE MAXIMIZED stores the
   # maximized rect (Medflow's main window: left/top -9, 1938x1038 — a
   # maximized window overhangs the screen by the invisible resize border), and
@@ -668,7 +682,7 @@ if ($hWnd -ne [IntPtr]::Zero) {
   # window recorded un-maximized whose live rect differs still falls through to
   # the restore+move path below, unchanged.
   $already = New-Object WinMove+RECT
-  [WinMove]::GetWindowRect($hWnd, [ref]$already) | Out-Null
+  [WinMove]::GetWindowRect($targetHwnd, [ref]$already) | Out-Null
   $sameW = [math]::Abs(($already.Right - $already.Left) - $width) -le 2
   $sameH = [math]::Abs(($already.Bottom - $already.Top) - $height) -le 2
   $sameL = [math]::Abs($already.Left - $left) -le 2
@@ -676,15 +690,15 @@ if ($hWnd -ne [IntPtr]::Zero) {
   if ($sameW -and $sameH -and $sameL -and $sameT) {
     exit
   }
-  [WinMove]::ShowWindow($hWnd, 9) | Out-Null
+  [WinMove]::ShowWindow($targetHwnd, 9) | Out-Null
   Start-Sleep -Milliseconds 300
   $candW = $width
   $candH = $height
   for ($i = 0; $i -lt 3; $i++) {
-    [WinMove]::MoveWindow($hWnd, $left, $top, $candW, $candH, $true) | Out-Null
+    [WinMove]::MoveWindow($targetHwnd, $left, $top, $candW, $candH, $true) | Out-Null
     Start-Sleep -Milliseconds 300
     $r = New-Object WinMove+RECT
-    [WinMove]::GetWindowRect($hWnd, [ref]$r) | Out-Null
+    [WinMove]::GetWindowRect($targetHwnd, [ref]$r) | Out-Null
     $actualW = $r.Right - $r.Left
     $actualH = $r.Bottom - $r.Top
     if ([math]::Abs($actualW - $width) -le 2 -and [math]::Abs($actualH - $height) -le 2) { break }

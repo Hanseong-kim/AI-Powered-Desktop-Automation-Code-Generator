@@ -121,7 +121,25 @@ Claude code task v2.md
 
 # 2026-07-27: 실행에 필요 없는 분석/도구 자료 — 로컬엔 남기되 git 추적은 해제
 # (실행에 필요한 것만 커밋한다는 방침, 사용자 확인 완료)
-poc/
+#
+# 2026-09-02: poc/ 전체 제외에서 **인용된 프로브만 화이트리스트**로 전환.
+# CLAUDE.md / AGENTS.md / README.md / agent.py / agent/sweep/ / server.js 가 이
+# 파일들을 측정 근거로 직접 인용하는데(실측: 8개) 저장소에는 없어서,
+# 클론한 사람은 "블래스트 반경 37/43" 같은 숫자의 출처를 확인할 수 없었다.
+# probe_app_automatability.py 는 CLAUDE.md §4가 "새 앱 녹화 전에 먼저 돌려라"고
+# 지정한 진입점이기도 하다.
+#
+# 주의: 디렉터리 자체를 제외하면(`poc/`) git이 그 안으로 내려가지 않아
+# 뒤따르는 `!` 예외가 전부 무시된다. 반드시 내용물 패턴(`poc/*`)이어야 한다.
+poc/*
+!poc/PoC_teamviewer.py
+!poc/diag_offscreen_hittest.py
+!poc/probe_ancestor_chain.py
+!poc/probe_app_automatability.py
+!poc/probe_capture_identity.py
+!poc/probe_click_replay.py
+!poc/probe_dead_element_recovery.py
+!poc/probe_filezilla_quickconnect_dropdown.py
 PoC2/
 .claude/commands/
 .claude/hooks/
