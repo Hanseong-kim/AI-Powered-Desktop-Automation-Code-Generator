@@ -1634,6 +1634,58 @@ class UIAInspector:
                 continue
         return None
 
+    def combo_under_dropdown(self, popup_hwnd, x, y, target_hwnds):
+        """The ComboBox lying UNDER an open dropdown list at (x, y).
+
+        For the click that OPENS an MSHTML <select>: the point is on the combo,
+        but the list window is already up by the time the worker hit-tests, so
+        ElementFromPoint returns a ListItem in that popup instead. The real
+        target is still the combo, which lives in one of the app's other
+        top-level windows and whose rect still contains the point.
+
+        Scoped tightly on purpose — a match must be a ComboBox that actually
+        supports ExpandCollapse, in a tracked window that is NOT the popup.
+        Returns None for anything else (Win32 menus, plain list popups), so
+        the caller keeps whatever the hit test decided.
+
+        Smallest containing candidate wins, for the same reason
+        smallest_element_at() picks by area: two nested combos (a Win32
+        ComboBoxEx is literally two stacked controls, CLAUDE.md §5) must
+        resolve to the inner, drivable one.
+        """
+        best, best_area = None, None
+        for hwnd in sorted(target_hwnds or ()):
+            if not hwnd or hwnd == popup_hwnd:
+                continue
+            try:
+                root = self._uia.ElementFromHandle(hwnd)
+            except Exception:
+                continue
+            if not root:                      # comtypes returns a NULL pointer
+                continue
+            try:
+                wr = root.CurrentBoundingRectangle
+                if not (wr.left <= x < wr.right and wr.top <= y < wr.bottom):
+                    continue
+                cands = root.FindAll(7, self._uia.CreatePropertyCondition(
+                    30003, self.CT_COMBO_BOX))          # TreeScope_Subtree
+            except Exception:
+                continue
+            for i in range(cands.Length):
+                c = cands.GetElement(i)
+                try:
+                    cr = c.CurrentBoundingRectangle
+                    if not (cr.left <= x < cr.right and cr.top <= y < cr.bottom):
+                        continue
+                    if not c.GetCurrentPattern(self.EXPAND_COLLAPSE_PATTERN_ID):
+                        continue
+                    area = max(0, cr.right - cr.left) * max(0, cr.bottom - cr.top)
+                except Exception:
+                    continue
+                if best is None or area < best_area:
+                    best, best_area = c, area
+        return best
+
     def _enclosing_combo(self, elem, x, y):
         """A ComboBox ancestor whose rect CONTAINS elem's rect and the click
         point — for when the hit test landed on the combo's own "currently
@@ -3052,6 +3104,21 @@ class Recorder:
         self.proc = None
         self.target_hwnds = set()    # top-level window handles owned by the target
         self._popup_hwnds = set()    # windows discovered by watcher (always treated as popups)
+        # 2026-09-02 (Medflow <select> 실측): "지금 열려 있다고 간주하는 드롭다운
+        # 목록 창"의 hwnd. MSHTML <select>의 여는 클릭은 콤보를 맞히지만, 목록
+        # 창이 히트테스트보다 먼저 떠 버리면 그 목록의 ListItem으로 잡힌다 —
+        # 그것도 하필 "직전에 선택돼 있던 값"으로(브라우저가 선택 항목을 커서
+        # 밑에 오도록 목록을 정렬해 연다). 실측 그대로:
+        #     #11 TC2 선택   -> #14가 잡은 이름 = 'TC2'
+        #     #13 Retina 선택 -> #16이 잡은 이름 = 'Retina'
+        # 그 결과 여는 클릭이 통째로 사라져 재생이 목록을 열지 못하고
+        # 'target not found'로 끝난다(2026-09-02 재생 로그 STEP 14~17).
+        # 타이밍으로는 못 가른다 — 누른 시점의 WindowFromPoint(top_win)는 같은
+        # 녹화 안에서 여는 클릭과 고르는 클릭 양쪽 모두에서 목록 창을 가리키기도
+        # 하고 메인 창을 가리키기도 했다(실측, agent.log 10:48:38~41). 구조로
+        # 가른다: 목록 창 하나는 선택 하나를 받고 닫히므로, "아직 열린 것으로
+        # 아는 목록이 없는데 ListItem이 잡혔다" = 이 클릭이 그 목록을 열었다.
+        self._open_dropdown_hwnd = None
         # 2026-08-08: 가장 최근에 클릭 처리된 요소 — _watch_windows()가 새
         # Menu 팝업을 발견해 큐에 넣는 "popup_check" 이벤트가 이걸 트리거로
         # 재사용한다 (controlType/패턴 지원 여부와 무관하게 동작하는 팝업
@@ -3135,6 +3202,7 @@ class Recorder:
         self.event_count = 0
         self.target_hwnds = set()
         self._popup_hwnds = set()
+        self._open_dropdown_hwnd = None
         self._pending_settle = set()
         self._settled_web_hosts = set()
         self._first_titles = {}
@@ -5032,6 +5100,55 @@ class Recorder:
             # 위 glyph 폴백(pt가 항목 자체 rect 밖이라 행 단위로 재해석된 경우)
             # 에서만 태깅 — 그 외 컨트롤 타입은 지원 여부와 무관하게 절대 태깅
             # 안 함(일반 클릭이 이미 정상 동작).
+            # ── MSHTML <select>의 "여는 클릭" 재귀속 (2026-09-02) ──────────
+            # 배경/실측은 __init__의 _open_dropdown_hwnd 주석 참고. 규칙은 하나:
+            # 아직 열린 것으로 아는 목록이 없는데 클릭이 팝업 창의 ListItem에
+            # 떨어졌다면, 그 클릭이 바로 그 목록을 연 클릭이다 — 진짜 대상은
+            # 목록 밑에 깔린 콤보다. 목록 창 하나는 선택 하나를 받고 닫히므로
+            # "열려 있음"은 다음 클릭 하나까지만 유효하다.
+            #
+            # 이 재귀속이 없으면 여는 클릭이 통째로 사라지고, server.js의
+            # mergeExpandCollapseClicks()가 짝지을 트리거를 못 찾아 항목 클릭이
+            # 맨몸으로 남는다. 재생은 목록을 열지 못한 채 항목을 찾으므로
+            # 'target not found'로 끝난다(실측: 2026-09-02 STEP 14~17).
+            #
+            # 좁게 건다 — 소유 창에서 그 좌표를 다시 풀었을 때 나오는 것이
+            # 실제로 ExpandCollapse 가능한 콤보일 때만 바꾼다. 아니면 원래
+            # 판정을 그대로 둔다(메뉴 팝업/일반 리스트는 건드리지 않는다).
+            if (not light_dismiss and elem is not None
+                    and info.get("controlType") == "ListItem"):
+                item_root = info.get("rootHwnd") or 0
+                expecting = self._open_dropdown_hwnd
+                # expecting == -1: 직전 클릭이 콤보를 정확히 맞혔다 — 목록이
+                # 열려 있는 건 아는데 그 창 hwnd만 모른다. 그 상태에서 오는
+                # 첫 ListItem은 언제나 "이미 열린 목록에서의 선택"이다.
+                already_open = (expecting == -1 or expecting == item_root)
+                if item_root and not already_open:
+                    combo = ins.combo_under_dropdown(item_root, x, y,
+                                                     self.target_hwnds)
+                    if combo is not None:
+                        combo_info = ins.describe(combo, fg_hwnd_hint=fg_hwnd_hint,
+                                                  uia=ins._uia)
+                        log(f"[inspect] pt=({x},{y}) hit ListItem "
+                            f"name={info.get('name')!r} in popup hwnd={item_root}, "
+                            "but no dropdown was open — this click OPENED it. "
+                            f"Re-attributing to the combo underneath: "
+                            f"id={combo_info.get('automationId')!r} "
+                            f"name={combo_info.get('name')!r}. (The captured item "
+                            "name is the previously-selected value, which is what "
+                            "a <select> renders under the cursor when it opens.)")
+                        elem, info = combo, combo_info
+                    self._open_dropdown_hwnd = item_root
+                else:
+                    # 이미 열려 있던 목록 안에서의 진짜 선택 — 목록은 닫힌다.
+                    self._open_dropdown_hwnd = None
+            elif (not light_dismiss and elem is not None
+                    and info.get("controlType") == "ComboBox"):
+                # 콤보를 정확히 맞힌 클릭(목록이 히트테스트보다 늦게 뜬 경우).
+                # 뒤따르는 ListItem 클릭은 "이미 열린 목록에서의 선택"이므로,
+                # 그 창 hwnd를 아직 모르더라도 재귀속이 걸리지 않게 표시해 둔다.
+                self._open_dropdown_hwnd = -1
+
             EXPAND_COLLAPSE_ALWAYS = ("ComboBox", "MenuItem")
             ct = info.get("controlType")
             wants_expand_collapse = (
