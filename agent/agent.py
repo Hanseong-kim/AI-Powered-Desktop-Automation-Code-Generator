@@ -1710,11 +1710,29 @@ class UIAInspector:
                 seen.append("win=%d ElementFromHandle -> NULL" % hwnd)
                 continue
             try:
+                # NOT ControlType==ComboBox. 2026-09-02, from the live log:
+                # while its list is open, an MSHTML <select> is republished as
+                # controlType='Text', so a ComboBox-only scan could never see
+                # the very combo we are looking for. The diagnostic said so
+                # exactly — the main window reported combos=1, deptSelect,
+                # the one that was CLOSED — while the light-dismiss recovery
+                # path resolved the same click to
+                #     id='facilitySelect' name='' type='Text'
+                # IsExpandCollapsePatternAvailable is the property that holds
+                # across both shapes. Measured on this app: the whole main
+                # window yields 3 such elements, of which exactly 2 carry an
+                # AutomationId — facilitySelect and deptSelect. So it is a
+                # sharp filter here, not a broad one.
                 cands = root.FindAll(7, self._uia.CreatePropertyCondition(
-                    30003, self.CT_COMBO_BOX))          # TreeScope_Subtree
+                    30028, True))   # IsExpandCollapsePatternAvailable, Subtree
             except Exception as e:
                 seen.append("win=%d FindAll raised: %s" % (hwnd, e))
                 continue
+            try:
+                wr = root.CurrentBoundingRectangle
+                win_area = max(1, (wr.right - wr.left) * (wr.bottom - wr.top))
+            except Exception:
+                win_area = 0
             is_popup = (hwnd == popup_hwnd)
             seen.append("win=%d%s combos=%d"
                         % (hwnd, " (POPUP)" if is_popup else "", cands.Length))
@@ -1724,13 +1742,19 @@ class UIAInspector:
                     cr = c.CurrentBoundingRectangle
                     aid = str(c.CurrentAutomationId)
                     inside = (cr.left <= x < cr.right and cr.top <= y < cr.bottom)
-                    ec = bool(c.GetCurrentPattern(self.EXPAND_COLLAPSE_PATTERN_ID))
-                    seen.append("    aid=%r rect=(%d,%d,%d,%d) inside=%s ec=%s"
-                                % (aid, cr.left, cr.top, cr.right, cr.bottom,
-                                   inside, ec))
-                    if not inside or not ec:
-                        continue
                     area = max(0, cr.right - cr.left) * max(0, cr.bottom - cr.top)
+                    # An AutomationId is required: the combo's inner display
+                    # Text also supports ExpandCollapse here but has no id, and
+                    # an id is the whole point — it is what replay will select
+                    # by. The window-fill guard is smallest_element_at's
+                    # (WINDOW_FILL_RATIO), keeping a page-level container that
+                    # happens to contain the point from ever winning.
+                    fills = bool(win_area and area / win_area >= self.WINDOW_FILL_RATIO)
+                    seen.append("    aid=%r ct=%s rect=(%d,%d,%d,%d) inside=%s fills=%s"
+                                % (aid, c.CurrentControlType, cr.left, cr.top,
+                                   cr.right, cr.bottom, inside, fills))
+                    if not inside or not aid or fills:
+                        continue
                 except Exception as e:
                     seen.append("    combo #%d unreadable: %s" % (i, e))
                     continue
