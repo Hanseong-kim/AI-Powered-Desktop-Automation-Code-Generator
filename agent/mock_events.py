@@ -4117,10 +4117,18 @@ def step_golden_recordings():
         request("DELETE", "/api/events")
         for ev in events:  # events[0] is the session_meta object, posted like any other
             request("POST", "/api/events", ev)
+        # exeArgs is sent ALWAYS, [] included. Omitting it does not mean "no
+        # arguments" -- /api/generate falls back to the server's process-global
+        # sessionInfo.exeArgs (server.js:6946), which /api/start last wrote.
+        # Measured 2026-09-08: blessing on a server where the user had just
+        # recorded Medflow through the UI stamped that HTA path into the
+        # FileZilla, HeidiSQL and TeamViewer goldens, because those entries
+        # omitted the field. A gate whose output depends on what was recorded
+        # before it ran is not a gate.
         status, body = request(
             "POST", "/api/generate",
             {"appName": entry["appName"], "exePath": entry["exePath"],
-             "platform": entry["platform"]},
+             "platform": entry["platform"], "exeArgs": entry.get("exeArgs") or []},
             timeout=60,
         )
         if status != 200 or not body.get("ok"):
