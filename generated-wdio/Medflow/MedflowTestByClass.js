@@ -166,11 +166,17 @@ async function _appiumPost(path, body, timeoutMs = 20000) {
     return (await r.json()).value;
 }
 
-async function _createSession(app) {
+async function _createSession(app, appArgs) {
     const isHwnd = /^0x[0-9a-f]+$/i.test(app);
     const cap = isHwnd
         ? { platformName: 'Windows', 'appium:automationName': 'Windows', 'appium:appTopLevelWindow': app, 'appium:newCommandTimeout': 60000, 'appium:createSessionTimeout': 15000 }
         : { platformName: 'Windows', 'appium:automationName': 'Windows', 'appium:app': app, 'appium:newCommandTimeout': 60000, 'appium:createSessionTimeout': 15000 };
+    // A host process launches nothing without its document: 'mshta.exe' alone
+    // opens no window at all, so simple mode used to start a session against an
+    // app that was never going to appear. appium-windows-driver takes these as
+    // ONE STRING, not an array (node_modules/appium-windows-driver
+    // build/lib/desired-caps.js: appArguments isString) -- codegen joins them.
+    if (!isHwnd && appArgs) cap['appium:appArguments'] = appArgs;
     const v = await _appiumPost('/session', { capabilities: { alwaysMatch: cap } }, 30000);
     if (!v?.sessionId) throw new Error(`Appium session failed for "${app}": ${JSON.stringify(v)}`);
     return v.sessionId;
@@ -1405,6 +1411,8 @@ async function _step(label, fn) {
 //   [W3] "Medflow Clinical System" (opened during recording)
 //   [W4] "Medflow Clinical System" (opened during recording)
 //   [W5] "Medflow Clinical System" (opened during recording)
+//   [W6] "Medflow Clinical System" (opened during recording)
+//   [W7] "Medflow Clinical System" (opened during recording)
 
 class MedflowPageByClass {
 
@@ -1482,7 +1490,23 @@ class MedflowPageByClass {
     // [W5] Medflow Clinical System (new window)
     // ════════════════════════════════════════════════════════════
     async click9() {
-        osScopedInvoke(_liveHwnd("Medflow Clinical System", _hwndCache[_mainTitleFrag]), {"automationId":"","className":"","name":"Pediatrics","controlTypeId":50007}, null, null, null, null, true);
+        osScopedInvoke(_liveHwnd("Medflow Clinical System", _hwndCache[_mainTitleFrag]), {"automationId":"","className":"","name":"Refractive","controlTypeId":50007}, null, null, null, null, true);
+    }
+
+
+    // ════════════════════════════════════════════════════════════
+    // [W6] Medflow Clinical System (new window)
+    // ════════════════════════════════════════════════════════════
+    async click10() {
+        await _clickScoped('Medflow Clinical System', '~exitBtn', false, 50000);
+    }
+
+
+    // ════════════════════════════════════════════════════════════
+    // [W7] Medflow Clinical System (new window)
+    // ════════════════════════════════════════════════════════════
+    async click11() {
+        await _clickScoped('Medflow Clinical System', '//Button[@ClassName="Button" and @Name="확인"]', false, 50000);
     }
 }
 
@@ -1500,11 +1524,11 @@ async function run() {
         _warmupPowerShell();
 
     _mainTitleFrag = "Medflow Login";
-    _dialogRects = {"Medflow Login":{"left":192,"top":192,"width":1440,"height":740},"Medflow Clinical System":{"left":-9,"top":-9,"width":1938,"height":1038}};
+    _dialogRects = {"Medflow Login":{"left":64,"top":64,"width":1440,"height":740},"Medflow Clinical System":{"left":-9,"top":-9,"width":1938,"height":1038}};
     await ensureAppium();
     _rootSid = await _createSession('Root');
     console.log(`[session] Root session ${_rootSid} ready`);
-        await launchApp("C:\\Windows\\System32\\mshta.exe", ["C:\\hansung\\project\\code-generator\\mock-app\\medflow-hta\\MedflowLogin.hta"], "Medflow Login", {"left":192,"top":192,"width":1440,"height":740});
+        await launchApp("C:\\Windows\\System32\\mshta.exe", ["C:\\hansung\\project\\code-generator\\mock-app\\medflow-hta\\MedflowLogin.hta"], "Medflow Login", {"left":64,"top":64,"width":1440,"height":740});
 
         const page = new MedflowPageByClass();
 
@@ -1536,7 +1560,19 @@ async function run() {
     // ════════════════════════════════════════════════════════════
     // [W5] Medflow Clinical System (new window)
     // ════════════════════════════════════════════════════════════
-            await _step('9:doubleClick Pediatrics', () => page.click9());
+            await _step('9:doubleClick Refractive', () => page.click9());
+
+    // ════════════════════════════════════════════════════════════
+    // [W6] Medflow Clinical System (new window)
+    // ════════════════════════════════════════════════════════════
+            await _step('switch to window: Medflow Clinical System', async () => { await _switchWindow('Medflow Clinical System'); osActivate('Medflow Clinical System', _hwndCache['Medflow Clinical System']); });
+            await _step('10:click EXIT', () => page.click10());
+
+    // ════════════════════════════════════════════════════════════
+    // [W7] Medflow Clinical System (new window)
+    // ════════════════════════════════════════════════════════════
+            await _step('switch to window: Medflow Clinical System', async () => { await _switchWindow('Medflow Clinical System'); osActivate('Medflow Clinical System', _hwndCache['Medflow Clinical System']); });
+            await _step('11:click 확인', () => page.click11());
     } finally {
 
         for (const { sid } of Object.values(_sessionIds)) {
