@@ -40,5 +40,21 @@
     "appName": "MockGoldenTeamViewer",
     "exePath": "C:\\Program Files\\TeamViewer\\TeamViewer.exe",
     "platform": "Windows"
+  },
+  {
+    "app": "Medflow",
+    "recording": "Medflow.json",
+    "appName": "MockGoldenMedflow",
+    "exePath": "C:\\Windows\\System32\\mshta.exe",
+    "exeArgs": ["C:\\hansung\\project\\code-generator\\mock-app\\medflow-hta\\MedflowLogin.hta"],
+    "platform": "Windows"
+  },
+  {
+    "app": "MedflowDropdown",
+    "recording": "MedflowDropdown.json",
+    "appName": "MockGoldenMedflowDropdown",
+    "exePath": "C:\\Windows\\System32\\mshta.exe",
+    "exeArgs": ["C:\\hansung\\project\\code-generator\\mock-app\\medflow-hta\\MedflowLogin.hta"],
+    "platform": "Windows"
   }
 ]

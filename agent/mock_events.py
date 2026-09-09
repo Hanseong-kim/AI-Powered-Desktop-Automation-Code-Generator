@@ -94,13 +94,45 @@ _DEF_RE = re.compile(r"(?:function\s+([A-Za-z_]\w*)\s*\(|(?:const|let)\s+([A-Za-
 # JS-content check.
 _EMBEDDED_HELPERS_RE = re.compile(r"const _H = \{[\s\S]*?\n\};\n")
 
+# 2026-09-02: a COMMENT is not a call site. This scan counted one, so a line
+# like "// 호출자 _typeScopedOrCom()은 이 함수의 리턴값과 무관하게" — prose
+# explaining who calls whom, which this codebase writes constantly — reported
+# _typeScopedOrCom as "called but never defined" in every simple-mode file.
+# That false positive was part of the 20 standing gate failures (found while
+# bisecting them, 2026-09-02): the real half was a genuine undefined call in
+# _typeVerified's body, and after fixing it this comment-only half remained.
+# Forbidding "name()" inside comments would be the wrong fix — it is the
+# clearest way to write about a function — so strip comments before scanning.
+# Deleting text can only hide a call site, never invent one, so this cannot
+# turn a real defect into a pass for anything but a call written inside a
+# comment, which by definition does not run.
+#
+# It must skip string literals, not just match "//": the generated code is full
+# of XPath selectors that START with "//" —
+#     await _typeVerified('', '//Text[@AutomationId="X"]', value) || await _typeScopedOrCom(...)
+# — so a naive "// to end of line" strip would delete the REAL call site that
+# follows one on the same line and quietly weaken this check into uselessness.
+# Alternating string-literal and comment alternatives makes the string win
+# whenever it starts first, so only genuine comments are removed.
+_JS_TOKEN_RE = re.compile(
+    r"""(?P<str>'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`)"""
+    r"""|(?P<comment>/\*[\s\S]*?\*/|//[^\n]*)""",
+    re.VERBOSE,
+)
+
+
+def _strip_js_comments(content):
+    return _JS_TOKEN_RE.sub(lambda m: "" if m.group("comment") else m.group(0), content)
+
 
 def _strip_embedded_helpers(content):
     return _EMBEDDED_HELPERS_RE.sub("", content)
 
 
 def check_helpers_defined(fname, content):
-    content = _strip_embedded_helpers(content)
+    # Order matters: the embedded _H block is stripped first (it is not JS at
+    # all), then comments (see _strip_js_comments).
+    content = _strip_js_comments(_strip_embedded_helpers(content))
     called = set(_CALL_SITE_RE.findall(content))
     defined = set()
     for a, b in _DEF_RE.findall(content):
@@ -349,6 +381,46 @@ EXPAND_REDUNDANT_EVENTS = [
                control_type="MenuItem", app_name=EXPAND_REDUNDANT_APP,
                expand_collapse=True, index=6),
 ]
+
+# Open-then-CLOSE ComboBox re-click scenario (2026-08-16, real Visual Studio
+# GUI run — "언어 필터" combo clicked twice ~0.45s apart at the identical
+# point: click #1 opened the dropdown, click #2 closed it again, no item was
+# ever picked). mergeExpandCollapseClicks' redundant-reclick loop (added
+# 2026-07-17 for EXPAND_REDUNDANT_APP above) assumes every reclick before a
+# real item is a FAILED open attempt and silently discards all but the last
+# one — it has no concept of a reclick that toggles the dropdown CLOSED.
+# Discarding it here left the generated replay with only an
+# osExpandCollapse() that opens the combo and never closes it, so the next
+# recorded click (physically on the "뒤로" button, VS coordinates
+# (3157,795,3205,815) vs the combo's (2816,268,3001,298) — the exact rects
+# that made VS's own 2026-08-14 looksTooFarOrMisaligned guard reject the
+# item-merge) actually landed on the still-open dropdown's light-dismiss
+# overlay at replay time, closing the list and touching nothing else. The
+# physical click still "succeeded" (send_input_click has no state
+# verification — a separate, not-yet-fixed false-PASS class), so the failure
+# only surfaced two steps later when the real "뒤로" target was never found.
+COMBO_OPEN_CLOSE_APP = "MockComboOpenClose"
+COMBO_OPEN_CLOSE_EVENTS = [
+    make_event("click", name="Language Filter", automation_id="cmbFilter",
+               class_name="ComboBox", control_type="ComboBox",
+               app_name=COMBO_OPEN_CLOSE_APP, expand_collapse=True, index=1),
+    make_event("click", name="Language Filter", automation_id="cmbFilter",
+               class_name="ComboBox", control_type="ComboBox",
+               app_name=COMBO_OPEN_CLOSE_APP, expand_collapse=True, index=2),
+    make_event("click", name="Back", automation_id="btnBack", class_name="Button",
+               control_type="Button", app_name=COMBO_OPEN_CLOSE_APP, index=3),
+]
+COMBO_OPEN_CLOSE_EVENTS[0]["element"]["rect"] = [100, 50, 300, 80]
+COMBO_OPEN_CLOSE_EVENTS[1]["element"]["rect"] = [100, 50, 300, 80]
+COMBO_OPEN_CLOSE_EVENTS[2]["element"]["rect"] = [100, 600, 200, 630]
+COMBO_OPEN_CLOSE_SESSION_META = {
+    "action": "session_meta",
+    "app": COMBO_OPEN_CLOSE_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
 
 # Native Win32 dialog scenario (2026-07-13, PuTTY GUI failure follow-up) —
 # exercises the SLOT_INDEX_CONTROL_TYPES carve-out in wdioSelectorById/
@@ -862,6 +934,33 @@ COMBO_INDEX_EVENTS[0]["element"]["comboItemName"] = ""
 COMBO_INDEX_SESSION_META = {
     "action": "session_meta",
     "app": COMBO_INDEX_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
+# 2026-08-17 (VS "새 프로젝트 만들기" 언어/플랫폼 필터 실측): MockComboIndex와
+# 달리 이 콤보의 항목은 owner-drawn이 아니라 진짜 Name이 있다. 캡처 시점과
+# 재생 시점의 실제 목록 길이가 (같은 마우스 조작이라도) 구조적으로 어긋날 수
+# 있는 콤보라, osExpandCollapse.py가 개수 불일치 시 이 Name으로 유일하게
+# 찾아 폴백할 수 있어야 한다 — 그러려면 codegen이 comboItemName을
+# osExpandCollapse() 호출에 넘겨야 하는데, 예전엔 stepLabel 표시용으로만
+# 쓰고 버리고 있었다.
+NAMED_COMBO_INDEX_APP = "MockNamedComboIndex"
+NAMED_COMBO_INDEX_EVENTS = [
+    make_event("click", name="", automation_id="", class_name="ComboBox",
+               control_type="ComboBox", app_name=NAMED_COMBO_INDEX_APP,
+               expand_collapse=True, index=1),
+    make_event("click", name="Save", automation_id="btnSave", class_name="Button",
+               control_type="Button", app_name=NAMED_COMBO_INDEX_APP, index=2),
+]
+NAMED_COMBO_INDEX_EVENTS[0]["element"]["comboItemIndex"] = 4
+NAMED_COMBO_INDEX_EVENTS[0]["element"]["comboItemCount"] = 18
+NAMED_COMBO_INDEX_EVENTS[0]["element"]["comboItemName"] = "MySQL on RDS"
+NAMED_COMBO_INDEX_SESSION_META = {
+    "action": "session_meta",
+    "app": NAMED_COMBO_INDEX_APP,
     "platform": PLATFORM,
     "timestamp": time.time(),
     "isElectron": False,
@@ -1655,6 +1754,30 @@ SIMPLE_ROOTHWND_EVENTS = [
                rootHwndHex="137900"),
 ]
 
+# A HOST process is not the app: `mshta.exe`, `javaw.exe`, `python.exe` all
+# launch nothing until they are handed a document. Simple mode starts the app
+# through WinAppDriver's `app` capability rather than launchApp(), and that
+# capability was built from exePath ALONE -- so every single-window recording
+# of such an app generated a build that opened a bare host process and then
+# waited for a window that was never going to appear. Found 2026-09-08 by the
+# first sweep of Medflow (mshta.exe + MedflowLogin.hta); session mode had
+# carried exeArgs since it existed, which is why no golden ever showed it.
+#
+# The document path here deliberately contains a SPACE, because the driver
+# takes appArguments as one command-line STRING, not a list
+# (node_modules/appium-windows-driver build/lib/desired-caps.js), so codegen
+# has to quote it or the app receives two broken half-paths.
+HOST_ARGS_APP = "MockHostProcessArgs"
+HOST_ARGS_EXE = "C:\\Windows\\System32\\mshta.exe"
+HOST_ARGS_DOC = "C:\\tmp\\Some App\\demo.hta"
+HOST_ARGS_EVENTS = [
+    # One window, no rootHwndHex anywhere -> needsSessionSwitching() is false
+    # -> simple mode, which is the branch under test.
+    make_event("click", name="LOGIN", automation_id="loginBtn", class_name="Button",
+               window_title="Demo Login", app_name=HOST_ARGS_APP, x=100, y=100, index=1,
+               winLeft=0, winTop=0, winWidth=800, winHeight=600),
+]
+
 # dialogRects corruption via same-titled trigger+popup merge (2026-07-21,
 # real 7-Zip GUI repro): clicking "추가" (Add) in the MAIN window pops open a
 # small confirmation dialog with an "확인" (OK) button — and that small
@@ -2000,14 +2123,30 @@ def step_wdio_generate():
             "(PuTTY 2026-07-13)",
         )
         step_count = content.count("_step('")
-        # 13 mock events: 2 "type" events skip (control_type=Text, not
-        # editable); 2 constituent clicks before the doubleClick are merged
-        # away by dedupeDoubleClicks(); rightClick + drag are scope-out.
-        # Remaining steps: click(Five/Plus/Three/Equals)=4, doubleClick=1,
-        # scroll=1, anchor click=1 -> 7.
+        # 13 mock events: 2 constituent clicks before the doubleClick are
+        # merged away by dedupeDoubleClicks(); rightClick + drag are scope-out.
+        # Steps: click(Five/Plus/Three/Equals)=4, type=2, doubleClick=1,
+        # scroll=1, anchor click=1 -> 9.
+        #
+        # This expected 7 until 2026-09-02, on the premise that the 2 "type"
+        # events are skipped because their control_type is Text and Text is
+        # not in EDITABLE_CONTROL_TYPES. b09b460 deliberately widened the
+        # test to `EDITABLE_CONTROL_TYPES.has(controlType) || action ===
+        # 'type'` and this check was not updated with it, so it has been red
+        # ever since (found by bisecting the gate across commits 2026-09-02).
+        #
+        # The widened rule is the correct one and the check was the stale
+        # half: a recorded "type" action is direct evidence the user typed
+        # into that control, while controlType is only the provider's opinion
+        # about it -- Text/TextBlock is exactly what an edit surface reports
+        # in WebView2 and in several custom frameworks. Gating on controlType
+        # silently DROPS a real user action, which §3 forbids; emitting it
+        # costs nothing when it cannot work, because the step tries
+        # _typeScoped() (WAD element/value) and then falls back to osType()
+        # real keystrokes, which do not care what controlType claims.
         check(
-            f"  {fname} step count (13 events -> 7 steps: dedupe + scope-out)",
-            step_count == 7,
+            f"  {fname} step count (13 events -> 9 steps: dedupe + scope-out)",
+            step_count == 9,
             f"got {step_count} _step(...) invocations",
         )
         check(
@@ -2362,6 +2501,98 @@ def step_wdio_generate_simple_roothwnd():
         )
 
 
+def _simple_session_args(content):
+    """The second argument of simple mode's own _createSession call, decoded.
+
+    Returns (found_call, args_or_None). Skips the two hwnd-scoped
+    `_createSession('0x'+...)` call sites, which are a different code path.
+    """
+    line = next((l for l in content.splitlines()
+                 if "_appSid = await _createSession(" in l and "sibling" not in l),
+                None)
+    if line is None:
+        return False, None
+    strs = re.findall(r'"(?:[^"\\]|\\.)*"', line)
+    if not strs:
+        return False, None
+    return True, (json.loads(strs[1]) if len(strs) > 1 else None)
+
+
+def step_wdio_generate_host_process_args():
+    print("\n[8g] A host process (mshta.exe) needs its document in SIMPLE mode "
+          "too -- the `app` capability alone launches nothing "
+          "(2026-09-08, first Medflow sweep)")
+    request("DELETE", "/api/events")
+    for ev in HOST_ARGS_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": HOST_ARGS_APP,
+        "exePath": HOST_ARGS_EXE,
+        "exeArgs": [HOST_ARGS_DOC],
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (host-process-args) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped host-process-args checks)", False, body.get("message", ""))
+        return
+
+    for f in body.get("files", []):
+        content = f.get("content", "")
+        name = f.get("filename")
+        check(
+            f"  {name} defines _createSession with an appArguments parameter",
+            "async function _createSession(app, appArgs)" in content
+            and "cap['appium:appArguments'] = appArgs" in content,
+            "simple mode has no launchApp(); the document can only reach the "
+            "app through the driver's appArguments capability",
+        )
+        found, args = _simple_session_args(content)
+        check(f"  {name} has a simple-mode _createSession call", found,
+              "expected `_appSid = await _createSession(...)`; if this recording "
+              "stopped taking the simple branch the scenario no longer tests "
+              "what it claims")
+        if not found:
+            continue
+        check(
+            f"  {name} passes the document to it",
+            args is not None and "demo.hta" in args,
+            "generated a bare host process: %r. Before 2026-09-08 this was "
+            "every simple-mode build of an mshta/javaw app -- Appium would "
+            "start the host, no window would ever appear, and the failure read "
+            "as a session timeout rather than a missing argument" % (args,),
+        )
+        check(
+            f"  {name} quotes the document because it contains a space",
+            args is not None and args.startswith('"') and args.endswith('"'),
+            "appArguments is ONE command-line string, so an unquoted "
+            "'C:\\tmp\\Some App\\demo.hta' reaches the app as two arguments "
+            "and it opens neither; got %r" % (args,),
+        )
+
+    # Hermeticity: the SAME recording with no exeArgs must produce no document.
+    # /api/generate falls back to the server's process-global sessionInfo.exeArgs
+    # (server.js:6946) when the field is absent, so a run that forgets it
+    # inherits whatever was last recorded through the UI. That leak is what
+    # stamped Medflow's HTA path into the FileZilla, HeidiSQL and TeamViewer
+    # goldens on 2026-09-08 -- an explicit [] is the only safe way to say "none".
+    status, body = request("POST", "/api/generate", {
+        "appName": HOST_ARGS_APP,
+        "exePath": HOST_ARGS_EXE,
+        "exeArgs": [],
+        "platform": PLATFORM,
+    }, timeout=30)
+    if status == 200:
+        for f in body.get("files", []):
+            _, args = _simple_session_args(f.get("content", ""))
+            check(
+                f"  {f.get('filename')} carries no document when exeArgs is []",
+                not args,
+                "an explicit empty exeArgs must mean NO arguments; got %r. If "
+                "this fails, generate is reading process-global state and every "
+                "gate result depends on what was recorded before it ran" % (args,),
+            )
+
+
 def step_wdio_generate_title_collision_dialogrect():
     print("\n[8f] dialogRects must keep the MAIN window's own rect for its "
           "title, not a same-titled popup's rect swallowed by trigger-merge "
@@ -2576,7 +2807,15 @@ def step_wdio_generate_session():
         )
         check(
             f"  {fname} replays expandCollapse via osExpandCollapse() even in session mode",
-            "osExpandCollapse(_hwndCache[_mainTitleFrag]" in content,
+            # 2026-09-01: the main-window handle is now resolved live at replay
+            # time (_liveHwnd(recordedTitle, _hwndCache[_mainTitleFrag])) because
+            # _mainTitleFrag can name a window that no longer exists — a login
+            # window that closes itself and spawns the dashboard as a separate
+            # process (Medflow). Both spellings satisfy what this check is
+            # actually about: the event must still produce an osExpandCollapse()
+            # call against the main window rather than being silently skipped.
+            ("osExpandCollapse(_hwndCache[_mainTitleFrag]" in content
+             or "osExpandCollapse(_liveHwnd(" in content),
             "session-mode expandCollapse events must not be silently skipped — "
             "FileZilla-style File-menu navigation never actually selected the "
             "target menu item in session mode (2026-07-16, root cause of the "
@@ -2741,6 +2980,68 @@ def step_wdio_generate_expand_redundant_trigger():
             f"  {fname} still correctly merges an ordinary MenuItem trigger+item pair (regression)",
             'osExpandCollapse(_appHwnd, {"automationId":"","className":"MenuItem","name":"File"}, "Open", null, null)' in content,
             "the fix must not disturb the existing non-redundant merge path",
+        )
+
+
+def step_wdio_generate_combo_open_close():
+    print("\n[9c2] ComboBox re-click that CLOSES the dropdown, not just a "
+          "failed re-open (2026-08-16 Visual Studio GUI finding)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", COMBO_OPEN_CLOSE_SESSION_META)
+    for ev in COMBO_OPEN_CLOSE_EVENTS:
+        request("POST", "/api/events", ev)
+
+    status, body = request("POST", "/api/generate", {
+        "appName": COMBO_OPEN_CLOSE_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (combo-open-close) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped combo-open-close checks)", False, body.get("message", ""))
+        return
+    files = body.get("files", [])
+    for f in files:
+        fname = f.get("filename", "")
+        content = f.get("content", "")
+        if "ById" not in fname:
+            continue
+        expand_calls = content.count("osExpandCollapse(_appHwnd")
+        check(
+            f"  {fname} calls osExpandCollapse exactly once (open only, no fake item)",
+            expand_calls == 1,
+            f"got {expand_calls} — the two reclicks should still collapse into "
+            "ONE open call (unchanged from the redundant-reclick merge), not "
+            "zero and not duplicated",
+        )
+        step_count = content.count("_step('")
+        check(
+            f"  {fname} emits 3 steps (open + the discarded reclick restored as "
+            "a plain closing click + the unrelated Back click)",
+            step_count == 3,
+            f"got {step_count} — before the fix this was 2: the second "
+            "(closing) reclick was silently discarded by the redundant-reclick "
+            "loop instead of being restored as a plain click, so replay left "
+            "the dropdown open and the following 'Back' click landed on its "
+            "light-dismiss overlay instead of the Back button",
+        )
+        check(
+            f"  {fname} restores the discarded reclick as a plain (non-expandCollapse) "
+            "click on the same ComboBox, not a fake dropdown item",
+            '"automationId":"cmbFilter"' in content and "'~cmbFilter'" in content,
+            "expected the ComboBox's selector to appear both in the "
+            "osExpandCollapse open call (full JSON selector) and in a plain "
+            "click step that closes it (bare '~automationId' shorthand,  "
+            "wdioSelectorById's own encoding) — missing either means the "
+            "closing click never made it into the generated code at all",
+        )
+        check(
+            f"  {fname} never invents a fake dropdown item out of the far-away "
+            "'Back' click",
+            'osExpandCollapse(_appHwnd, {"automationId":"cmbFilter","className":"ComboBox","name":"Language Filter"}, "Back"' not in content,
+            "the far-away/misaligned guard (looksTooFarOrMisaligned) must still "
+            "reject merging 'Back' as if it were a dropdown item — this "
+            "assertion pins that the fix for the discarded-reclick bug didn't "
+            "loosen that unrelated guard",
         )
 
 
@@ -3205,6 +3506,39 @@ def step_wdio_generate_owner_drawn_dropdown_by_index():
             "the helper compares the recorded item count against the live one "
             "and refuses to pick by position when they differ — without it a "
             "reordered/filtered list silently selects the wrong value",
+        )
+
+
+def step_wdio_generate_named_combo_forwards_item_name():
+    print("\n[16b] Named combo item forwards comboItemName as a count-mismatch fallback")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", NAMED_COMBO_INDEX_SESSION_META)
+    for ev in NAMED_COMBO_INDEX_EVENTS:
+        request("POST", "/api/events", ev)
+
+    status, body = request("POST", "/api/generate", {
+        "appName": NAMED_COMBO_INDEX_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (named combo index) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped named-combo-index checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname = f.get("filename", "")
+        content = f.get("content", "")
+        check(
+            f"  {fname} forwards comboItemName to osExpandCollapse() as a count-mismatch fallback",
+            '"MySQL on RDS", 4, 18)' in content,
+            "agent.py already captures the real item Name for combos whose "
+            "items aren't owner-drawn (e.g. VS project-wizard filters); "
+            "codegen was discarding it (only used for the step label) so "
+            "osExpandCollapse.py had nothing to fall back on when the live "
+            "item count legitimately differs from the recorded one (VS "
+            "'언어 필터' 실측 2026-08-17: the list only shrinks by one after "
+            "a REAL mouse-driven selection, which a replay-side UIA "
+            "Invoke() never triggers, so capture and replay can never agree "
+            "on count for this control)",
         )
 
 
@@ -3783,10 +4117,18 @@ def step_golden_recordings():
         request("DELETE", "/api/events")
         for ev in events:  # events[0] is the session_meta object, posted like any other
             request("POST", "/api/events", ev)
+        # exeArgs is sent ALWAYS, [] included. Omitting it does not mean "no
+        # arguments" -- /api/generate falls back to the server's process-global
+        # sessionInfo.exeArgs (server.js:6946), which /api/start last wrote.
+        # Measured 2026-09-08: blessing on a server where the user had just
+        # recorded Medflow through the UI stamped that HTA path into the
+        # FileZilla, HeidiSQL and TeamViewer goldens, because those entries
+        # omitted the field. A gate whose output depends on what was recorded
+        # before it ran is not a gate.
         status, body = request(
             "POST", "/api/generate",
             {"appName": entry["appName"], "exePath": entry["exePath"],
-             "platform": entry["platform"]},
+             "platform": entry["platform"], "exeArgs": entry.get("exeArgs") or []},
             timeout=60,
         )
         if status != 200 or not body.get("ok"):
@@ -3874,9 +4216,10 @@ def step_output_folders_isolated():
 
     targets = sorted({
         APP_NAME, SESSION_APP, COLLISION_APP, DELAYED_HWND_APP,
-        EXPAND_REDUNDANT_APP, NATIVE_APP, VCL_APP, TRIGGER_EXPAND_APP,
+        EXPAND_REDUNDANT_APP, COMBO_OPEN_CLOSE_APP, NATIVE_APP, VCL_APP, TRIGGER_EXPAND_APP,
         NAMELESS_ITEM_APP, HWND_TRIGGER_APP, DUP_DROPDOWN_APP, ANIM_APP,
         NESTED_DROPDOWN_APP, SIMPLE_ROOTHWND_APP, TITLE_COLLISION_DIALOGRECT_APP,
+        HOST_ARGS_APP,
         WEB_APP, DBLROW_APP, WINCLICK_APP, VOLATILE_MENUITEM_APP,
         MENU_INDEX_TRIGGER_APP,
         ANCESTOR_XWIN_APP, ANCESTOR_AMBIGUOUS_APP, TYPE_NEWLINE_APP, TYPE_MERGE_APP,
@@ -3884,6 +4227,7 @@ def step_output_folders_isolated():
         "SevenZipStateReset",
         "MockGoldenCalculator", "MockGoldenFileZilla", "MockGoldenHeidiSQL",
         "MockGoldenPuTTY", "MockGoldenSevenZip", "MockGoldenTeamViewer",
+        "MockGoldenMedflow", "MockGoldenMedflowDropdown",
         # agent/sweep/ regenerates these once per control it audits, so they
         # are clobbered far more often than anything above. Same rule applies.
         "SweepCalculator", "SweepFileZilla", "SweepHeidiSQL",
@@ -3922,11 +4266,13 @@ def main():
     step_wdio_generate_anim_settle()
     step_wdio_generate_nested_dropdown()
     step_wdio_generate_simple_roothwnd()
+    step_wdio_generate_host_process_args()
     step_wdio_generate_title_collision_dialogrect()
     step_wdio_generate_session()
     step_wdio_generate_window_collision()
     step_wdio_generate_delayed_hwnd()
     step_wdio_generate_expand_redundant_trigger()
+    step_wdio_generate_combo_open_close()
     step_wdio_generate_postnav_title_keeps_trigger_window()
     step_wdio_generate_native()
     step_wdio_generate_vcl_hwnd_id()
@@ -3936,6 +4282,7 @@ def main():
     step_wdio_generate_trigger_expand_merge_order()
     step_wdio_generate_nameless_item_no_fake_itemname()
     step_wdio_generate_owner_drawn_dropdown_by_index()
+    step_wdio_generate_named_combo_forwards_item_name()
     step_wdio_generate_menu_index_is_not_a_trigger()
     step_wdio_generate_combobox_ex_reclick_drops_name()
     step_wdio_generate_hwnd_trigger_keeps_name()

@@ -40,20 +40,27 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
+    screen_help = ("name from sweep/manifest.json's \"screens\" field (e.g. "
+                   "Main, Settings) for a control behind a login -- omit for "
+                   "the app's default (Login-reachable) screen")
+
     p = sub.add_parser("enumerate", help="walk the app's UIA tree into a cache")
     p.add_argument("--app", required=True)
     p.add_argument("--timeout", type=int, default=25)
+    p.add_argument("--screen", default=None, help=screen_help)
 
     p = sub.add_parser("codegen", help="tier 1 -- audit the selector for every control")
     p.add_argument("--app", required=True)
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--include-unsafe", action="store_true")
+    p.add_argument("--screen", default=None, help=screen_help)
 
     p = sub.add_parser("live", help="tier 2 -- really click, record, replay, verify")
     p.add_argument("--app", required=True)
     p.add_argument("--max-controls", type=int, default=3)
     p.add_argument("--name", default=None)
     p.add_argument("--yes", action="store_true")
+    p.add_argument("--screen", default=None, help=screen_help)
 
     p = sub.add_parser("all", help="enumerate + codegen for every enabled app")
     p.add_argument("--limit", type=int, default=None)
@@ -61,13 +68,13 @@ def main():
     args = ap.parse_args()
 
     if args.cmd == "enumerate":
-        enumerate_controls.run(args.app, args.timeout)
+        enumerate_controls.run(args.app, args.timeout, args.screen)
     elif args.cmd == "codegen":
         require_server()
-        tier1_codegen.run(args.app, args.limit, args.include_unsafe)
+        tier1_codegen.run(args.app, args.limit, args.include_unsafe, args.screen)
     elif args.cmd == "live":
         require_server()
-        tier2_live.run(args.app, args.max_controls, args.yes, args.name)
+        tier2_live.run(args.app, args.max_controls, args.yes, args.name, args.screen)
     elif args.cmd == "all":
         require_server()
         summary = []

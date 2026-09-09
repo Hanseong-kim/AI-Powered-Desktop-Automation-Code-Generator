@@ -24,7 +24,8 @@
     "app": "PuTTY",
     "titleHint": "PuTTY",
     "denyNames": ["Delete", "Load", "Open"],
-    "allowNames": [],
+    "_allowNames": "'Only on clean exit' is a logging radio, not an exit action. It is the single false positive introduced by matching DEFAULT_DENY case-insensitively (measured 2026-09-08 over all six caches), bought back here by name.",
+    "allowNames": ["Only on clean exit"],
     "enabled": true
   },
   {
@@ -40,5 +41,37 @@
     "denyNames": ["연결", "원격 제어", "세션 참가", "로그아웃"],
     "allowNames": [],
     "enabled": false
+  },
+  {
+    "app": "Medflow",
+    "_titleHint": "All four HTA windows are titled 'Medflow ...' (Login / Clinical System / Settings / Patient Detail). Since exePath is the shared host mshta.exe, this hint is the ONLY thing identifying the app -- _match_windows() drops its PID matcher when exeArgs is present.",
+    "titleHint": "Medflow",
+    "_denyNames": "EXIT / CLOSE / LOGOUT are already covered by DEFAULT_DENY now that it matches case-insensitively. Listed here only for the ones it cannot know: 확인 confirms the exit dialog.",
+    "denyNames": ["확인"],
+    "allowNames": [],
+    "enabled": true,
+    "_screens": "project_medflow_coverage_plan's blocker #3: Tier 2 kills and relaunches the app per control, and Login is the only screen a fresh launch lands on. run_prefix() (common.py) replays these steps via direct COM UIA calls -- not physical capture, since they are setup, not the thing under test -- to reach Main/Settings before the harness goes near the control actually being tested. 2026-09-09: the credentials and the click/waitWindow sequence are smoke-tested against the real app via `enumerate --screen`; not yet run through Tier 2 itself (needs an Administrator PowerShell this session did not have).",
+    "screens": {
+      "Main": {
+        "titleHint": "Medflow Clinical System",
+        "prefix": [
+          {"action": "type", "automationId": "userInput", "value": "admin"},
+          {"action": "type", "automationId": "passInput", "value": "1234"},
+          {"action": "click", "automationId": "loginBtn"},
+          {"action": "waitWindow", "titleContains": "Medflow Clinical System"}
+        ]
+      },
+      "Settings": {
+        "titleHint": "Medflow Settings",
+        "prefix": [
+          {"action": "type", "automationId": "userInput", "value": "admin"},
+          {"action": "type", "automationId": "passInput", "value": "1234"},
+          {"action": "click", "automationId": "loginBtn"},
+          {"action": "waitWindow", "titleContains": "Medflow Clinical System"},
+          {"action": "click", "automationId": "settingsBtn"},
+          {"action": "waitWindow", "titleContains": "Medflow Settings"}
+        ]
+      }
+    }
   }
 ]

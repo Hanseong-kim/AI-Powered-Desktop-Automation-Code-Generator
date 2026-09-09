@@ -69,7 +69,12 @@ python agent\sweep\run.py live      --app SevenZip --max-controls 2 --yes
 Regression gate (server must be running, agent not needed):
 
 ```powershell
-python agent\mock_events.py      # 419/419 checks as of 2026-08-06
+python agent\mock_events.py      # 480/480 as of 2026-09-02. It must STAY 480/480 —
+                                 # the 20 "pre-existing failures" carried since b09b460
+                                 # were real defects, not noise (see §5), and a red gate
+                                 # is never to be labelled pre-existing without bisecting
+                                 # it first: `git checkout <commit> -- server/server.js
+                                 # agent/mock_events.py agent/golden` + restart + rerun.
 ```
 
 > `mock_events.py` POSTs synthetic events to the live server. If you called
@@ -323,6 +328,31 @@ has no mouse position and must search downward from the window.
   the same `osScopedInvoke(..., null, relY)` COM path as the DropDown arrow.
   Verified end to end 2026-07-31 against the live app. Regression gate:
   `MockComboBoxExReclick` scenario in `mock_events.py`.
+- **An MSHTML `<select>` publishes its `<option>`s only while OPEN, in a real
+  top-level `Internet Explorer_Server` window** (Medflow HTA, measured
+  2026-09-02 — `poc/probe_select_dropdown.py`). Closed, the combo has **0**
+  `ListItem` descendants and so does the whole main window. Expanded, a new
+  window appears carrying every option as `ListItem` (ct=50007) with correct
+  `Name` and empty `AutomationId`. That window is **not** a nuisance popup:
+  `GetParent=0`, `GA_ROOT=itself`, `IsWindowVisible=True`, present in
+  `EnumWindows`, **same PID** as the main window — it passes every filter
+  `osScopedInvoke`'s stage-(b) applies, and it **survives the expanding process
+  exiting**, so the expand and the item click may legitimately live in separate
+  processes. Consequences:
+  - "Replay can't reach the options" is **not** an app limitation. When the
+    matching list is open, the recorded `Name` + `controlTypeId=50007` selector
+    resolves. Verified: with `deptSelect` open, `Pediatrics` → ct=50007 in the
+    list window; `TC1` (a `facilitySelect` option) → only ct=50029, the
+    right-panel label, which the controlTypeId guard correctly rejects.
+  - **The real failure mode is opening the wrong list**, because capture
+    records far fewer combo-open clicks than there were selections. A replay
+    that expands `deptSelect` and then looks for `TC1` can never succeed.
+  - `comboItemIndex`/`comboItemCount` are **not** captured here. The
+    `open_dropdown_item_at()` route fires only from the "click point outside
+    the adopted element's rect" branch (`agent.py`) — the Win32 `ComboBoxEx`
+    shape, where the open list hit-tests to the collapsed box. In MSHTML the
+    click lands *inside* a correctly-identified `ListItem`, so that branch never
+    runs and the selector stays Name-only with no positional anchor.
 - **A Korean titlebar Close button is `Button[@Name="닫기"]`** — the same name a
   Win32 ComboBox dropdown arrow can carry. Dropdown arrows must always resolve by
   AutomationId (`~DropDown`), never by a bare name, or replay closes the app.
@@ -332,6 +362,44 @@ has no mouse position and must search downward from the window.
   `System.Windows.Automation`.
 - **comtypes `FindFirst` returns a NULL COM pointer, not `None`, on a miss.**
   `if el is not None` is always true; test truthiness (`if el:`).
+- **A red gate check is a defect until you have bisected it.** Twenty checks
+  went red in one commit (`b09b460`) and were carried for weeks as
+  "pre-existing failures" in two later commit messages. Re-measured
+  2026-09-02 by running each commit's own `server.js` + `mock_events.py`:
+  `f763155` was **419/419 green**, `b09b460` **419/439** — same 20, unchanged
+  through HEAD. All twenty were real: a `!== null` that also matched an
+  *absent* field and threw away every numeric AutomationId; a `_typeVerified()`
+  emitted into simple mode whose body called a session-only helper; a
+  reused-id Name drop the COM path never guarded; one genuinely stale
+  expectation. Gate is 480/480 again — keep it there.
+  - To bisect: `git checkout <commit> -- server/server.js agent/mock_events.py
+    agent/golden`, restart the server (no hot reload), rerun, then
+    `git checkout HEAD -- <same paths>`. `node_modules` stays at HEAD so
+    nothing needs reinstalling.
+  - **Passed-count arithmetic tells you which kind of break it is.**
+    419/419 → 419/439 means twenty checks were *added already failing*; a
+    drop in the passed count would have meant existing behaviour regressed.
+    Here it was both, and only splitting them (does this check title exist in
+    the parent commit's `mock_events.py`?) showed 13 broken + 7 born red.
+  - **A comment is not a call site.** The "no undefined helper call sites"
+    scan matched `_typeScopedOrCom()` inside prose, so it must strip comments
+    first — but skipping string literals while doing so, because generated
+    XPath selectors start with `//` and a naive strip deletes the real call
+    that follows one on the same line.
+- **PowerShell variable names are case-INSENSITIVE — `$hWnd` IS `$hwnd`.** A
+  `param([string]$hwnd)` therefore type-constrains every later `$hWnd`, and
+  `$hWnd = [IntPtr]([int64]$hwnd)` silently converts straight back to String.
+  This made `osMoveWindow.ps1` a **total no-op** from the day the `-hwnd`
+  param was added (fixed 2026-09-02): both the `-hwnd` and the `-titleLike`
+  path resolve the correct handle and then lose it on that one assignment.
+  It was invisible three times over — PowerShell method exceptions are
+  non-terminating so the **exit code stays 0**, `execSync` runs with
+  `stdio: 'pipe'`, and the callers' `catch` blocks (the ones that push to
+  `_failures`) therefore never ran. **A helper that pushes nothing to
+  `_failures` is not evidence that it worked.** Cast inline with no
+  intermediate variable, the way `osActivate.ps1` does
+  (`[WinActivate]::Force([IntPtr]([int64]$hwnd))`), or name the local
+  something that cannot collide (`$targetHwnd`).
 - **PowerShell `-File` reads a BOM-less script as CP949**, mangling Korean button
   names. Every emitted `.ps1` needs a UTF-8 BOM (both `saveFiles()` and the
   runtime temp extraction).

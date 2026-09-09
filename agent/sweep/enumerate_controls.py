@@ -28,6 +28,7 @@ from common import (  # noqa: E402
     get_uia, describe, patterns_of, activate, all_windows, pids_for_image,
     find_all_settled, ACTIONABLE_PATTERNS, INTERACTIVE, classify_safety,
     control_key, deny_regex, get_app, load_learned_deny, write_controls,
+    run_prefix,
 )
 
 u = ctypes.windll.user32
@@ -42,10 +43,11 @@ def launch_and_wait(entry, timeout=25):
     'Single-instance apps break launchApp()').
     """
     exe = entry["exePath"]
+    args = entry.get("exeArgs") or []
     hint = (entry.get("titleHint") or entry["app"]).lower()
 
     before = {w["hwnd"] for w in all_windows()}
-    existing = _match_windows(hint, exe)
+    existing = _match_windows(hint, exe, args)
     if existing:
         w = max(existing, key=lambda w: w["area"])
         activate(w["hwnd"])
@@ -54,23 +56,33 @@ def launch_and_wait(entry, timeout=25):
     if "!" in exe:  # UWP AUMID
         subprocess.Popen(["explorer.exe", "shell:AppsFolder\\%s" % exe])
     else:
-        subprocess.Popen([exe], cwd=os.path.dirname(exe) or None)
+        # exeArgs is what makes a host process launch anything at all:
+        # `mshta.exe` with no document opens nothing (Medflow, 2026-09-08).
+        subprocess.Popen([exe] + list(args), cwd=os.path.dirname(exe) or None)
 
     deadline = time.time() + timeout
     while time.time() < deadline:
-        cands = [w for w in _match_windows(hint, exe) if w["hwnd"] not in before]
+        cands = [w for w in _match_windows(hint, exe, args)
+                 if w["hwnd"] not in before]
         if cands:
             w = max(cands, key=lambda w: w["area"])
             activate(w["hwnd"])
             return w, True
         time.sleep(0.4)
-    raise SystemExit("sweep: %s window did not appear within %ds (exe=%s)"
-                     % (entry["app"], timeout, exe))
+    raise SystemExit("sweep: %s window did not appear within %ds (exe=%s%s)"
+                     % (entry["app"], timeout, exe,
+                        (" " + " ".join(args)) if args else ""))
 
 
-def _match_windows(hint, exe):
+def _match_windows(hint, exe, args=()):
+    # The PID shortcut identifies an app by its image name, which is only an
+    # identity when the exe IS the app. With exeArgs the exe is a HOST -- every
+    # .hta on the machine runs as `mshta.exe`, so pids_for_image() would return
+    # unrelated documents' windows and, since this is an OR, adopt one of them
+    # as the app under test. When a document is what identifies the app, the
+    # title hint is the only honest matcher, so drop the PID half entirely.
     image = os.path.basename(exe) if "!" not in exe else ""
-    pids = pids_for_image(image) if image else set()
+    pids = set() if args else (pids_for_image(image) if image else set())
     out = []
     for w in all_windows():
         if not w["title"] or w["area"] < 10000:
@@ -182,10 +194,27 @@ def _looks_like_hwnd(aid):
     return n > 65535 and u.IsWindow(wintypes.HWND(n))
 
 
-def run(app, timeout=25):
+def run(app, timeout=25, screen=None):
     entry = get_app(app)
     win, launched = launch_and_wait(entry, timeout)
     uia, _ = get_uia()
+
+    if screen:
+        spec = (entry.get("screens") or {}).get(screen)
+        if not spec:
+            raise SystemExit(
+                "sweep: %s has no screen %r in sweep/manifest.json's "
+                "\"screens\" field" % (app, screen))
+        if spec.get("prefix"):
+            print("prefix       : replaying %d step(s) to reach %r"
+                  % (len(spec["prefix"]), screen))
+            win, _ = run_prefix(uia, win, spec["prefix"])
+        elif spec.get("titleHint") and spec["titleHint"].lower() not in win["title"].lower():
+            raise SystemExit(
+                "sweep: screen %r expects window %r but the launched/adopted "
+                "window is %r, and this screen has no prefix to get there"
+                % (screen, spec["titleHint"], win["title"]))
+
     raw = enumerate_window(uia, win)
     controls = annotate(raw, win, entry)
 
@@ -193,7 +222,9 @@ def run(app, timeout=25):
         "app": entry["app"],
         "appName": entry["appName"],
         "exePath": entry["exePath"],
+        "exeArgs": entry.get("exeArgs") or [],
         "platform": entry["platform"],
+        "screen": screen or "",
         "window": {"hwnd": win["hwnd"], "title": win["title"],
                    "class": win["class"], "rect": list(win["rect"])},
         "launchedByHarness": launched,
@@ -203,7 +234,7 @@ def run(app, timeout=25):
         "noSelector": sum(1 for c in controls if "NO-SELECTOR" in c["flags"]),
         "controls": controls,
     }
-    path = write_controls(entry["app"], payload)
+    path = write_controls(entry["app"], payload, screen=screen)
 
     print("app          : %s  (window %r, hwnd=%d)" % (entry["app"], win["title"], win["hwnd"]))
     print("elements     : %d in settled subtree" % payload["total"])
@@ -221,8 +252,12 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--app", required=True)
     ap.add_argument("--timeout", type=int, default=25)
+    ap.add_argument("--screen", default=None,
+                    help="name from sweep/manifest.json's \"screens\" field "
+                         "(e.g. Main, Settings) -- replays that screen's login "
+                         "prefix before enumerating. Omit for single-screen apps.")
     args = ap.parse_args()
-    run(args.app, args.timeout)
+    run(args.app, args.timeout, args.screen)
     return 0
 
 

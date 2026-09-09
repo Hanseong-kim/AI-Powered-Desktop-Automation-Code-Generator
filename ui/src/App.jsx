@@ -10,6 +10,7 @@ const DEFAULT_FORM = {
   preset: 'Calculator',
   appName: 'Calculator',
   exePath: 'C:\\Windows\\System32\\calc.exe',
+  exeArgs: '',
   platform: 'Windows',
 };
 
@@ -86,8 +87,8 @@ export default function App() {
     setForm((prev) => ({ ...prev, [key]: value }));
   }
 
-  function handlePresetChange(preset, appName, exePath) {
-    setForm((prev) => ({ ...prev, preset, appName, exePath }));
+  function handlePresetChange(preset, appName, exePath, exeArgs) {
+    setForm((prev) => ({ ...prev, preset, appName, exePath, exeArgs: exeArgs || '' }));
   }
 
   async function handleLaunch() {
@@ -95,6 +96,7 @@ export default function App() {
       const res = await startRecording({
         appName: form.appName,
         exePath: form.exePath,
+        exeArgs: form.exeArgs ? [form.exeArgs] : [],
         platform: form.platform,
       });
       if (!res.ok) addToast('error', `Launch failed: ${res.message}`);
@@ -145,6 +147,7 @@ export default function App() {
       const res = await generate({
         appName: form.appName || undefined,
         exePath: form.exePath || undefined,
+        exeArgs: form.exeArgs ? [form.exeArgs] : undefined,
         platform: form.platform || undefined,
       });
       if (res.ok) {

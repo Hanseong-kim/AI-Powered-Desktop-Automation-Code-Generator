@@ -100,10 +100,19 @@ def generate_for(ctrl, entry, win):
     request("DELETE", "/api/events")
     request("POST", "/api/events", session_meta(entry, win))
     request("POST", "/api/events", event_for(ctrl, entry, win))
+    # Sent ALWAYS, [] included -- never conditionally. Without exeArgs the
+    # generated launch gets a bare `mshta.exe` and opens no document, so every
+    # selector would be audited against a build that could not run. And
+    # OMITTING the field is not neutral: /api/generate then falls back to the
+    # server's process-global sessionInfo.exeArgs (server.js:6946), so sweeping
+    # Calculator right after someone recorded Medflow through the UI would
+    # stamp that HTA path into Calculator's audited build. That leak really
+    # happened to the golden gate on 2026-09-08.
     status, body = request("POST", "/api/generate", {
         "appName": entry["appName"],
         "exePath": entry["exePath"],
         "platform": entry["platform"],
+        "exeArgs": entry.get("exeArgs") or [],
     }, timeout=60)
     return status, body
 
@@ -230,9 +239,9 @@ def node_check(path):
     return r.returncode == 0, (r.stderr or r.stdout).strip()[:300]
 
 
-def run(app, limit=None, include_unsafe=False):
+def run(app, limit=None, include_unsafe=False, screen=None):
     entry = get_app(app)
-    cache = read_controls(entry["app"])
+    cache = read_controls(entry["app"], screen=screen)
     win = cache["window"]
 
     targets = [c for c in cache["controls"] if c["clickable"]]

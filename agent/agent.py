@@ -34,6 +34,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import requests
 from pynput import keyboard, mouse
+from pynput._util.win32 import SystemHook
 
 # Windows-only imports
 import ctypes
@@ -101,9 +102,76 @@ NUMPAD_VK = {
 
 GA_ROOT = 2                    # GetAncestor flag
 
+# 2026-08-14 (사용자 요청 — 로그 한 줄에 정보가 몰려 있어 스캔하기 어려움):
+# 최종 캡처 결과 줄(#N click ...)에서 automationId/locatorStrategy 같은
+# "재생에 실제로 쓰이는" 핵심 필드만 강조하기 위한 ANSI 색상. 콘솔이
+# VT 시퀀스를 못 그리면(구형 cmd.exe 등) 아래 enable_vt_processing()이
+# 조용히 실패하고 그냥 원본 이스케이프 문자가 보이는 정도라 안전하다.
+_C_RESET = "\033[0m"
+_C_GREEN = "\033[32m"
+_C_YELLOW = "\033[33m"
+_C_RED = "\033[31m"
+_C_CYAN = "\033[36m"
+_C_DIM = "\033[2m"
+
+
+def _enable_vt_processing():
+    """Windows 콘솔이 ANSI 색 코드를 문자 그대로 찍지 않고 실제로 렌더링
+    하도록 VT 처리를 켠다 — Windows Terminal은 기본으로 켜져 있지만 구형
+    conhost.exe(예: 일부 PowerShell 5.1 창)는 꺼져 있을 수 있다. 실패해도
+    로그 기능 자체엔 영향 없으므로 조용히 무시한다."""
+    try:
+        kernel32 = ctypes.windll.kernel32
+        h = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(h, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(h, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    except Exception:
+        pass
+
+
+_enable_vt_processing()
+
+
+# Every [inspect]/[diag-click] line also goes here, so a capture problem can be
+# diagnosed after the fact instead of only while someone is watching the
+# console. Added 2026-09-01: three separate investigations (08-27, 08-31,
+# 09-01) each stalled at "please scroll back and paste the agent console",
+# and on 09-01 the console that held the answer had already been closed by an
+# agent restart.
+#
+# Opened in APPEND mode here and truncated only by main(): poc/ probes import
+# this module to call UIAInspector directly, and a "w" here would wipe the log
+# of an agent that is running and recording at that moment.
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.log")
+try:
+    _log_fh = open(LOG_FILE, "a", encoding="utf-8")
+except Exception:
+    _log_fh = None
+
+
+def _truncate_log():
+    """Start a fresh log for this agent run. Called from main() only."""
+    global _log_fh
+    try:
+        if _log_fh is not None:
+            _log_fh.close()
+        _log_fh = open(LOG_FILE, "w", encoding="utf-8")
+    except Exception:
+        _log_fh = None
+
 
 def log(*args):
-    print("[agent]", *args, flush=True)
+    line = " ".join(str(a) for a in args)
+    print("[agent]", line, flush=True)
+    # Logging must never be able to break capture — a full disk or a locked
+    # file costs a log line, not the recording.
+    if _log_fh is not None:
+        try:
+            _log_fh.write(f"{time.strftime('%H:%M:%S')} [agent] {line}\n")
+            _log_fh.flush()
+        except Exception:
+            pass
 
 
 def point_in_rect(rect, x, y):
@@ -308,6 +376,13 @@ class UIAInspector:
     # a different row than the one actually clicked).
     GENERIC_CELL_AUTOMATION_IDS = {"System.ItemNameDisplay"}
     ROW_CONTROL_TYPES = {50007, 50024}  # ListItem, TreeItem
+
+    # 2026-08-16: PARENT_PROMOTABLE_CONTROL_TYPES / PARENT_WITH_ID_MAX_HOPS /
+    # _MNEMONIC_PAREN_RE / _strip_mnemonic() / _window_name_search() were
+    # removed together with their only two callers in element_at() — see the
+    # removal note there. (server.js keeps its own, separately-maintained
+    # INTERACTIVE_CLICK_CONTROL_TYPE_IDS for REST-vs-COM click routing; that
+    # is a different mechanism and is unaffected.)
 
     def _nearest_row_ancestor(self, elem, max_up=6):
         """Walk up from elem toward the nearest ListItem/TreeItem ancestor
@@ -804,9 +879,70 @@ class UIAInspector:
                     trace["root_hwnd"] = root_hwnd
                     trace["root_ok"] = bool(root)
                     if root:
-                        deeper = self.smallest_element_at(root, int(x), int(y))
+                        # 2026-09-01 (Medflow HTA, SETTINGS 버튼 실측):
+                        # axis_elem=elem — 후보는 히트테스트가 돌려준 elem의
+                        # 조상이거나 자손이어야 한다. 창 전체에서 면적만으로
+                        # 고르면 elem과 트리상 아무 관계도 없는 요소가 이긴다.
+                        #
+                        # 실측 (poc/probe_capture_identity.py, 재현 100%):
+                        #   aimed  Button aid='settingsBtn' rect=(1639,978,1756,1011)
+                        #   raw    id='settingsBtn' name='SETTINGS'   <- 히트테스트는 정답
+                        #   got    Text aid='' name='Glaucoma' rect=(1695,991,1753,1005)
+                        # 'Glaucoma'는 오른쪽 패널 표의 셀로 settingsBtn의
+                        # 자손이 아니다(settingsBtn의 서브트리는 자기 자신
+                        # 1개뿐). 그 표는 overflow:hidden으로 화면에서는 잘려
+                        # 안 보이지만 UIA는 잘리지 않은 rect를 그대로 보고해서
+                        # 푸터 위를 덮고, 면적 506 < 2444로 이긴다.
+                        #
+                        # IsOffscreen 필터로는 못 잡는다 — 클리핑된 그 요소들은
+                        # IsOffscreen=False로 보고된다(측정:
+                        # poc/diag_offscreen_hittest.py). UIA 자신의
+                        # ElementFromPoint는 클리핑을 존중해 정답을 준다.
+                        #
+                        # 검색 루트를 elem으로 바꾸는(= 서브트리 스코프) 더 단순한
+                        # 수정도 이 케이스는 고치지만, 정답이 raw hit의 **조상**인
+                        # 반대 케이스를 깨뜨린다 — 같은 창의 MenuBar에서 측정:
+                        #   raw  id='' name='시스템'   rect=(0,0,28,28)
+                        #   정답 aid='MenuBar'        rect=(0,0,28,28)  (raw의 조상)
+                        # 축(axis) 제한은 위/아래 양방향을 모두 허용하면서 옆으로만
+                        # 막으므로 두 케이스가 함께 통과한다.
+                        #
+                        # 스윕 측정(probe_capture_identity.py --sweep, 이 창의
+                        # AutomationId 보유 컨트롤 43개, 동일 조건):
+                        #   창 스코프   35/43  MISS={deptSelect, facilitySelect,
+                        #                            row×4, searchBtn, settingsBtn}
+                        #   서브트리    38/43  MISS={MenuBar, row×4}
+                        #   축 제한     37/43  MISS={deptSelect, facilitySelect, row×4}
+                        # 점수가 아니라 집합 관계가 판단 근거다: 축 제한의 MISS는
+                        # 창 스코프 MISS의 진부분집합이라 새로 깨지는 것이 없고,
+                        # 서브트리는 점수가 더 높은데도 MenuBar를 새로 깨뜨린다.
+                        # 남는 MISS는 전부 기존 동작이다 — ComboBox는 값 표시
+                        # 자식으로 히트테스트되고(_enclosing_combo가 하류에서
+                        # 되돌린다), 행은 이름 셀로 내려간다(CLAUDE.md §5).
+                        #
+                        # 이 버그가 캡처에서 어떻게 보이는지: 2026-08-31 녹화의
+                        # SETTINGS 클릭이 name='Department'(같은 표의 다른 셀)로,
+                        # 그 전 녹화에서는 'Glaucoma'로 잡혔다. 클릭 자체는
+                        # 정상 동작했으므로(Settings 창이 실제로 열림) 드롭도
+                        # 오류도 없이 조용히 틀린 셀렉터만 남는다.
+                        deeper = self.smallest_element_at(
+                            root, int(x), int(y), axis_elem=elem)
                         if deeper is not None:
                             trace["picked_by"] = "smallest_element_at"
+                            # 2026-08-14 (VS "리포지토리 복제" 실측): raw_info와
+                            # 달리 이 결과는 element_at() 시작 시점의 raw hit이
+                            # 아니라 별도 FindAll 탐색으로 방금 찾아낸 다른
+                            # 객체다 — 그 탐색 자체가 시간이 걸려서, 죽은-요소
+                            # 복구(_inspect())가 쓸 수 있는 "아직 살아있을 때"
+                            # 스냅샷이 여태 하나도 없었다(raw_info를 대신 쓰면
+                            # 엉뚱한 객체를 복구하게 됨 — 그래서 그 복구는
+                            # picked_by가 raw-*일 때만 걸리게 막혀 있었다).
+                            # 찾아낸 즉시 가볍게 한 번 읽어서 저장해두면, 이
+                            # 객체 전용의 "아직 살아있을 때" 스냅샷이 생긴다.
+                            try:
+                                trace["smallest_info"] = self.describe(deeper)
+                            except Exception:
+                                pass
                     if deeper is None:
                         deeper = self._deepen(elem, int(x), int(y))
                         if deeper is not None:
@@ -875,6 +1011,22 @@ class UIAInspector:
                     if named is not None:
                         trace["picked_by"] = "named-ancestor"
                         return named
+
+            # 2026-08-16: the `parent-with-id` ancestor climb and the
+            # `window-name-search` window-wide Name lookup that used to sit
+            # here were REMOVED. Both were added 2026-08-14 for Visual
+            # Studio's "뒤로(_B)" (a WPF Button whose hit-test lands on its
+            # inner TextBlock label), and neither ever succeeded on the
+            # control they were written for: every subsequent live recording
+            # shows both walking their full budget and then failing
+            # ("no interactive candidate for normalized name '뒤로(B)'"),
+            # because that leaf's ancestor chain varies across recordings and
+            # the window-wide search never finds exactly one interactive
+            # candidate. They cost real capture latency on EVERY id-less
+            # click while contributing no successful captures, so they are
+            # gone rather than tuned. A leaf with no automationId now falls
+            # through to the existing Name-based capture, exactly as it did
+            # before 2026-08-14.
         except Exception:
             pass
         return elem
@@ -1306,13 +1458,88 @@ class UIAInspector:
     # not a target — same threshold as server.js WINDOW_FILL_RATIO.
     WINDOW_FILL_RATIO = 0.80
 
-    def smallest_element_at(self, root, x, y):
+    # How far _element_key climbs before giving up. resolve_root_hwnd() and
+    # _nearest_named_ancestor() both cap at 15; a UIA tree deep enough to need
+    # more than this is the Chromium/React case, and those are handled by the
+    # subtree half of the axis test, not the ancestor half.
+    AXIS_MAX_CLIMB = 25
+
+    def _element_key(self, el):
+        """Identity tuple for "is this the same underlying element?".
+
+        Deliberately NOT IUIAutomation::CompareElements — see
+        _ancestor_sibling_selector()'s docstring: this codebase has never
+        called it and it gives false negatives across two separately-queried
+        references to the same element. Same rule used there: bounding rect +
+        ControlType + (native hwnd if there is one, else AutomationId/Name).
+        """
+        try:
+            r = el.CurrentBoundingRectangle
+            return (
+                (r.left, r.top, r.right, r.bottom),
+                el.CurrentControlType,
+                el.CurrentNativeWindowHandle or 0,
+                el.CurrentAutomationId or "",
+                el.CurrentName or "",
+            )
+        except Exception:
+            return None
+
+    def _on_hit_axis(self, axis_key, axis_ancestor_keys, cand):
+        """Is `cand` on the hit element's own ancestor-or-descendant axis?
+
+        2026-09-01 (Medflow HTA). smallest_element_at() ranks purely by area,
+        so before this it could adopt an element with NO tree relationship to
+        the one the hit test returned — it only had to contain the point and
+        be smaller. That is not a theoretical hole: a CSS `overflow:hidden`
+        region reports UNCLIPPED rects to UIA (and IsOffscreen=False, so an
+        offscreen filter does not see it either), so cells scrolled out of
+        view spill across the window and win on area over the real control.
+
+        Moving up or down the hit element's own chain is legitimate and both
+        directions are needed — measured on one window:
+          - down: a container hit-tests to itself, the real control is inside
+          - up:   the hit lands on an unnamed child whose ANCESTOR carries the
+                  AutomationId (MenuBar: raw name='시스템' id='' -> aid='MenuBar',
+                  identical rect)
+        Moving SIDEWAYS into an unrelated subtree never is.
+        """
+        ck = self._element_key(cand)
+        if ck is None:
+            return False
+        if ck == axis_key or ck in axis_ancestor_keys:
+            return True                     # cand is elem, or an ancestor of it
+        try:
+            walker = self._uia.ControlViewWalker
+        except Exception:
+            return False
+        cur, hops = cand, 0
+        while cur and hops < self.AXIS_MAX_CLIMB:
+            try:
+                parent = walker.GetParentElement(cur)
+            except Exception:
+                return False
+            if not parent:                  # NULL COM pointer, not None
+                return False
+            if self._element_key(parent) == axis_key:
+                return True                 # cand is a descendant of elem
+            cur, hops = parent, hops + 1
+        return False
+
+    def smallest_element_at(self, root, x, y, axis_elem=None):
         """The smallest element in root's subtree containing (x, y).
 
         Replaces the first-containing-child descent of _deepen(): that walk
         could not backtrack out of a dead-end branch, and its depth cap had to
         be retuned per UI framework. Selecting by area is independent of tree
         shape and depth.
+
+        axis_elem (2026-09-01): when given, only elements on axis_elem's own
+        ancestor-or-descendant axis are eligible, smallest-first — see
+        _on_hit_axis(). Callers that legitimately need to leave that axis pass
+        nothing: element_under_overlay() searches the window for a control
+        that is a SIBLING subtree of the light-dismiss scrim it hit, which is
+        the entire point of that function.
         """
         try:
             arr = root.FindAll(7, self._uia.CreateTrueCondition())
@@ -1339,8 +1566,45 @@ class UIAInspector:
                     continue        # a window-filling container is not a target
             els.append(el)
             rects.append(rect)
-        idx = smallest_rect_index(rects, x, y)
-        return els[idx] if idx is not None else None
+        if axis_elem is None:
+            idx = smallest_rect_index(rects, x, y)
+            return els[idx] if idx is not None else None
+
+        # Axis-restricted: same smallest-area-wins rule, but walk the
+        # candidates in ascending area order and take the first one that is
+        # actually related to the hit element. Only candidates containing the
+        # point can win at all, so the (expensive) tree climb runs on a
+        # handful of elements, not on the whole subtree.
+        axis_key = self._element_key(axis_elem)
+        if axis_key is None:
+            idx = smallest_rect_index(rects, x, y)
+            return els[idx] if idx is not None else None
+        axis_ancestor_keys = set()
+        try:
+            walker = self._uia.ControlViewWalker
+            cur, hops = axis_elem, 0
+            while cur and hops < self.AXIS_MAX_CLIMB:
+                parent = walker.GetParentElement(cur)
+                if not parent:              # NULL COM pointer, not None
+                    break
+                k = self._element_key(parent)
+                if k is None:
+                    break
+                axis_ancestor_keys.add(k)
+                cur, hops = parent, hops + 1
+        except Exception:
+            pass
+        cands = []
+        for el, rect in zip(els, rects):
+            if not point_in_rect(rect, x, y):
+                continue
+            cands.append((max(0, rect[2] - rect[0]) * max(0, rect[3] - rect[1]),
+                          el))
+        cands.sort(key=lambda t: t[0])
+        for _area, el in cands:
+            if self._on_hit_axis(axis_key, axis_ancestor_keys, el):
+                return el
+        return None
 
     def _inner_expandable_combo(self, elem):
         """The control that actually owns the dropdown. For a ComboBoxEx the
@@ -1365,6 +1629,227 @@ class UIAInspector:
                 cr = c.CurrentBoundingRectangle
                 if (abs(cr.left - r.left) <= 2 and abs(cr.top - r.top) <= 2
                         and abs(cr.right - r.right) <= 2
+                        and c.GetCurrentPattern(self.EXPAND_COLLAPSE_PATTERN_ID)):
+                    return c
+            except Exception:
+                continue
+        return None
+
+    def combo_under_dropdown(self, popup_hwnd, x, y, target_hwnds):
+        """The ComboBox lying UNDER an open dropdown list at (x, y).
+
+        For the click that OPENS an MSHTML <select>: the point is on the combo,
+        but the list window is already up by the time the worker hit-tests, so
+        ElementFromPoint returns a ListItem in that popup instead. The real
+        target is still the combo, which lives in one of the app's other
+        top-level windows and whose rect still contains the point.
+
+        Scoped tightly on purpose — a match must be a ComboBox that actually
+        supports ExpandCollapse, in a window of the SAME PROCESS that is NOT
+        the popup. Returns None for anything else (Win32 menus, plain list
+        popups), so the caller keeps whatever the hit test decided.
+
+        Candidate windows are same-PID, NOT `target_hwnds` (2026-09-02, first
+        live run of this fix): target_hwnds is filled by _watch_windows(),
+        which polls every 0.5s, so a window that appeared moments earlier is
+        not in it yet. Measured — the click that opened facilitySelect right
+        after login was inspected while target_hwnds still held only the login
+        window, so this lookup found nothing and the re-attribution silently
+        did not happen:
+            [trace] pt=(1471,175) raw=[name='TC1'] root_hwnd=2426024
+                    fg=2558784 targets=[1575470, 3017542, 3083046]
+                                        ^ main window 2558784 missing
+        PID is the durable link — the popup belongs to the same process as
+        the window hosting the combo (verified with
+        poc/probe_select_dropdown.py: the list window reports the main
+        window's PID).
+
+        Smallest containing candidate wins, for the same reason
+        smallest_element_at() picks by area: two nested combos (a Win32
+        ComboBoxEx is literally two stacked controls, CLAUDE.md §5) must
+        resolve to the inner, drivable one.
+        """
+        popup_pid = pid_of_hwnd(popup_hwnd)
+        cands_win = set(target_hwnds or ())
+        if popup_pid:
+            for h in visible_toplevel_windows():
+                if pid_of_hwnd(h) == popup_pid:
+                    cands_win.add(h)
+        # 2026-09-02: 이 함수가 왜 못 찾았는지는 결과만 봐서는 알 수 없었다.
+        # deptSelect는 세 번 다 찾고 facilitySelect는 네 번 다 못 찾았는데,
+        # 같은 앱을 단독 실행한 프로브에서는 바로 그 좌표로 facilitySelect가
+        # 정상 조회됐다(rect=(1424,165,1544,185), pt=(1474,174)). 재현이 안 되는
+        # 차이는 실행 환경 쪽이므로, 실패한 그 순간에 무엇을 후보로 봤고 각
+        # 콤보의 rect가 무엇이었는지를 남긴다. 진단은 실패 경로에서만 찍는다.
+        # 2026-09-02 (진단으로 확정): 열려 있는 <select>는 **메인 창 트리에서
+        # 사라진다**. 실패한 그 순간의 메인 창이 publish한 ComboBox는
+        # deptSelect(닫혀 있던 쪽) 하나뿐이었고 facilitySelect(열려 있던 쪽)는
+        # 어디에도 없었다:
+        #   combo_under_dropdown(popup=7144652, pt=(1465,175)) found nothing;
+        #     win=855162 combos=1 | aid='deptSelect' rect=(...) inside=False
+        #     win=986034/4787436/6621986 ElementFromHandle raised: COMError
+        #     win=10816942 rect=(0,0,0,0) does not contain pt
+        # 그러니 팝업 창 자신과 rect를 못 읽는 창까지 포함해서 봐야 한다 —
+        # 열린 콤보가 남아 있을 수 있는 곳이 정확히 그 두 군데다.
+        #
+        # 창 rect로 미리 거르지 않는다: 창이 (0,0,0,0)을 보고해도(아직 배치 전,
+        # 또는 호스트 창) 그 안의 요소는 제대로 된 좌표를 보고할 수 있다. 진짜
+        # 필터는 아래 콤보별 rect 검사이고, 그건 그대로 있다 — 즉 판정 기준은
+        # 느슨해지지 않고 탐색 범위만 넓어진다.
+        seen = []
+        best, best_area = None, None
+        fallback, fallback_area = None, None
+        for hwnd in sorted(cands_win | {popup_hwnd}):
+            if not hwnd:
+                continue
+            try:
+                root = self._uia.ElementFromHandle(hwnd)
+            except Exception as e:
+                seen.append("win=%d ElementFromHandle raised: %s" % (hwnd, e))
+                continue
+            if not root:                      # comtypes returns a NULL pointer
+                seen.append("win=%d ElementFromHandle -> NULL" % hwnd)
+                continue
+            try:
+                # NOT ControlType==ComboBox. 2026-09-02, from the live log:
+                # while its list is open, an MSHTML <select> is republished as
+                # controlType='Text', so a ComboBox-only scan could never see
+                # the very combo we are looking for. The diagnostic said so
+                # exactly — the main window reported combos=1, deptSelect,
+                # the one that was CLOSED — while the light-dismiss recovery
+                # path resolved the same click to
+                #     id='facilitySelect' name='' type='Text'
+                # IsExpandCollapsePatternAvailable is the property that holds
+                # across both shapes. Measured on this app: the whole main
+                # window yields 3 such elements, of which exactly 2 carry an
+                # AutomationId — facilitySelect and deptSelect. So it is a
+                # sharp filter here, not a broad one.
+                cands = root.FindAll(7, self._uia.CreatePropertyCondition(
+                    30028, True))   # IsExpandCollapsePatternAvailable, Subtree
+            except Exception as e:
+                seen.append("win=%d FindAll raised: %s" % (hwnd, e))
+                continue
+            try:
+                wr = root.CurrentBoundingRectangle
+                win_area = max(1, (wr.right - wr.left) * (wr.bottom - wr.top))
+            except Exception:
+                win_area = 0
+            is_popup = (hwnd == popup_hwnd)
+            seen.append("win=%d%s combos=%d"
+                        % (hwnd, " (POPUP)" if is_popup else "", cands.Length))
+            for i in range(cands.Length):
+                c = cands.GetElement(i)
+                try:
+                    cr = c.CurrentBoundingRectangle
+                    aid = str(c.CurrentAutomationId)
+                    inside = (cr.left <= x < cr.right and cr.top <= y < cr.bottom)
+                    area = max(0, cr.right - cr.left) * max(0, cr.bottom - cr.top)
+                    # An AutomationId is required: the combo's inner display
+                    # Text also supports ExpandCollapse here but has no id, and
+                    # an id is the whole point — it is what replay will select
+                    # by. The window-fill guard is smallest_element_at's
+                    # (WINDOW_FILL_RATIO), keeping a page-level container that
+                    # happens to contain the point from ever winning.
+                    fills = bool(win_area and area / win_area >= self.WINDOW_FILL_RATIO)
+                    seen.append("    aid=%r ct=%s rect=(%d,%d,%d,%d) inside=%s fills=%s"
+                                % (aid, c.CurrentControlType, cr.left, cr.top,
+                                   cr.right, cr.bottom, inside, fills))
+                    if not inside or not aid or fills:
+                        continue
+                except Exception as e:
+                    seen.append("    combo #%d unreadable: %s" % (i, e))
+                    continue
+                # 팝업 밖(= 앱의 진짜 창)에서 찾은 것을 항상 우선한다. 팝업은
+                # 항목을 하나 받고 사라지는 일회성 창이라, 거기서 집어온 요소를
+                # 그대로 쓰면 emit되는 rootHwnd가 곧 죽을 창을 가리킨다.
+                # 팝업 쪽 후보는 다른 데서 아무것도 못 찾았을 때의 폴백이다.
+                if is_popup:
+                    if fallback is None or area < fallback_area:
+                        fallback, fallback_area = c, area
+                elif best is None or area < best_area:
+                    best, best_area = c, area
+        if best is None and fallback is not None:
+            log("[inspect] combo_under_dropdown(popup=%d, pt=(%d,%d)) found the "
+                "combo only INSIDE the popup itself — an open <select> leaves the "
+                "app window's tree. Using it." % (popup_hwnd, x, y))
+            best = fallback
+        if best is None:
+            log("[inspect] combo_under_dropdown(popup=%d, pt=(%d,%d)) found nothing; "
+                "candidates(%d): %s"
+                % (popup_hwnd, x, y, len(cands_win), " | ".join(seen) or "(none)"))
+        return best
+
+    def _enclosing_combo(self, elem, x, y):
+        """A ComboBox ancestor whose rect CONTAINS elem's rect and the click
+        point — for when the hit test landed on the combo's own "currently
+        selected value" display instead of the combo.
+
+        Measured 2026-08-17 (Visual Studio "새 프로젝트 만들기" 프로젝트 형식
+        필터): the FIRST open of an empty combo hit-tests to the ComboBox
+        itself (its accessible Name is still the placeholder, e.g. '프로젝트
+        형식 필터'), so _is_combo_like() sees controlType='ComboBox' and
+        snapshot_open_dropdown() caches the list normally. But once a value
+        is selected, the combo grows an inner value-display child (a Text
+        node named after the current selection, e.g. '모든 프로젝트
+        형식(_T)') that is SMALLER than the ComboBox and sits exactly under
+        the click point — smallest_element_at() then adopts that child
+        instead. Its controlType is 'Text', so _is_combo_like() returns
+        False, snapshot_open_dropdown() never fires, no item geometry gets
+        cached, and the click is captured as a plain [name] selector on a
+        state-dependent label — the same failure class CLAUDE.md already
+        documents for HeidiSQL's TComboBoxEx (Name = currently selected
+        value), just via a child element instead of the combo's own Name.
+        One resulting selector ('모두 지우기(_C)') was confirmed to actually
+        break replay: "[osScopedInvoke] failed: target not found under main
+        window or any other top-level window".
+
+        This is deliberately NOT the 2026-08-14 generic named-ancestor climb
+        removed 2026-08-16 (agent.py, see the comment above this method's
+        call site) — that walked GetParentElement blindly for ANY id-less
+        leaf and cost latency on every one without ever succeeding on VS,
+        because the ancestor chain varies across recordings. This is typed
+        (ComboBox only, via the same FindAll(CT_COMBO_BOX) subtree scan
+        _inner_expandable_combo already uses) and purely geometric
+        (containment, not chain-walking), so it only ever runs for the
+        narrow case where a snapshot was about to be skipped."""
+        root = self._search_root_for(elem)
+        if root is None:
+            return None
+        try:
+            er = elem.CurrentBoundingRectangle
+        except Exception:
+            return None
+        return self._enclosing_combo_in_root(root, er, x, y)
+
+    def _enclosing_combo_in_root(self, root, target_rect, x, y):
+        """Shared geometry scan behind _enclosing_combo(): a ComboBox
+        descendant of `root` whose rect contains both `target_rect`
+        (left/top/right/bottom attributes — a live CurrentBoundingRectangle
+        OR a plain tuple-derived stand-in works, see callers) and (x, y).
+
+        Split out 2026-08-17 so the dead-element recovery path (elem itself
+        is gone by inspection time, so elem.CurrentBoundingRectangle can't be
+        re-read) can still run the same search against a root resolved from
+        the tracked window's hwnd instead of the dead elem."""
+        if root is None:
+            return None
+        try:
+            tl, tt, tr, tb = (target_rect.left, target_rect.top,
+                              target_rect.right, target_rect.bottom)
+        except AttributeError:
+            tl, tt, tr, tb = target_rect      # plain (l, t, r, b) tuple
+        try:
+            cands = root.FindAll(7, self._uia.CreatePropertyCondition(
+                30003, self.CT_COMBO_BOX))          # TreeScope_Subtree
+        except Exception:
+            return None
+        for i in range(cands.Length):
+            c = cands.GetElement(i)
+            try:
+                cr = c.CurrentBoundingRectangle
+                if (cr.left <= tl and cr.top <= tt
+                        and cr.right >= tr and cr.bottom >= tb
+                        and cr.left <= x <= cr.right and cr.top <= y <= cr.bottom
                         and c.GetCurrentPattern(self.EXPAND_COLLAPSE_PATTERN_ID)):
                     return c
             except Exception:
@@ -1548,28 +2033,61 @@ class UIAInspector:
             # describe a list that is no longer on screen.
             self._dropdown_cache = None
             return
-        rows = []
+        settle_root, items = None, None
         for root in self._search_roots_for(elem):
             try:
-                items = root.FindAll(7, self._uia.CreatePropertyCondition(
+                candidate = root.FindAll(7, self._uia.CreatePropertyCondition(
                     30003, self.CT_LIST_ITEM))
             except Exception:
                 continue
-            if not items or not items.Length:
+            if not candidate or not candidate.Length:
                 continue
-            for i in range(items.Length):
-                it = items.GetElement(i)
-                try:
-                    r = it.CurrentBoundingRectangle
-                except Exception:
-                    continue
-                try:
-                    nm = it.CurrentName or ""
-                except Exception:
-                    nm = ""
-                rows.append(((r.left, r.top, r.right, r.bottom), nm))
-            if rows:
+            settle_root, items = root, candidate
+            break
+        if settle_root is None:
+            self._dropdown_cache = None
+            return
+        # 2026-08-17 (VS 언어/플랫폼/프로젝트 형식 필터 실측): 위에서 방금 찾은
+        # 첫 FindAll 결과를 그대로 캐시하면 안 된다 — Expanded==1을 감지한
+        # 직후라 항목 리스트가 아직 다 렌더링되지 않았거나 이전에 열렸던
+        # 팝업의 잔여 항목이 덜 정리된 순간을 잡을 수 있다. 실측: 같은 콤보를
+        # 반복해서 열 때마다 캐시된 개수가 23/24/23/23, 22/21/21처럼
+        # 흔들렸는데, 재생 시점엔 (같은 콤보를 몇 번을 다시 열어도) 매번
+        # 정확히 같은 개수로 재현됐다 — 즉 앱 상태가 실제로 바뀐 게 아니라
+        # 캡처 샘플링 타이밍의 문제였다. osExpandCollapse는 캐시된 개수와
+        # 실제 개수가 다르면 위치로 찍지 않고 정확히 거부하는데(CLAUDE.md
+        # §3 No false PASS), 그 안전장치 자체는 옳으므로 손대지 않고 캡처가
+        # 안정된 값을 넘기도록 고친다. settled_subtree_count()(WebView2용,
+        # 최대 8초)만큼 오래 기다릴 필요는 없다 — 네이티브 WPF 리스트라
+        # 수백ms면 충분하고, 콤보가 실제로 열려 있는 것으로 확인된 경로에만
+        # 국한되므로 다른 클릭에는 지연을 더하지 않는다.
+        deadline = time.time() + 0.6
+        last_len, stable_since = items.Length, time.time()
+        while True:
+            if (time.time() - stable_since >= 0.12
+                    or time.time() >= deadline):
                 break
+            time.sleep(0.03)
+            try:
+                candidate = settle_root.FindAll(7, self._uia.CreatePropertyCondition(
+                    30003, self.CT_LIST_ITEM))
+                cur_len = candidate.Length if candidate else 0
+            except Exception:
+                continue
+            if cur_len != last_len:
+                items, last_len, stable_since = candidate, cur_len, time.time()
+        rows = []
+        for i in range(items.Length):
+            it = items.GetElement(i)
+            try:
+                r = it.CurrentBoundingRectangle
+            except Exception:
+                continue
+            try:
+                nm = it.CurrentName or ""
+            except Exception:
+                nm = ""
+            rows.append(((r.left, r.top, r.right, r.bottom), nm))
         if not rows:
             self._dropdown_cache = None
             return
@@ -2363,6 +2881,39 @@ def pid_of_hwnd(hwnd):
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 
+def parent_pid_of(pid):
+    """Parent PID of `pid` via a Toolhelp32 process snapshot, or 0 if it
+    can't be determined (process gone, access denied, etc.)."""
+    if not pid:
+        return 0
+    TH32CS_SNAPPROCESS = 0x00000002
+
+    class PROCESSENTRY32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+            ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_char * 260),
+        ]
+
+    snap = ctypes.windll.kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snap == -1:
+        return 0
+    try:
+        entry = PROCESSENTRY32()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32)
+        if not ctypes.windll.kernel32.Process32First(snap, ctypes.byref(entry)):
+            return 0
+        while True:
+            if entry.th32ProcessID == pid:
+                return entry.th32ParentProcessID
+            if not ctypes.windll.kernel32.Process32Next(snap, ctypes.byref(entry)):
+                return 0
+    finally:
+        ctypes.windll.kernel32.CloseHandle(snap)
+
+
 def image_path_of_pid(pid):
     """Full exe path backing `pid`. Unlike window titles this is never
     localized, so it survives non-English Windows UI languages."""
@@ -2380,6 +2931,18 @@ def image_path_of_pid(pid):
         return ""
     finally:
         ctypes.windll.kernel32.CloseHandle(h)
+
+
+# Directories the whole OS shares — a window owned by ANY process living
+# here does not mean it belongs to an app merely because the app's own exe
+# also lives here (e.g. mshta.exe and ApplicationFrameHost.exe are both in
+# System32). Used by _app_install_dir() to disable the dir-match broadening
+# in _owned_by_app() for exes launched out of these directories.
+SHARED_SYSTEM_DIRS = {
+    os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "System32").lower(),
+    os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "SysWOW64").lower(),
+    os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "WindowsApps").lower(),
+}
 
 
 def match_keys_for_launch(exe_path, app_name):
@@ -2404,6 +2967,37 @@ def match_keys_for_launch(exe_path, app_name):
         if k:
             keys.add(k)
     return keys
+
+
+def _find_existing_window_for_exe(exe_path, app_name):
+    """Best-effort check: does a visible top-level window already belong to
+    this exe? Used by start() to decide whether to launch a new process at
+    all.
+
+    2026-08-17 (사용자 지시 — HeidiSQL BFS 탐색 probe): start()는 여태
+    무조건 subprocess.Popen()으로 새 프로세스를 띄웠다 — 다중 인스턴스를
+    허용하는 앱(HeidiSQL 등)이면 사용자가 이미 세션에 연결해둔 창은 절대
+    기록 대상이 될 수 없고, 로그인 화면부터 시작하는 완전히 새 인스턴스만
+    기록됐다(_discover_target_windows()의 launch_pid 매칭이 그 새 프로세스를
+    우선 채택하므로). _discover_target_windows() 자체는 이미 "경로가
+    맞으면 기존 창도 채택"하는 로직을 갖고 있다(그 함수의 주석 참고) —
+    그래서 여기서 할 일은 launch 여부를 미리 판단하는 것뿐이다: 기존 창이
+    있으면 아예 새로 안 띄워서, launch_pid 매칭이 자연히 빠지고 경로
+    매칭만으로 기존 창이 채택되게 한다. 실제 채택 자체는 여전히
+    _discover_target_windows()가 정상 흐름대로 한다 — 이 함수는 판단만
+    하고 target_hwnds는 건드리지 않는다.
+
+    UWP(AUMID)는 다루지 않는다 — 호출부에서 걸러짐, 호스트 프로세스가
+    explorer.exe라 exe_path 자체로는 소유 프로세스를 못 찾는다."""
+    path_keys = match_keys_for_launch(exe_path, app_name)
+    if not path_keys:
+        return None
+    for hwnd in visible_toplevel_windows():
+        img_path = image_path_of_pid(pid_of_hwnd(hwnd))
+        path_key = re.sub(r'[^a-z0-9]', '', img_path.lower())
+        if path_key and any(k in path_key for k in path_keys):
+            return hwnd
+    return None
 
 
 GW_OWNER = 4
@@ -2591,6 +3185,71 @@ def _window_has_size(hwnd):
         return False
 
 
+# A SendInput click carrying this exact value in MOUSEINPUT.dwExtraInfo is
+# accepted despite the LLMHF_INJECTED flag Windows always sets on it -- see
+# _CaptureMouseListener below. The one and only sender is
+# poc/probe_click_replay.py's send_click(); the two files must agree on this
+# constant.
+TIER2_CLICK_EXTRA_INFO = 0x54325A17
+
+
+class _CaptureMouseListener(mouse.Listener):
+    """pynput's Windows mouse Listener, with one exception carved into the
+    injected-input filter.
+
+    2026-09-09: agent/sweep/tier2_live.py exists to verify that a PHYSICAL
+    click on a control records and replays correctly -- its whole reason to
+    exist over Tier 1 (CLAUDE.md, tier2_live.py's own docstring). It drives
+    that click via SendInput (probe_click_replay.py's send_click(), the same
+    mechanism generated replay code uses), because that is what "physical"
+    means here. But Windows marks EVERY SendInput-originated event
+    LLMHF_INJECTED at the OS level (confirmed via pynput's own hook struct),
+    and _on_click below drops every injected click unconditionally -- by
+    design, to keep automation noise (e.g. UWP's own injected keystrokes on
+    a button click) out of a REAL user's recording. The two are in direct
+    conflict: Tier 2's click could never reach a real recording through
+    this path, for any app, ever. No earlier Tier 2 run had exposed this --
+    every one failed at an earlier stage (elevation, control not found at
+    replay) before a real click was ever attempted.
+    pynput's stock Listener does not expose dwExtraInfo to on_click at all,
+    so this is a full override of _handle_message (copied from
+    pynput.mouse._win32.Listener, the only change is the injected override
+    below) rather than a small patch. Only a click carrying
+    TIER2_CLICK_EXTRA_INFO is treated as non-injected; every other synthetic
+    click (some other automation tool, a UWP control's own injected
+    keystrokes) is still dropped exactly as before -- this is deliberately
+    narrow, not a blanket unblock of injected input.
+    """
+
+    def _handle_message(self, code, msg, lpdata):
+        if code != SystemHook.HC_ACTION:
+            return
+        data = ctypes.cast(lpdata, self._LPMSLLHOOKSTRUCT).contents
+        injected = (
+            data.flags
+            & (self._MSLLHOOKSTRUCT.LLMHF_INJECTED
+               | self._MSLLHOOKSTRUCT.LLMHF_LOWER_IL_INJECTED)
+            != 0
+        )
+        if injected and data.dwExtraInfo == TIER2_CLICK_EXTRA_INFO:
+            injected = False
+        if self._event_filter(msg, data) is False:
+            return
+        if msg == self.WM_MOUSEMOVE:
+            self.on_move(data.pt.x, data.pt.y, injected)
+        elif msg in self.CLICK_BUTTONS:
+            button, pressed = self.CLICK_BUTTONS[msg]
+            self.on_click(data.pt.x, data.pt.y, button, pressed, injected)
+        elif msg in self.X_BUTTONS:
+            button, pressed = self.X_BUTTONS[msg][data.mouseData >> 16]
+            self.on_click(data.pt.x, data.pt.y, button, pressed, injected)
+        elif msg in self.SCROLL_BUTTONS:
+            from pynput.mouse._win32 import WHEEL_DELTA
+            mx, my = self.SCROLL_BUTTONS[msg]
+            dd = wintypes.SHORT(data.mouseData >> 16).value // WHEEL_DELTA
+            self.on_scroll(data.pt.x, data.pt.y, dd * mx, dd * my, injected)
+
+
 # ----------------------------------------------------------------------------
 # Recorder
 # ----------------------------------------------------------------------------
@@ -2603,6 +3262,21 @@ class Recorder:
         self.proc = None
         self.target_hwnds = set()    # top-level window handles owned by the target
         self._popup_hwnds = set()    # windows discovered by watcher (always treated as popups)
+        # 2026-09-02 (Medflow <select> 실측): "지금 열려 있다고 간주하는 드롭다운
+        # 목록 창"의 hwnd. MSHTML <select>의 여는 클릭은 콤보를 맞히지만, 목록
+        # 창이 히트테스트보다 먼저 떠 버리면 그 목록의 ListItem으로 잡힌다 —
+        # 그것도 하필 "직전에 선택돼 있던 값"으로(브라우저가 선택 항목을 커서
+        # 밑에 오도록 목록을 정렬해 연다). 실측 그대로:
+        #     #11 TC2 선택   -> #14가 잡은 이름 = 'TC2'
+        #     #13 Retina 선택 -> #16이 잡은 이름 = 'Retina'
+        # 그 결과 여는 클릭이 통째로 사라져 재생이 목록을 열지 못하고
+        # 'target not found'로 끝난다(2026-09-02 재생 로그 STEP 14~17).
+        # 타이밍으로는 못 가른다 — 누른 시점의 WindowFromPoint(top_win)는 같은
+        # 녹화 안에서 여는 클릭과 고르는 클릭 양쪽 모두에서 목록 창을 가리키기도
+        # 하고 메인 창을 가리키기도 했다(실측, agent.log 10:48:38~41). 구조로
+        # 가른다: 목록 창 하나는 선택 하나를 받고 닫히므로, "아직 열린 것으로
+        # 아는 목록이 없는데 ListItem이 잡혔다" = 이 클릭이 그 목록을 열었다.
+        self._open_dropdown_hwnd = None
         # 2026-08-08: 가장 최근에 클릭 처리된 요소 — _watch_windows()가 새
         # Menu 팝업을 발견해 큐에 넣는 "popup_check" 이벤트가 이걸 트리거로
         # 재사용한다 (controlType/패턴 지원 여부와 무관하게 동작하는 팝업
@@ -2678,13 +3352,15 @@ class Recorder:
         self._last_emitted_hwnd_hex = ""
 
     # ---------------- control ----------------
-    def start(self, app_name, exe_path, platform):
+    def start(self, app_name, exe_path, platform, exe_args=None):
         if self.recording:
             return False, "Already recording"
-        self.session = {"appName": app_name, "exePath": exe_path, "platform": platform}
+        exe_args = exe_args or []
+        self.session = {"appName": app_name, "exePath": exe_path, "platform": platform, "exeArgs": exe_args}
         self.event_count = 0
         self.target_hwnds = set()
         self._popup_hwnds = set()
+        self._open_dropdown_hwnd = None
         self._pending_settle = set()
         self._settled_web_hosts = set()
         self._first_titles = {}
@@ -2697,20 +3373,35 @@ class Recorder:
         # diff to find the new window(s) the target opens (locale-independent).
         self._pre_hwnds = visible_toplevel_windows()
 
-        # Launch the target application. A UWP AUMID ("PackageFamilyName!AppId")
-        # must be activated through the shell AppsFolder — launching the inner
-        # WindowsApps exe directly is ACL-blocked, version-pinned, and skips UWP
-        # activation. explorer shell:AppsFolder works even when not elevated.
-        try:
-            if is_aumid(exe_path):
-                self.proc = subprocess.Popen(
-                    ["explorer.exe", f"shell:AppsFolder\\{exe_path}"])
-                log(f"Launched UWP {exe_path} via shell:AppsFolder")
-            else:
-                self.proc = subprocess.Popen([exe_path])
-                log(f"Launched {exe_path} (pid={self.proc.pid})")
-        except Exception as e:
-            return False, f"Failed to launch '{exe_path}': {e}"
+        # 2026-08-17: 이미 이 exe에 속한 창이 떠 있으면(예: 사용자가 직접
+        # HeidiSQL을 켜서 세션까지 연결해둔 상태) 새로 안 띄운다 — 새로
+        # 띄우면 다중 인스턴스 허용 앱에서 완전히 새(로그인 화면부터 시작)
+        # 인스턴스가 기록 대상이 돼버려 기존 세션은 영원히 기록 못 함.
+        # UWP(AUMID)는 대상에서 제외 — 호스트가 explorer.exe라 이 판단이
+        # 안 통한다. self.proc를 None으로 두면 _discover_target_windows()의
+        # launch_pid 매칭이 자연히 빠지고, 그 함수가 이미 갖고 있는 경로
+        # 기반 매칭(이 함수 바로 위 주석 참고)이 기존 창을 정상적으로 찾는다.
+        attach_hwnd = None if is_aumid(exe_path) else _find_existing_window_for_exe(exe_path, app_name)
+
+        if attach_hwnd:
+            self.proc = None
+            log(f"Attaching to already-running window hwnd={attach_hwnd} "
+                f"(exePath={exe_path!r}) — no new process launched")
+        else:
+            # Launch the target application. A UWP AUMID ("PackageFamilyName!AppId")
+            # must be activated through the shell AppsFolder — launching the inner
+            # WindowsApps exe directly is ACL-blocked, version-pinned, and skips UWP
+            # activation. explorer shell:AppsFolder works even when not elevated.
+            try:
+                if is_aumid(exe_path):
+                    self.proc = subprocess.Popen(
+                        ["explorer.exe", f"shell:AppsFolder\\{exe_path}"])
+                    log(f"Launched UWP {exe_path} via shell:AppsFolder")
+                else:
+                    self.proc = subprocess.Popen([exe_path] + exe_args)
+                    log(f"Launched {exe_path} {exe_args} (pid={self.proc.pid})")
+            except Exception as e:
+                return False, f"Failed to launch '{exe_path}': {e}"
 
         self._stop_flag.clear()
         self.recording = True
@@ -2722,7 +3413,7 @@ class Recorder:
 
         # Hooks: callbacks ONLY enqueue raw data and return immediately,
         # so the OS input pipeline is never blocked.
-        self._mouse_listener = mouse.Listener(on_click=self._on_click,
+        self._mouse_listener = _CaptureMouseListener(on_click=self._on_click,
                                               on_scroll=self._on_scroll)
         self._kb_listener = keyboard.Listener(on_press=self._on_key)
         self._mouse_listener.start()
@@ -2774,12 +3465,29 @@ class Recorder:
         # 같은 순수 win32 호출(COM/UIA 아님)이라 여기서 같이 읽어 큐에 실어
         # 보낸다 — describe()가 나중에 다시 조회하는 대신 이 값을 쓴다.
         fg_hwnd = ctypes.windll.user32.GetForegroundWindow()
+        # 2026-09-01 (Medflow Detail CLOSE 실측): 이 좌표를 소유한 창도 여기서
+        # 같이 읽는다. 같은 이유다 — 워커가 나중에 다시 물으면 답이 달라진다.
+        # 창을 스스로 닫는 버튼(CLOSE/취소/닫기)을 누르면, 워커가 처리할 때쯤
+        # 그 픽셀의 주인은 이미 그 밑에 있던 바탕 화면이나 다른 앱이다:
+        #   [trace] pt=(1545,320) raw=[name='바탕 화면' rect=(0,0,3840,1080)
+        #           hwnd=65864] targets=[262304, 1769560]
+        #   [skip] click _inspect() already identified the owning window
+        #          hwnd=65858 as untracked
+        # 클릭 지점은 Detail 창(1769560, rect=(192,192,1632,932)) 안이었는데도
+        # 이벤트가 통째로 사라졌다(gap=0.6054s). _emit()의 드롭 게이트가 쓰는
+        # 두 신호(_inspect()의 판정, top_window_at())가 **둘 다 사후 조회**라
+        # 캡처 시점의 진실을 아무도 갖고 있지 않은 게 원인이다.
+        # top_window_at()은 WindowFromPoint+GetAncestor뿐인 순수 win32라
+        # (GetCursorPos/GetForegroundWindow와 같은 부류) 콜백에서 호출해도
+        # 두-스레드 규칙에 걸리지 않는다.
+        win_hwnd = top_window_at(cursor_pt.x, cursor_pt.y)
         # Both press ("click") and release ("release") are enqueued — still
         # enqueue-only, no UIA/COM here. The worker pairs them to tell a plain
         # click apart from a press-hold-move-release drag (text selection).
         self.raw_queue.put({"kind": "click" if pressed else "release", "x": x, "y": y,
                             "cursor_x": cursor_pt.x, "cursor_y": cursor_pt.y,
                             "fg_hwnd_at_capture": fg_hwnd,
+                            "win_hwnd_at_capture": win_hwnd,
                             "button": button.name, "ts": time.time()})
 
     def _on_scroll(self, x, y, dx, dy, injected=False):
@@ -2874,11 +3582,31 @@ class Recorder:
 
     def _app_install_dir(self):
         """Directory the launched exe lives in, lowercased, cached — or ''
-        for UWP/AUMID launches (no meaningful filesystem directory)."""
+        for UWP/AUMID launches (no meaningful filesystem directory) OR when
+        the exe lives in a directory the whole OS shares (System32,
+        SysWOW64, WindowsApps — see SHARED_SYSTEM_DIRS).
+
+        2026-08-31 (Medflow HTA recording, live repro): the directory-match
+        heuristic in _owned_by_app() was built for apps with their own
+        dedicated install dir (7-Zip's 7zFM.exe + 7zG.exe). mshta.exe lives
+        in C:\\Windows\\System32 — a directory every OS component shares —
+        so _watch_windows() adopted a completely unrelated background
+        window (ApplicationFrameHost.exe's "설정"/Settings window, also
+        System32-hosted) as belonging to the Medflow recording session.
+        Returning '' here for shared system dirs disables the dir-match
+        broadening for any exe that hosts arbitrary content out of System32
+        (mshta.exe, cmd.exe, powershell.exe, regedit.exe, mmc.exe, ...).
+        _owned_by_app()'s process-ancestry check covers the legitimate case
+        this used to also serve — a shared-system-dir exe spawning a sibling
+        process of itself (e.g. Medflow's Login->Main handoff via
+        WScript.Shell.Run, a NEW mshta.exe PID that is a child of the
+        tracked one, not a same-PID or same-target-dir match)."""
         if self._app_install_dir_cache is not None:
             return self._app_install_dir_cache
         exe_path = self.session.get("exePath", "")
         d = "" if (not exe_path or is_aumid(exe_path)) else os.path.dirname(exe_path).lower().rstrip("\\/")
+        if d in SHARED_SYSTEM_DIRS:
+            d = ""
         self._app_install_dir_cache = d
         return d
 
@@ -2892,14 +3620,35 @@ class Recorder:
         rejected its window forever, not just during the ~0.5s watcher-poll
         race. Directory match is a generic signal (works for any app that
         ships companion .exe helpers alongside the main one), not a 7-Zip
-        special case."""
+        special case. _app_install_dir() already returns '' for shared
+        system directories (System32 etc.), so this branch is inert there.
+
+        Falls back to process ancestry: is `pid` a descendant (within a few
+        hops, to tolerate an intermediate host like wscript.exe) of a
+        tracked PID? Needed for apps hosted by a shared-system-dir exe that
+        hand off to a sibling process of themselves — e.g. Medflow's HTA
+        Login->Main handoff (`WScript.Shell.Run('mshta.exe ...Main.hta')`
+        from inside the Login mshta.exe, then Login closes itself). Directory
+        match can't safely cover this (mshta.exe lives in System32, shared
+        by unrelated OS windows — 2026-08-31 live repro: a background
+        Windows Settings window got adopted this way) so ancestry is the
+        precise signal instead."""
         if pid in self._target_pids():
             return True
         app_dir = self._app_install_dir()
-        if not app_dir:
-            return False
-        img = image_path_of_pid(pid)
-        return bool(img) and os.path.dirname(img).lower().rstrip("\\/") == app_dir
+        if app_dir:
+            img = image_path_of_pid(pid)
+            if img and os.path.dirname(img).lower().rstrip("\\/") == app_dir:
+                return True
+        target_pids = self._target_pids()
+        ancestor = pid
+        for _ in range(4):
+            ancestor = parent_pid_of(ancestor)
+            if not ancestor:
+                return False
+            if ancestor in target_pids:
+                return True
+        return False
 
     def _settle_web_hosts(self, ins):
         """An embedded-Chromium app is not ready to be recorded the moment its
@@ -3278,7 +4027,9 @@ class Recorder:
             log(f"[diag-click] pynput_pt=({x},{y}) cursor_pt=({cx},{cy}) "
                 f"delta={delta} gap={gap:.4f}s "
                 f"elem_name='{elem.get('name', '')}' elem_rect={elem.get('rect')}")
-            self._pending_press = {"x": cx, "y": cy, "ts": ts, "elem": elem, "com_elem": com_elem}
+            self._pending_press = {"x": cx, "y": cy, "ts": ts, "elem": elem,
+                                   "com_elem": com_elem,
+                                   "win": item.get("win_hwnd_at_capture") or 0}
             return
 
         if kind == "release":
@@ -3890,9 +4641,35 @@ class Recorder:
                     if elem_hwnd and self._owned_by_app(pid_of_hwnd(elem_hwnd)):
                         self.target_hwnds.add(elem_hwnd)
                         self._popup_hwnds.add(elem_hwnd)
+                        # 2026-08-31 (Medflow HTA 실측 — 이 self-heal이 목적을
+                        # 달성하지 못하고 있었다): elem_hwnd는 요소가 실제로
+                        # 걸려 있는 hwnd이고, 그건 최상위 창이 아닐 수 있다.
+                        # mshta는 최상위 'HTML Application Host Window Class'
+                        # 아래에 'Internet Explorer_Server' 자식을 두므로 둘이
+                        # 항상 다르다. 그런데 _emit()의 드롭 게이트는
+                        # elem["rootHwnd"](= GetAncestor(GA_ROOT), 즉 최상위)로
+                        # 검사한다 — 그래서 여기서 자식만 등록하면 게이트는
+                        # 여전히 "untracked"로 보고 이벤트를 통째로 버렸다.
+                        # 실측 로그(3건 모두 동일 패턴):
+                        #   self-heal hwnd=4000544 accepted
+                        #   [skip] click ... hwnd=3541796 as untracked
+                        #   [watcher] added hwnd=3541796 'Medflow Settings'
+                        # — 왓처가 0.5초 뒤 결국 추가하지만 그땐 이미 늦었다.
+                        # 이 self-heal의 존재 이유가 바로 그 0.5초를 앞지르는
+                        # 것이므로, 게이트가 검사하는 값(최상위 조상)까지 같이
+                        # 등록해야 실제로 앞지르게 된다. 일반 Win32 앱은 보통
+                        # elem_hwnd 자체가 최상위라 root == elem_hwnd이고,
+                        # set.add()가 중복을 흡수하므로 동작이 바뀌지 않는다.
+                        root_hwnd = (ctypes.windll.user32.GetAncestor(elem_hwnd, GA_ROOT)
+                                     or elem_hwnd)
+                        if root_hwnd != elem_hwnd:
+                            self.target_hwnds.add(root_hwnd)
+                            self._popup_hwnds.add(root_hwnd)
                         log(f"[inspect] self-heal hwnd={elem_hwnd} "
                             f"(name={info.get('name')!r}) — accepted "
-                            "(pre-empts 0.5s watcher poll; PID or same install dir)")
+                            "(pre-empts 0.5s watcher poll; PID or same install dir)"
+                            + (f" [+ top-level root={root_hwnd}]"
+                               if root_hwnd != elem_hwnd else ""))
                         # 2026-08-12 (FileZilla STEP2/STEP3 불일치 실측): 이
                         # 값은 UIAInspector(ins)에서 초기화/기록되는데
                         # (286/1883행), 여기서 self(=Recorder)를 읽고 있었다
@@ -3924,6 +4701,35 @@ class Recorder:
             # Treat exactly like an unresolvable light-dismiss hit: drop the
             # selector entirely rather than emit an anchor path that would
             # just re-target the same wrong node through a different XPath.
+            # 2026-09-01 (Medflow CANCEL/CLOSE 실측): rect가 튜플이 아니면
+            # describe()가 BoundingRectangle 읽기 실패 사유를 "ERR:..."
+            # 문자열로 저장한 것이다 — 요소의 provider가 이미 사라졌다는 뜻.
+            # 아래 블록은 isinstance(tuple) 가드가 걸려 있어서 이 경우 통째로
+            # 건너뛰고, 그러면 light_dismiss가 켜지지 않아 죽은-요소 복구
+            # (`if light_dismiss and elem is not None:`)가 **실행조차 되지
+            # 않았다** — _raw에 정답이 온전히 들어 있는데도.
+            #
+            # 같은 녹화 로그 안에 두 결과가 나란히 찍혔다:
+            #   닫기  rect=(0, 0, 0, 0)   -> 튜플이라 가드 통과 -> 복구 성공
+            #         "#1 click name='닫기' [name]"
+            #   CLOSE rect="ERR:COMError:(-2147220991, ...)" -> 가드 탈락
+            #         raw=[name='CLOSE' ct='Button' id='closeBtn'
+            #              rect=(1491,675,1603,709)]  <- 살아있을 때 정확히 읽음
+            #         "#14 click id='' name='' [coordinate]"   <- 그런데 버려짐
+            # 같은 죽음인데 provider가 예외를 던졌느냐 0을 돌려줬느냐는 자의적
+            # 차이로 갈렸다. CANCEL(cancelBtn)도 동일하게 유실됐다.
+            #
+            # 복구 로직 자체는 이미 이 경우를 처리할 줄 안다 — 그쪽 _dead는
+            # `(not isinstance(_r, tuple)) or _r == (0,0,0,0)`으로 문자열도
+            # 죽음으로 친다. 여기서 문을 열어주기만 하면 된다.
+            if (not light_dismiss and elem is not None
+                    and not isinstance(info.get("rect"), tuple)):
+                log(f"[inspect] pt=({x},{y}) adopted element has an unreadable "
+                    f"rect={info.get('rect')!r} — its UIA provider went away "
+                    "between element_at()'s read and this one. Treating it as "
+                    "dead so the dead-element recovery below can use the "
+                    "earliest observation (same handling as a (0,0,0,0) rect).")
+                light_dismiss = True
             if (not light_dismiss and elem is not None
                     and isinstance(info.get("rect"), tuple)):
                 if not point_in_rect(info["rect"], x, y):
@@ -3996,6 +4802,25 @@ class Recorder:
                     # moment the list can be measured — the click that picks
                     # an item closes it first. See snapshot_open_dropdown()/
                     # snapshot_open_menu().
+                    #
+                    # 2026-08-17: elem/info here can be a combo's own
+                    # "currently selected value" child instead of the combo
+                    # (see _enclosing_combo() docstring) — _is_combo_like()
+                    # then reads False and snapshot_open_dropdown() silently
+                    # no-ops, losing the item cache for every re-open of an
+                    # already-populated combo. Redirect to the enclosing
+                    # ComboBox first, exactly like the "outside rect" branch
+                    # above already redirects to `inner` for combo_hit.
+                    if not ins._is_combo_like(info):
+                        enclosing = ins._enclosing_combo(elem, x, y)
+                        if enclosing is not None:
+                            log(f"[inspect] pt=({x},{y}) landed on "
+                                f"{info.get('controlType')!r} name="
+                                f"{info.get('name')!r} inside an enclosing "
+                                "ComboBox — redirecting so the open-dropdown "
+                                "snapshot can engage")
+                            elem = enclosing
+                            info = ins.describe(elem, fg_hwnd_hint=fg_hwnd_hint, uia=ins._uia)
                     ins.snapshot_open_dropdown(elem, info)
                     ins.snapshot_open_menu(elem, info, extra_pids=self._target_pids())
             # The adopted element was DEAD by the time describe() read it —
@@ -4064,9 +4889,80 @@ class Recorder:
                     #  (4) element_at()이 검색한 root_hwnd가 추적 중인 창일 것 —
                     #      이게 Chrome 'Stop' 류의 자기-오염을 막는다(그 케이스는
                     #      root_hwnd가 target에 없다)
-                    _raw = (ins._last_trace or {}).get("raw_info") or {}
                     _picked = str((ins._last_trace or {}).get("picked_by") or "")
                     _rroot = (ins._last_trace or {}).get("root_hwnd") or 0
+
+                    # 2026-08-17 (VS "새 프로젝트 만들기" 프로젝트 형식 필터 재오픈
+                    # 실측, click #10): 위 두 조기-반환 분기 모두 _is_combo_like()를
+                    # 전혀 거치지 않아, 콤보의 "현재 선택값 표시" 자식이 클릭 직후
+                    # 죽어버린 경우(이 if _dead 블록 전체의 전제조건) _enclosing_combo()
+                    # 리다이렉트(스냅샷 분기, 위 "click landed ON the control" 참고)가
+                    # 개입할 기회 자체가 없다 — 그 결과 raw [name] 셀렉터가 그대로
+                    # 나가고, 실제로 재생이 깨지는 게 확인됐다: "[osScopedInvoke]
+                    # failed: target not found" (모두 지우기(_C)) /
+                    # "click-not-found://Text[@ClassName=\"TextBlock\" and
+                    # @Name=\"모든 프로젝트 형식(_T)\"]". elem 자체는 이미 죽어서
+                    # elem.CurrentBoundingRectangle을 다시 읽을 수 없으므로,
+                    # _enclosing_combo()가 아니라 추적 중인 창 hwnd(_rroot)에서 얻은
+                    # ElementFromHandle을 루트로 삼아 같은 지오메트리 검색
+                    # (_enclosing_combo_in_root)을 돌린다. 콤보를 찾으면
+                    # open_dropdown_item_at()에 그대로 넘겨 이미 검증된 live-scan/
+                    # 캐시-매칭 로직을 재사용한다 — 그 함수는 combo elem만 있으면
+                    # 되고 원래 죽은 elem을 요구하지 않는다.
+                    def _dead_combo_redirect(cand_info, cand_rect):
+                        if ins._is_combo_like(cand_info):
+                            return None
+                        try:
+                            combo_root = ins._uia.ElementFromHandle(_rroot) if _rroot else None
+                        except Exception:
+                            combo_root = None
+                        if combo_root is None:
+                            return None
+                        enclosing = ins._enclosing_combo_in_root(combo_root, cand_rect, x, y)
+                        if enclosing is None:
+                            return None
+                        combo_hit = ins.open_dropdown_item_at(enclosing, x, y)
+                        if combo_hit is None:
+                            return None
+                        inner, idx, total, item_name = combo_hit
+                        resolved = ins.describe(inner, fg_hwnd_hint=fg_hwnd_hint, uia=ins._uia)
+                        resolved["comboItemIndex"] = idx
+                        resolved["comboItemCount"] = total
+                        resolved["comboItemName"] = item_name
+                        resolved["expandCollapse"] = True
+                        resolved["rootHwnd"] = _rroot
+                        log(f"[inspect] adopted element at ({x},{y}) was a dead "
+                            "combo value-display child — redirected to the "
+                            f"enclosing ComboBox, item {idx + 1}/{total} "
+                            f"(name={item_name!r}) instead of a raw [name] selector")
+                        return resolved
+
+                    # 2026-08-14 (VS "리포지토리 복제" 실측, STEP 9/13): raw_info와
+                    # 별도로, smallest_element_at()이 채택한 결과 전용의 "아직
+                    # 살아있을 때" 스냅샷(agent.py의 smallest_element_at 호출부
+                    # 참고) — raw_info를 대신 쓰면 다른(더 엉성한raw hit) 객체를
+                    # 복구하게 되므로 반드시 그 전용 스냅샷을 써야 한다. 같은
+                    # 4가지 안전조건을 그대로 요구.
+                    _smallest = (ins._last_trace or {}).get("smallest_info") or {}
+                    _srect = _smallest.get("rect")
+                    if (_picked == "smallest_element_at"
+                            and isinstance(_srect, tuple)
+                            and point_in_rect(_srect, x, y)
+                            and (_smallest.get("name") or _smallest.get("automationId"))
+                            and _rroot in self.target_hwnds):
+                        log(f"[inspect] adopted element at ({x},{y}) is dead "
+                            f"(rect={_r!r}) but smallest_element_at()'s own FIRST "
+                            f"read caught it alive: name={_smallest.get('name')!r} "
+                            f"id={_smallest.get('automationId')!r} rect={_srect} — "
+                            "using that instead of dropping the step.")
+                        _combo_redirect = _dead_combo_redirect(_smallest, _srect)
+                        if _combo_redirect is not None:
+                            return _combo_redirect
+                        _smallest["locatorFallback"] = (
+                            "coordinate" if _smallest.get("locatorStrategy") == "coordinate" else "")
+                        _smallest["rootHwnd"] = _rroot
+                        return _smallest
+                    _raw = (ins._last_trace or {}).get("raw_info") or {}
                     _rrect = _raw.get("rect")
                     if (_picked.startswith("raw-")
                             and isinstance(_rrect, tuple)
@@ -4081,6 +4977,9 @@ class Recorder:
                             "belongs to a tracked window, so the earliest "
                             "observation identifies it. Using that instead of "
                             "dropping the step.")
+                        _combo_redirect = _dead_combo_redirect(_raw, _rrect)
+                        if _combo_redirect is not None:
+                            return _combo_redirect
                         # describe()는 locatorFallback을 안 채운다 — 이 함수
                         # 말미가 채우는데 여기서 조기 반환하므로 직접 넣는다
                         # (정상 캡처와 같은 모양을 유지).
@@ -4291,9 +5190,11 @@ class Recorder:
                 and not info.get("className")
                 and info_ct in ("ListItem", "TreeItem")
             )
-            if (not light_dismiss and elem is not None
-                    and ((not info.get("automationId") and not info.get("name"))
-                         or volatile_named_item)):
+            needs_ancestor_for_nameless = (
+                not light_dismiss and elem is not None
+                and ((not info.get("automationId") and not info.get("name"))
+                     or volatile_named_item))
+            if needs_ancestor_for_nameless:
                 anc = ins._ancestor_sibling_selector(
                     elem,
                     cached_rect=info.get("rect"),
@@ -4330,6 +5231,20 @@ class Recorder:
                         log("[inspect] ancestor+index selector marked "
                             "ambiguousCapture — codegen will emit an explicit "
                             "FAIL step instead of replaying it")
+            # 2026-08-16: an `elif` branch used to run here that computed the
+            # ancestor+sibling-index selector as INSURANCE for elements that
+            # already had a usable automationId/Name, so codegen could fall
+            # back to it if it later found that id+Name duplicated within the
+            # window (HeidiSQL's four scroll-button groups, added 2026-08-13).
+            # Removed: it ran on EVERY named click and, when it failed to
+            # match, burned its whole retry budget doing so — measured ~1.5s
+            # per click on Visual Studio's "뒤로(_B)", which is capture
+            # latency paid by every app to serve one control in one app. The
+            # gate above (id AND name both missing, or a volatile
+            # ListItem/TreeItem) still computes it where it is load-bearing.
+            # Consequence accepted by the user: server.js's duplicateNamedIds
+            # routing no longer receives these fields, so HeidiSQL's
+            # duplicate-id scroll buttons revert to matching the first hit.
             # ExpandCollapsePattern 태깅 — 2026-07-13 진단(poc/diag_expandcollapse.py)으로
             # ComboBox/메뉴바 MenuItem은 일반 클릭만으로 "펼치기"가 재현 안
             # 됨을 실증했지만, **ExpandCollapsePattern "지원 여부"만으로
@@ -4343,11 +5258,90 @@ class Recorder:
             # 위 glyph 폴백(pt가 항목 자체 rect 밖이라 행 단위로 재해석된 경우)
             # 에서만 태깅 — 그 외 컨트롤 타입은 지원 여부와 무관하게 절대 태깅
             # 안 함(일반 클릭이 이미 정상 동작).
+            # ── MSHTML <select>의 "여는 클릭" 재귀속 (2026-09-02) ──────────
+            # 배경/실측은 __init__의 _open_dropdown_hwnd 주석 참고. 규칙은 하나:
+            # 아직 열린 것으로 아는 목록이 없는데 클릭이 팝업 창의 ListItem에
+            # 떨어졌다면, 그 클릭이 바로 그 목록을 연 클릭이다 — 진짜 대상은
+            # 목록 밑에 깔린 콤보다. 목록 창 하나는 선택 하나를 받고 닫히므로
+            # "열려 있음"은 다음 클릭 하나까지만 유효하다.
+            #
+            # 이 재귀속이 없으면 여는 클릭이 통째로 사라지고, server.js의
+            # mergeExpandCollapseClicks()가 짝지을 트리거를 못 찾아 항목 클릭이
+            # 맨몸으로 남는다. 재생은 목록을 열지 못한 채 항목을 찾으므로
+            # 'target not found'로 끝난다(실측: 2026-09-02 STEP 14~17).
+            #
+            # 좁게 건다 — 소유 창에서 그 좌표를 다시 풀었을 때 나오는 것이
+            # 실제로 ExpandCollapse 가능한 콤보일 때만 바꾼다. 아니면 원래
+            # 판정을 그대로 둔다(메뉴 팝업/일반 리스트는 건드리지 않는다).
+            reattributed_combo = False
+            if (not light_dismiss and elem is not None
+                    and info.get("controlType") == "ListItem"):
+                item_root = info.get("rootHwnd") or 0
+                expecting = self._open_dropdown_hwnd
+                # expecting == -1: 직전 클릭이 콤보를 정확히 맞혔다 — 목록이
+                # 열려 있는 건 아는데 그 창 hwnd만 모른다. 그 상태에서 오는
+                # 첫 ListItem은 언제나 "이미 열린 목록에서의 선택"이다.
+                already_open = (expecting == -1 or expecting == item_root)
+                if item_root and not already_open:
+                    combo = ins.combo_under_dropdown(item_root, x, y,
+                                                     self.target_hwnds)
+                    if combo is not None:
+                        combo_info = ins.describe(combo, fg_hwnd_hint=fg_hwnd_hint,
+                                                  uia=ins._uia)
+                        log(f"[inspect] pt=({x},{y}) hit ListItem "
+                            f"name={info.get('name')!r} in popup hwnd={item_root}, "
+                            "but no dropdown was open — this click OPENED it. "
+                            f"Re-attributing to the combo underneath: "
+                            f"id={combo_info.get('automationId')!r} "
+                            f"name={combo_info.get('name')!r}. (The captured item "
+                            "name is the previously-selected value, which is what "
+                            "a <select> renders under the cursor when it opens.)")
+                        elem, info = combo, combo_info
+                        # combo_under_dropdown() only ever returns an element
+                        # that advertises ExpandCollapse — that is its filter —
+                        # so the tag is already earned. It has to be set here
+                        # rather than left to EXPAND_COLLAPSE_ALWAYS below,
+                        # which keys on controlType and lists only
+                        # ComboBox/MenuItem: an OPEN <select> is republished as
+                        # 'Text', so it would miss exactly this case. Measured
+                        # 2026-09-02 — the facility open click came out as a
+                        # plain click while the dept one (still a ComboBox at
+                        # hit-test time) became expandCollapse, from the same
+                        # recording:
+                        #   6:click           -> osScopedInvoke(facilitySelect)
+                        #   8:expandCollapse  -> osExpandCollapse(deptSelect)
+                        # Without the tag, mergeExpandCollapseClicks() has no
+                        # trigger to pair the item click with.
+                        reattributed_combo = True
+                    else:
+                        # 2026-09-02: 이게 없어서 첫 라이브 실행의 실패가 통째로
+                        # 조용했다 — 재귀속이 안 걸린 건 로그에 아무 흔적도 남기지
+                        # 않았고, 녹화 결과(맨몸 ListItem)만 보고는 "분기가 안
+                        # 돌았는지 콤보를 못 찾았는지" 구분할 수 없었다.
+                        log(f"[inspect] pt=({x},{y}) hit ListItem "
+                            f"name={info.get('name')!r} in popup hwnd={item_root} "
+                            "with no dropdown known open, but no ExpandCollapse "
+                            "ComboBox contains that point in any same-PID window "
+                            "— leaving the hit test's verdict alone. If this WAS "
+                            "a combo-open click, replay will have no step that "
+                            "opens the list and the item click will fail.")
+                    self._open_dropdown_hwnd = item_root
+                else:
+                    # 이미 열려 있던 목록 안에서의 진짜 선택 — 목록은 닫힌다.
+                    self._open_dropdown_hwnd = None
+            elif (not light_dismiss and elem is not None
+                    and info.get("controlType") == "ComboBox"):
+                # 콤보를 정확히 맞힌 클릭(목록이 히트테스트보다 늦게 뜬 경우).
+                # 뒤따르는 ListItem 클릭은 "이미 열린 목록에서의 선택"이므로,
+                # 그 창 hwnd를 아직 모르더라도 재귀속이 걸리지 않게 표시해 둔다.
+                self._open_dropdown_hwnd = -1
+
             EXPAND_COLLAPSE_ALWAYS = ("ComboBox", "MenuItem")
             ct = info.get("controlType")
             wants_expand_collapse = (
                 ct in EXPAND_COLLAPSE_ALWAYS
                 or (ct == "TreeItem" and treeitem_glyph_fallback)
+                or reattributed_combo
             )
             if (not light_dismiss and elem is not None and wants_expand_collapse
                     and ins.has_expand_collapse(elem)):
@@ -4411,6 +5405,9 @@ class Recorder:
         flag — never worse than before this feature existed)."""
         cx, cy, ts, elem = press["x"], press["y"], press["ts"], press["elem"]
         com_elem = press.get("com_elem")
+        # Window that owned this point when the button went DOWN — see
+        # _on_click(). The only pre-navigation observation of ownership.
+        _cw = press.get("win") or 0
         self._last_click_xy = (cx, cy)
 
         ll = self._last_left_click
@@ -4425,8 +5422,8 @@ class Recorder:
             # doubleClick으로 확정됐으니 검증 없이 그대로 흘려보낸다. 물리
             # 더블클릭은 실제 동작을 일으키므로 플래그가 필요 없다.
             self._flush_pending_activation(verify=False)
-            self._emit("click", elem, x=cx, y=cy, ts=ts)
-            self._emit("doubleClick", elem, x=cx, y=cy, ts=ts)
+            self._emit("click", elem, x=cx, y=cy, ts=ts, capture_win=_cw)
+            self._emit("doubleClick", elem, x=cx, y=cy, ts=ts, capture_win=_cw)
             self._last_left_click = None  # consume; avoid chaining triples
             return
         # 페어링되지 않은(적어도 지금까지는) 단독 클릭. 이름 없는(또는
@@ -4448,6 +5445,7 @@ class Recorder:
                 self._flush_pending_activation(verify=False)
             self._pending_activation = {
                 "elem": elem, "com_elem": com_elem, "x": cx, "y": cy, "ts": ts,
+                "win": _cw,
                 "due": time.time() + ACTIVATION_CHECK_DELAY,
                 "snapshot": self._activation_snapshot(ins, com_elem),
             }
@@ -4456,7 +5454,7 @@ class Recorder:
             # presses like "9999" -> num9Button x4). A genuine fast
             # double-click is recognised IN ADDITION, never by
             # merging/dropping the clicks.
-            self._emit("click", elem, x=cx, y=cy, ts=ts)
+            self._emit("click", elem, x=cx, y=cy, ts=ts, capture_win=_cw)
         self._last_left_click = {"x": cx, "y": cy, "ts": ts, "elem": elem, "com_elem": com_elem}
 
     @staticmethod
@@ -4542,6 +5540,7 @@ class Recorder:
                     f"name={pa['elem'].get('name')!r} actually changed the view — "
                     f"tagging activatesOnSingleClick")
         self._emit("click", pa["elem"], x=pa["x"], y=pa["y"], ts=pa["ts"],
+                    capture_win=pa.get("win") or 0,
                     extra={"activatesOnSingleClick": True} if flag else None)
 
     def _flush_pending_click(self, ins=None):
@@ -4705,7 +5704,8 @@ class Recorder:
         except Exception as e:
             log(f"WARN: could not POST session_meta: {e}")
 
-    def _emit(self, action, elem, x=None, y=None, value=None, delta=None, ts=None, end=None, extra=None):
+    def _emit(self, action, elem, x=None, y=None, value=None, delta=None, ts=None,
+              end=None, extra=None, capture_win=0):
         elem = elem or {}
         # Drop events captured before _discover_target_windows() resolved
         # target_hwnds. Mouse/keyboard hooks go live at recording=True, before
@@ -4728,6 +5728,59 @@ class Recorder:
         if action != "type" and x is not None:
             top = top_window_at(x, y)
             contradiction = False
+
+            # 2026-08-17 (VS 실측 — Alt+Tab 도중 크롬에서 한 드래그가 캡처됨):
+            # _inspect()가 이미 이 이벤트의 소유 창을 확인해서(self-heal
+            # PID/install-dir 매칭까지 실패한 뒤) 추적 대상이 아니라고
+            # 판정했다면(elem["rootHwnd"]가 target_hwnds/_popup_hwnds
+            # 어디에도 없음), 그 판정이 여기서 다시 계산하는
+            # top_window_at(x, y)보다 신뢰도가 높다. top_window_at()은
+            # _emit() 호출 시점(워커 큐 처리 시점 — press/release 실제
+            # 발생보다 한참 뒤, gap 수백ms~초 단위)에 그 화면 좌표에 "지금"
+            # 뭐가 있는지를 묻는 거라, 그 사이 Alt+Tab 등으로 다른 창이 그
+            # 픽셀을 덮으면 완전히 무관한(하지만 우연히 추적 대상인) 창을
+            # 가리킬 수 있다. 실측: 크롬(hwnd=66722)에서 드래그한 뒤
+            # Alt+Tab으로 VS로 복귀했더니, _inspect()는 정확히 크롬을
+            # "추적 대상 아님"으로 판정하고 셀렉터를 지웠는데(rootHwnd=66722는
+            # 그대로 남음 — describe()가 앞서 채워둔 값, 이름/id만 지워짐),
+            # 뒤늦게 재계산된 top_window_at()이 그 좌표에서 VS 창을 찾아내
+            # 아래 게이트를 그냥 통과시켰다 — VS와 무관한 드래그가 좌표 전용
+            # 이벤트로 그대로 캡처됨. contradiction-confirmed(반대 방향 —
+            # elem은 추적 대상이라는데 top이 부정하는 경우)의 대칭 케이스.
+            # 2026-09-01 (Medflow Detail CLOSE 실측): 위 판정과 top_window_at()은
+            # 둘 다 **사후** 조회다. 자기 창을 닫는 버튼을 누르면 워커가 볼 때쯤
+            # 그 픽셀의 주인이 바뀌어 있어, 우리 앱에서 일어난 진짜 클릭이
+            # "무관한 창"으로 오판돼 통째로 사라진다 — 실측 로그:
+            #   [trace] pt=(1545,320) raw=[name='바탕 화면' hwnd=65864]
+            #           targets=[262304, 1769560]
+            #   [skip] click ... owning window hwnd=65858 as untracked
+            # 클릭 지점은 Detail 창(1769560, rect=(192,192,1632,932)) 안이었다.
+            # capture_win은 버튼이 눌린 그 순간 _on_click()이 읽어둔 소유 창이라
+            # 유일하게 pre-navigation 관측값이다. 그게 추적 대상이면 이 클릭은
+            # 확실히 우리 앱의 것이므로 버리지 않는다. 셀렉터는 이미 _inspect()가
+            # 지웠으므로 코드젠은 이걸 명시적 FAIL 스텝으로 만든다(§3) — 조용히
+            # 사라지는 것보다 언제나 낫다.
+            # Alt+Tab/크롬 오염 케이스(2026-08-17, 아래 원문 주석)는 capture_win도
+            # 추적 대상이 아니라 그대로 걸러진다 — 동작 무변화.
+            capture_win_tracked = bool(capture_win) and (
+                capture_win in self.target_hwnds or capture_win in self._popup_hwnds)
+            root_hwnd_from_inspect = elem.get("rootHwnd")
+            if (root_hwnd_from_inspect
+                    and root_hwnd_from_inspect not in self.target_hwnds
+                    and root_hwnd_from_inspect not in self._popup_hwnds):
+                if capture_win_tracked:
+                    log(f"[keep] {action} _inspect() says the owning window "
+                        f"hwnd={root_hwnd_from_inspect} is untracked, but at "
+                        f"button-down the point belonged to tracked window "
+                        f"hwnd={capture_win} — the click destroyed its own "
+                        "window. Keeping it as an explicit FAIL step instead "
+                        "of dropping the event.")
+                else:
+                    log(f"[skip] {action} _inspect() already identified the "
+                        f"owning window hwnd={root_hwnd_from_inspect} as "
+                        "untracked — trusting that over a freshly re-queried "
+                        f"top_window_at()={top}")
+                    return
 
             # UWP lazy frame adoption: the ApplicationFrameWindow that input
             # actually routes to is owned by ApplicationFrameHost.exe (a
@@ -5059,9 +6112,28 @@ class Recorder:
         elif _el.get('comboItemIndex') is not None:
             _pick = (f" -> combo item #{_el['comboItemIndex']}"
                      f"/{_el.get('comboItemCount')} '{(_el.get('comboItemName') or '')[:40]}'")
+        # 2026-08-14 (사용자 요청 — 한 줄에 정보가 몰려 있어 스캔하기 어려움):
+        # 재생 시 실제로 쓰이는 핵심 필드(automationId/locatorStrategy)만
+        # ANSI 색으로 강조 — 안정적인 셀렉터(automationId 있음)는 초록,
+        # name/좌표 등 더 약한 폴백은 노랑/빨강. rect/pt 같은 진단용 좌표는
+        # 색 없이 그대로 둔다(스캔할 때 필요한 건 "무엇으로 찾을지"이지
+        # 정확한 픽셀이 아님). Windows Terminal/PS 5.1 둘 다 기본적으로
+        # ANSI VT 시퀀스를 처리한다.
+        _aid = _el.get("automationId") or ""
+        _strategy = _el.get("locatorStrategy") or ""
+        if _aid:
+            _id_display = f"{_C_GREEN}id='{_aid}'{_C_RESET}"
+        else:
+            _id_display = f"{_C_DIM}id=''{_C_RESET}"
+        _strategy_color = {
+            "automationId": _C_GREEN,
+            "name": _C_YELLOW,
+        }.get(_strategy, _C_RED if _strategy else _C_DIM)
+        _strategy_display = f"{_strategy_color}[{_strategy or 'none'}]{_C_RESET}"
         log(f"#{self.event_count} {action:11s} "
-            f"id='{_el['automationId']}' "
-            f"name='{_el['name'][:30]}'{_pick}"
+            f"{_id_display} "
+            f"{_C_CYAN}name='{_el['name'][:30]}'{_C_RESET}{_pick} "
+            f"{_strategy_display}"
             f" rect={_el.get('rect')}{pt}"
             + (f" value='{value}'" if value else ""))
         try:
@@ -5074,6 +6146,19 @@ class Recorder:
 # HTTP control server (port 4444)
 # ----------------------------------------------------------------------------
 recorder = Recorder()
+
+
+def _safe_target_hwnds_snapshot():
+    """recorder.target_hwnds is mutated by the worker and watcher threads
+    with no lock (same as every other Recorder field this HTTP handler's
+    thread already reads unsynchronized). A concurrent .add() during
+    iteration can raise; on that rare race, report an empty list rather than
+    500 the whole status endpoint -- a caller polling this can just try
+    again next tick."""
+    try:
+        return sorted(recorder.target_hwnds)
+    except RuntimeError:
+        return []
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -5096,6 +6181,19 @@ class Handler(BaseHTTPRequestHandler):
                 "recording": recorder.recording,
                 "eventCount": recorder.event_count,
                 "isAdmin": bool(ctypes.windll.shell32.IsUserAnAdmin()),
+                # 2026-09-09 (Medflow Tier 2, first login-gated app): sweep's
+                # enum.launch_and_wait() independently rediscovers "the" app
+                # window by title, completely decoupled from what THIS
+                # process is actually tracking as target_hwnds -- and
+                # mshta.exe's launch has a real race that can produce two
+                # near-simultaneous "Medflow Login" windows in different
+                # processes (measured repeatedly, 2026-09-09 agent.log).
+                # When sweep and agent.py pick different windows, every
+                # click sweep performs is genuinely outside every window
+                # this process would ever accept, no matter how long
+                # anything waits. Exposing the actual tracked set lets sweep
+                # use the SAME window instead of gambling on agreement.
+                "targetHwnds": _safe_target_hwnds_snapshot(),
             })
         else:
             self._json(404, {"error": "not found"})
@@ -5112,6 +6210,7 @@ class Handler(BaseHTTPRequestHandler):
                 body.get("appName", "App"),
                 body.get("exePath", ""),
                 body.get("platform", "Windows"),
+                body.get("exeArgs", []),
             )
             self._json(200 if ok else 400, {"ok": ok, "message": msg})
         elif self.path == "/stop":
@@ -5161,9 +6260,11 @@ def _build_marker():
 
 
 def main():
+    _truncate_log()
     _enable_per_monitor_dpi_awareness()
     is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
     log(f"Capture agent listening on http://localhost:{AGENT_PORT}")
+    log(f"log file: {LOG_FILE}")
     log(f"build: agent.py {_build_marker()}")
     log(f"Administrator rights: {'YES' if is_admin else 'NO  <-- element properties will be EMPTY!'}")
     if not is_admin:
