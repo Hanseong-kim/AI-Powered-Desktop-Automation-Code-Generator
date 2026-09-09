@@ -3960,11 +3960,17 @@ async function _appiumPost(path, body, timeoutMs = 20000) {
     return (await r.json()).value;
 }
 
-async function _createSession(app) {
+async function _createSession(app, appArgs) {
     const isHwnd = /^0x[0-9a-f]+$/i.test(app);
     const cap = isHwnd
         ? { platformName: 'Windows', 'appium:automationName': 'Windows', 'appium:appTopLevelWindow': app, 'appium:newCommandTimeout': 60000, 'appium:createSessionTimeout': 15000 }
         : { platformName: 'Windows', 'appium:automationName': 'Windows', 'appium:app': app, 'appium:newCommandTimeout': 60000, 'appium:createSessionTimeout': 15000 };
+    // A host process launches nothing without its document: 'mshta.exe' alone
+    // opens no window at all, so simple mode used to start a session against an
+    // app that was never going to appear. appium-windows-driver takes these as
+    // ONE STRING, not an array (node_modules/appium-windows-driver
+    // build/lib/desired-caps.js: appArguments isString) -- codegen joins them.
+    if (!isHwnd && appArgs) cap['appium:appArguments'] = appArgs;
     const v = await _appiumPost('/session', { capabilities: { alwaysMatch: cap } }, 30000);
     if (!v?.sessionId) throw new Error(\`Appium session failed for "\${app}": \${JSON.stringify(v)}\`);
     return v.sessionId;
@@ -6742,6 +6748,17 @@ ${segBoundary && useSession ? `            console.log('[STEP] switch to window:
   // 찾는" 안전한 패턴을 쓰고 있었는데 이 session-mode 경로만 그 방어가
   // 빠져있었음 — 같은 패턴으로 맞춘다.
   const resolvedLaunchArgs = (Array.isArray(exeArgs) && exeArgs.length) ? exeArgs : newWindowArgsFor(exePath);
+  // Simple mode never had a launch-argument path at all -- it starts the app
+  // through the WinAppDriver `app` capability rather than launchApp(), and the
+  // capability was built from exePath alone. Surfaced 2026-09-08 by the first
+  // sweep of Medflow: a single-window synthetic recording takes the simple
+  // branch, and every generated build opened a bare `mshta.exe` with no
+  // document, so the file being audited could never have run.
+  // Empty for all six golden apps (newWindowArgsFor returns [] for everything
+  // but code.exe), so this cannot move their expected output.
+  const simpleAppArgs = (!useSession && resolvedLaunchArgs.length)
+    ? resolvedLaunchArgs.map(a => (/\s/.test(a) ? `"${a}"` : a)).join(' ')
+    : '';
   const launchCall = (useSession && exePath && launchFrag)
     ? `        await launchApp(${JSON.stringify(exePath)}, ${JSON.stringify(resolvedLaunchArgs)}, ${JSON.stringify(launchFrag)}, ${JSON.stringify(recordedRect)});\n`
     : '';
@@ -6772,7 +6789,7 @@ ${segBoundary && useSession ? `            console.log('[STEP] switch to window:
     console.log(\`[session] Root session \${_rootSid} ready\`);
 ${launchCall}` : `
     await ensureAppium();
-    _appSid = await _createSession(${JSON.stringify(resolveAppCap(exePath))});
+    _appSid = await _createSession(${JSON.stringify(resolveAppCap(exePath))}${simpleAppArgs ? `, ${JSON.stringify(simpleAppArgs)}` : ''});
     console.log(\`[session] app session \${_appSid} ready\`);
     await initAppHwnd(${JSON.stringify(path.basename(exePath || ''))});
     normalizeWindowSimple(${JSON.stringify(recordedRect)});

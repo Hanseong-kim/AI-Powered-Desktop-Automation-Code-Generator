@@ -166,11 +166,17 @@ async function _appiumPost(path, body, timeoutMs = 20000) {
     return (await r.json()).value;
 }
 
-async function _createSession(app) {
+async function _createSession(app, appArgs) {
     const isHwnd = /^0x[0-9a-f]+$/i.test(app);
     const cap = isHwnd
         ? { platformName: 'Windows', 'appium:automationName': 'Windows', 'appium:appTopLevelWindow': app, 'appium:newCommandTimeout': 60000, 'appium:createSessionTimeout': 15000 }
         : { platformName: 'Windows', 'appium:automationName': 'Windows', 'appium:app': app, 'appium:newCommandTimeout': 60000, 'appium:createSessionTimeout': 15000 };
+    // A host process launches nothing without its document: 'mshta.exe' alone
+    // opens no window at all, so simple mode used to start a session against an
+    // app that was never going to appear. appium-windows-driver takes these as
+    // ONE STRING, not an array (node_modules/appium-windows-driver
+    // build/lib/desired-caps.js: appArguments isString) -- codegen joins them.
+    if (!isHwnd && appArgs) cap['appium:appArguments'] = appArgs;
     const v = await _appiumPost('/session', { capabilities: { alwaysMatch: cap } }, 30000);
     if (!v?.sessionId) throw new Error(`Appium session failed for "${app}": ${JSON.stringify(v)}`);
     return v.sessionId;

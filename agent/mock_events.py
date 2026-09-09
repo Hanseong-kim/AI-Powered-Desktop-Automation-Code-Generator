@@ -1754,6 +1754,30 @@ SIMPLE_ROOTHWND_EVENTS = [
                rootHwndHex="137900"),
 ]
 
+# A HOST process is not the app: `mshta.exe`, `javaw.exe`, `python.exe` all
+# launch nothing until they are handed a document. Simple mode starts the app
+# through WinAppDriver's `app` capability rather than launchApp(), and that
+# capability was built from exePath ALONE -- so every single-window recording
+# of such an app generated a build that opened a bare host process and then
+# waited for a window that was never going to appear. Found 2026-09-08 by the
+# first sweep of Medflow (mshta.exe + MedflowLogin.hta); session mode had
+# carried exeArgs since it existed, which is why no golden ever showed it.
+#
+# The document path here deliberately contains a SPACE, because the driver
+# takes appArguments as one command-line STRING, not a list
+# (node_modules/appium-windows-driver build/lib/desired-caps.js), so codegen
+# has to quote it or the app receives two broken half-paths.
+HOST_ARGS_APP = "MockHostProcessArgs"
+HOST_ARGS_EXE = "C:\\Windows\\System32\\mshta.exe"
+HOST_ARGS_DOC = "C:\\tmp\\Some App\\demo.hta"
+HOST_ARGS_EVENTS = [
+    # One window, no rootHwndHex anywhere -> needsSessionSwitching() is false
+    # -> simple mode, which is the branch under test.
+    make_event("click", name="LOGIN", automation_id="loginBtn", class_name="Button",
+               window_title="Demo Login", app_name=HOST_ARGS_APP, x=100, y=100, index=1,
+               winLeft=0, winTop=0, winWidth=800, winHeight=600),
+]
+
 # dialogRects corruption via same-titled trigger+popup merge (2026-07-21,
 # real 7-Zip GUI repro): clicking "추가" (Add) in the MAIN window pops open a
 # small confirmation dialog with an "확인" (OK) button — and that small
@@ -2475,6 +2499,98 @@ def step_wdio_generate_simple_roothwnd():
             "and can never find a button living in a different top-level "
             "window, producing click-not-found",
         )
+
+
+def _simple_session_args(content):
+    """The second argument of simple mode's own _createSession call, decoded.
+
+    Returns (found_call, args_or_None). Skips the two hwnd-scoped
+    `_createSession('0x'+...)` call sites, which are a different code path.
+    """
+    line = next((l for l in content.splitlines()
+                 if "_appSid = await _createSession(" in l and "sibling" not in l),
+                None)
+    if line is None:
+        return False, None
+    strs = re.findall(r'"(?:[^"\\]|\\.)*"', line)
+    if not strs:
+        return False, None
+    return True, (json.loads(strs[1]) if len(strs) > 1 else None)
+
+
+def step_wdio_generate_host_process_args():
+    print("\n[8g] A host process (mshta.exe) needs its document in SIMPLE mode "
+          "too -- the `app` capability alone launches nothing "
+          "(2026-09-08, first Medflow sweep)")
+    request("DELETE", "/api/events")
+    for ev in HOST_ARGS_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": HOST_ARGS_APP,
+        "exePath": HOST_ARGS_EXE,
+        "exeArgs": [HOST_ARGS_DOC],
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (host-process-args) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped host-process-args checks)", False, body.get("message", ""))
+        return
+
+    for f in body.get("files", []):
+        content = f.get("content", "")
+        name = f.get("filename")
+        check(
+            f"  {name} defines _createSession with an appArguments parameter",
+            "async function _createSession(app, appArgs)" in content
+            and "cap['appium:appArguments'] = appArgs" in content,
+            "simple mode has no launchApp(); the document can only reach the "
+            "app through the driver's appArguments capability",
+        )
+        found, args = _simple_session_args(content)
+        check(f"  {name} has a simple-mode _createSession call", found,
+              "expected `_appSid = await _createSession(...)`; if this recording "
+              "stopped taking the simple branch the scenario no longer tests "
+              "what it claims")
+        if not found:
+            continue
+        check(
+            f"  {name} passes the document to it",
+            args is not None and "demo.hta" in args,
+            "generated a bare host process: %r. Before 2026-09-08 this was "
+            "every simple-mode build of an mshta/javaw app -- Appium would "
+            "start the host, no window would ever appear, and the failure read "
+            "as a session timeout rather than a missing argument" % (args,),
+        )
+        check(
+            f"  {name} quotes the document because it contains a space",
+            args is not None and args.startswith('"') and args.endswith('"'),
+            "appArguments is ONE command-line string, so an unquoted "
+            "'C:\\tmp\\Some App\\demo.hta' reaches the app as two arguments "
+            "and it opens neither; got %r" % (args,),
+        )
+
+    # Hermeticity: the SAME recording with no exeArgs must produce no document.
+    # /api/generate falls back to the server's process-global sessionInfo.exeArgs
+    # (server.js:6946) when the field is absent, so a run that forgets it
+    # inherits whatever was last recorded through the UI. That leak is what
+    # stamped Medflow's HTA path into the FileZilla, HeidiSQL and TeamViewer
+    # goldens on 2026-09-08 -- an explicit [] is the only safe way to say "none".
+    status, body = request("POST", "/api/generate", {
+        "appName": HOST_ARGS_APP,
+        "exePath": HOST_ARGS_EXE,
+        "exeArgs": [],
+        "platform": PLATFORM,
+    }, timeout=30)
+    if status == 200:
+        for f in body.get("files", []):
+            _, args = _simple_session_args(f.get("content", ""))
+            check(
+                f"  {f.get('filename')} carries no document when exeArgs is []",
+                not args,
+                "an explicit empty exeArgs must mean NO arguments; got %r. If "
+                "this fails, generate is reading process-global state and every "
+                "gate result depends on what was recorded before it ran" % (args,),
+            )
 
 
 def step_wdio_generate_title_collision_dialogrect():
@@ -4095,6 +4211,7 @@ def step_output_folders_isolated():
         EXPAND_REDUNDANT_APP, COMBO_OPEN_CLOSE_APP, NATIVE_APP, VCL_APP, TRIGGER_EXPAND_APP,
         NAMELESS_ITEM_APP, HWND_TRIGGER_APP, DUP_DROPDOWN_APP, ANIM_APP,
         NESTED_DROPDOWN_APP, SIMPLE_ROOTHWND_APP, TITLE_COLLISION_DIALOGRECT_APP,
+        HOST_ARGS_APP,
         WEB_APP, DBLROW_APP, WINCLICK_APP, VOLATILE_MENUITEM_APP,
         MENU_INDEX_TRIGGER_APP,
         ANCESTOR_XWIN_APP, ANCESTOR_AMBIGUOUS_APP, TYPE_NEWLINE_APP, TYPE_MERGE_APP,
@@ -4140,6 +4257,7 @@ def main():
     step_wdio_generate_anim_settle()
     step_wdio_generate_nested_dropdown()
     step_wdio_generate_simple_roothwnd()
+    step_wdio_generate_host_process_args()
     step_wdio_generate_title_collision_dialogrect()
     step_wdio_generate_session()
     step_wdio_generate_window_collision()
