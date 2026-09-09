@@ -24,6 +24,7 @@ import json
 import os
 import re
 import sys
+import time
 
 SWEEP_DIR = os.path.dirname(os.path.abspath(__file__))
 AGENT_DIR = os.path.dirname(SWEEP_DIR)
@@ -173,6 +174,11 @@ def load_manifest():
             "denyNames": o.get("denyNames", []),
             "allowNames": o.get("allowNames", []),
             "enabled": o.get("enabled", True),
+            # {screenName: {"titleHint": ..., "prefix": [...]}} -- apps that
+            # gate most of their controls behind a login have no way to reach
+            # those screens after Tier 2's kill_app()+relaunch otherwise. See
+            # run_prefix() below.
+            "screens": o.get("screens", {}),
         })
     return out
 
@@ -203,6 +209,105 @@ def deny_regex(entry):
     return _Rx()
 
 
+# ───────────────────────────────────────────────────────────── login prefix
+# Medflow's Main (56 controls) and Settings (8 controls) screens are only
+# reachable after logging in, and tier2_live.py kills and relaunches the app
+# for every single control it tests (deliberately -- so no click inherits the
+# previous one's state, see that module's docstring). Without this, every
+# relaunch lands back on the Login screen and there is no way to reach the
+# other 64 controls. This is the "설계 변경" identified in
+# project_medflow_coverage_plan: a fixed sequence of navigation actions,
+# defined per screen in sweep/manifest.json's "screens" field, replayed
+# before the harness goes near the control actually under test.
+#
+# Deliberately NOT physical SendInput + agent.py capture. Only the one click
+# that is the actual subject of a Tier 2 run needs to go through the real
+# capture path (CLAUDE.md's whole reason for Tier 2 existing); these are
+# setup steps to reach a screen, not something replay ever has to reproduce
+# from a recording, so a direct COM UIA call (same primitives server.js's
+# osScopedInvoke.py already uses at replay time: GetCurrentPattern(...)
+# .QueryInterface(...).Invoke()/.SetValue()) is simpler and cannot itself
+# introduce a false-PASS, since it plays no part in the thing being verified.
+#
+# 2026-09-09: implemented against the design agreed in
+# project_medflow_coverage_plan, but NOT live-verified end to end in this
+# session -- this session has no Administrator PowerShell, which Tier 2's
+# actual click-and-capture step requires (CLAUDE.md §4 "live"). The
+# navigation half (this function, wired into enumerate_controls.py) does NOT
+# need elevation -- it launches and drives the app directly, the same as
+# Tier 0/1 already do -- and was smoke-tested end to end against the real
+# Medflow app. Only the Tier 2 wiring in tier2_live.py is unverified.
+def run_prefix(uia, win, steps, timeout=20.0):
+    """Replay a fixed navigation sequence to reach a screen that only exists
+    after login. Returns the window dict for wherever the sequence ends up.
+    Raises RuntimeError on any step that cannot be completed -- callers
+    should treat that as a hard stop for this control, not something to
+    retry with a guessed fallback (CLAUDE.md §3, no guessed clicks)."""
+    import comtypes.client  # local import, mirrors agent.py's convention --
+    # comtypes caches the generated module after the first call.
+    mod = comtypes.client.GetModule("UIAutomationCore.dll")
+
+    cur = win
+    for step in steps:
+        action = step.get("action")
+        if action in ("type", "click"):
+            root = uia.ElementFromHandle(cur["hwnd"])
+            if not root:  # comtypes: NULL COM pointer on miss, not None
+                raise RuntimeError(
+                    "prefix: window %r (hwnd=%s) had no UIA element for step %r"
+                    % (cur.get("title"), cur.get("hwnd"), step))
+            target = None
+            for el in find_all_settled(uia, root, timeout=6.0, quiet_for=0.8):
+                d = describe(el)
+                if step.get("automationId") and d["automationId"] == step["automationId"]:
+                    target = el
+                    break
+                if not step.get("automationId") and step.get("name") \
+                        and d["name"] == step["name"]:
+                    target = el
+                    break
+            if target is None:
+                raise RuntimeError(
+                    "prefix: control not found for step %r in window %r"
+                    % (step, cur.get("title")))
+            if action == "type":
+                pat = target.GetCurrentPattern(PATTERN_IDS["Value"])
+                if not pat:
+                    raise RuntimeError("prefix: step %r has no ValuePattern" % step)
+                pat.QueryInterface(mod.IUIAutomationValuePattern).SetValue(step["value"])
+            else:  # click
+                pat = target.GetCurrentPattern(PATTERN_IDS["Invoke"])
+                if pat:
+                    pat.QueryInterface(mod.IUIAutomationInvokePattern).Invoke()
+                else:
+                    legacy = target.GetCurrentPattern(PATTERN_IDS["Legacy"])
+                    if not legacy:
+                        raise RuntimeError(
+                            "prefix: step %r has neither Invoke nor Legacy pattern" % step)
+                    legacy.QueryInterface(
+                        mod.IUIAutomationLegacyIAccessiblePattern).DoDefaultAction()
+        elif action == "waitWindow":
+            frag = step["titleContains"].lower()
+            deadline = time.time() + timeout
+            found = None
+            while time.time() < deadline:
+                found = next((w for w in all_windows()
+                             if frag in w["title"].lower() and w["area"] > 10000), None)
+                if found:
+                    break
+                time.sleep(0.3)
+            if not found:
+                raise RuntimeError(
+                    "prefix: no window matching %r appeared within %ds"
+                    % (step["titleContains"], timeout))
+            activate(found["hwnd"])
+            time.sleep(0.5)
+            cur = found
+        else:
+            raise RuntimeError("prefix: unknown step action %r" % step)
+    return cur
+
+
 # ───────────────────────────────────────────────────────────────── reports
 def write_report(app, tier, payload):
     os.makedirs(REPORTS_DIR, exist_ok=True)
@@ -212,20 +317,31 @@ def write_report(app, tier, payload):
     return path
 
 
-def read_controls(app):
-    path = os.path.join(CONTROLS_DIR, "%s.json" % app)
+def _controls_filename(app, screen=None):
+    # One cache file per SCREEN, not per app -- enumerate_window() only ever
+    # walks whichever window titleHint currently matches, so a multi-screen
+    # app (Medflow: Login/Main/Settings/Detail all titled "Medflow ...")
+    # would otherwise have each screen's enumeration silently overwrite the
+    # last one. Apps with a single screen keep the old bare "<App>.json" name
+    # (screen=None/""), so every existing cache file and every call site that
+    # doesn't know about screens stays valid unchanged.
+    return "%s__%s.json" % (app, screen) if screen else "%s.json" % app
+
+
+def read_controls(app, screen=None):
+    path = os.path.join(CONTROLS_DIR, _controls_filename(app, screen))
     if not os.path.exists(path):
         raise SystemExit(
             "sweep: no enumeration cache for %s.\n"
-            "  run first:  python agent/sweep/run.py enumerate --app %s"
-            % (app, app))
+            "  run first:  python agent/sweep/run.py enumerate --app %s%s"
+            % (app, app, (" --screen %s" % screen) if screen else ""))
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
 
 
-def write_controls(app, payload):
+def write_controls(app, payload, screen=None):
     os.makedirs(CONTROLS_DIR, exist_ok=True)
-    path = os.path.join(CONTROLS_DIR, "%s.json" % app)
+    path = os.path.join(CONTROLS_DIR, _controls_filename(app, screen))
     # Some UIA elements report a garbled Name containing lone UTF-16
     # surrogates (raw-memory read artifact, same class as the "records
     # fine, replays as a no-op" signature probe_app_automatability.py

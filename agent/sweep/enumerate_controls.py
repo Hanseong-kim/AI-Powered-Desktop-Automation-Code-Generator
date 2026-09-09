@@ -28,6 +28,7 @@ from common import (  # noqa: E402
     get_uia, describe, patterns_of, activate, all_windows, pids_for_image,
     find_all_settled, ACTIONABLE_PATTERNS, INTERACTIVE, classify_safety,
     control_key, deny_regex, get_app, load_learned_deny, write_controls,
+    run_prefix,
 )
 
 u = ctypes.windll.user32
@@ -193,10 +194,27 @@ def _looks_like_hwnd(aid):
     return n > 65535 and u.IsWindow(wintypes.HWND(n))
 
 
-def run(app, timeout=25):
+def run(app, timeout=25, screen=None):
     entry = get_app(app)
     win, launched = launch_and_wait(entry, timeout)
     uia, _ = get_uia()
+
+    if screen:
+        spec = (entry.get("screens") or {}).get(screen)
+        if not spec:
+            raise SystemExit(
+                "sweep: %s has no screen %r in sweep/manifest.json's "
+                "\"screens\" field" % (app, screen))
+        if spec.get("prefix"):
+            print("prefix       : replaying %d step(s) to reach %r"
+                  % (len(spec["prefix"]), screen))
+            win = run_prefix(uia, win, spec["prefix"])
+        elif spec.get("titleHint") and spec["titleHint"].lower() not in win["title"].lower():
+            raise SystemExit(
+                "sweep: screen %r expects window %r but the launched/adopted "
+                "window is %r, and this screen has no prefix to get there"
+                % (screen, spec["titleHint"], win["title"]))
+
     raw = enumerate_window(uia, win)
     controls = annotate(raw, win, entry)
 
@@ -206,6 +224,7 @@ def run(app, timeout=25):
         "exePath": entry["exePath"],
         "exeArgs": entry.get("exeArgs") or [],
         "platform": entry["platform"],
+        "screen": screen or "",
         "window": {"hwnd": win["hwnd"], "title": win["title"],
                    "class": win["class"], "rect": list(win["rect"])},
         "launchedByHarness": launched,
@@ -215,7 +234,7 @@ def run(app, timeout=25):
         "noSelector": sum(1 for c in controls if "NO-SELECTOR" in c["flags"]),
         "controls": controls,
     }
-    path = write_controls(entry["app"], payload)
+    path = write_controls(entry["app"], payload, screen=screen)
 
     print("app          : %s  (window %r, hwnd=%d)" % (entry["app"], win["title"], win["hwnd"]))
     print("elements     : %d in settled subtree" % payload["total"])
@@ -233,8 +252,12 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--app", required=True)
     ap.add_argument("--timeout", type=int, default=25)
+    ap.add_argument("--screen", default=None,
+                    help="name from sweep/manifest.json's \"screens\" field "
+                         "(e.g. Main, Settings) -- replays that screen's login "
+                         "prefix before enumerating. Omit for single-screen apps.")
     args = ap.parse_args()
-    run(args.app, args.timeout)
+    run(args.app, args.timeout, args.screen)
     return 0
 
 

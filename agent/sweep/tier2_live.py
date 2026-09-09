@@ -36,7 +36,7 @@ from common import (  # noqa: E402
     request, get_uia, describe, patterns_of, find_all_settled, all_windows,
     activate, capture_one, top_level_windows_snapshot,
     REPO_ROOT, add_learned_deny, control_key, get_app, read_controls,
-    write_report,
+    write_report, run_prefix,
 )
 import enumerate_controls as enum  # noqa: E402
 
@@ -137,7 +137,7 @@ def run_replay(app_name):
     }
 
 
-def one_control(uia, entry, ctrl, keep_open=False):
+def one_control(uia, entry, ctrl, keep_open=False, screen=None, screen_spec=None):
     """Full record -> generate -> replay -> verify cycle for one control."""
     res = {"control": "%s %r aid=%r cls=%r" % (
         ctrl["controlType"], ctrl.get("name"), ctrl.get("automationId"),
@@ -161,6 +161,21 @@ def one_control(uia, entry, ctrl, keep_open=False):
         res["detail"] = str(e)
         return res
     activate(win["hwnd"])
+
+    # A fresh launch/relaunch always lands on the app's start screen. For a
+    # control that lives behind a login (screen_spec's "prefix"), reach that
+    # screen via direct COM UIA calls before going near the control this
+    # cycle is actually testing -- see run_prefix()'s docstring in common.py
+    # for why these steps deliberately do NOT go through agent.py's capture.
+    if screen_spec and screen_spec.get("prefix"):
+        try:
+            win = run_prefix(uia, win, screen_spec["prefix"])
+        except RuntimeError as e:
+            request("POST", "/api/stop", {})
+            res["verdicts"].append("PREFIX-FAILED")
+            res["detail"] = str(e)
+            return res
+        activate(win["hwnd"])
     # The agent's worker thread has to finish discovering the target window
     # before a click on it means anything. Clicking the instant the window is
     # visible produced NOT-CAPTURED on the first live run (2026-08-05).
@@ -267,9 +282,14 @@ def one_control(uia, entry, ctrl, keep_open=False):
     return res
 
 
-def run(app, max_controls=3, confirm=False, name_filter=None):
+def run(app, max_controls=3, confirm=False, name_filter=None, screen=None):
     entry = get_app(app)
-    cache = read_controls(entry["app"])
+    screen_spec = (entry.get("screens") or {}).get(screen) if screen else None
+    if screen and not screen_spec:
+        raise SystemExit(
+            "sweep: %s has no screen %r in sweep/manifest.json's \"screens\" "
+            "field" % (app, screen))
+    cache = read_controls(entry["app"], screen=screen)
     targets = [c for c in cache["controls"]
                if c["clickable"] and c["safety"] == "safe" and not c["flags"]]
     if name_filter:
@@ -306,7 +326,7 @@ def run(app, max_controls=3, confirm=False, name_filter=None):
     results = []
     for i, c in enumerate(targets, 1):
         print("\n[%d/%d] %s %r" % (i, len(targets), c["controlType"], c.get("name")))
-        r = one_control(uia, entry, c)
+        r = one_control(uia, entry, c, screen=screen, screen_spec=screen_spec)
         print("      -> %s" % (", ".join(r["verdicts"]) or "?"))
         results.append(r)
 
@@ -327,8 +347,13 @@ def main():
     ap.add_argument("--name", default=None, help="regex; only controls whose name matches")
     ap.add_argument("--yes", action="store_true",
                     help="actually click. Without this the run is a dry listing.")
+    ap.add_argument("--screen", default=None,
+                    help="name from sweep/manifest.json's \"screens\" field -- "
+                         "replays that screen's login prefix before each "
+                         "control's kill+relaunch cycle. Omit for the app's "
+                         "default (Login-reachable) screen.")
     args = ap.parse_args()
-    run(args.app, args.max_controls, args.yes, args.name)
+    run(args.app, args.max_controls, args.yes, args.name, args.screen)
     return 0
 
 

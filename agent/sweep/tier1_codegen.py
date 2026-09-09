@@ -239,9 +239,9 @@ def node_check(path):
     return r.returncode == 0, (r.stderr or r.stdout).strip()[:300]
 
 
-def run(app, limit=None, include_unsafe=False):
+def run(app, limit=None, include_unsafe=False, screen=None):
     entry = get_app(app)
-    cache = read_controls(entry["app"])
+    cache = read_controls(entry["app"], screen=screen)
     win = cache["window"]
 
     targets = [c for c in cache["controls"] if c["clickable"]]
