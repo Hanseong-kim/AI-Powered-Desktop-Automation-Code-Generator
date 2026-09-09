@@ -675,9 +675,19 @@ function osActivate(titleLike, hwnd) {
         // 그대로 동작해 변화 없음.
         const h = hwnd || _appHwnd;
         const args = h ? `-hwnd ${h}` : `-titleLike "${titleLike}"`;
+        // 15000 -> 30000 (2026-09-09): a real replay hit ETIMEDOUT here once in
+        // 5 runs. Measured osActivate.ps1's own Add-Type compile in isolation
+        // (~1s cold) and 5-way concurrent (~1.5s) -- neither gets remotely
+        // close to 15s, so plain CPU contention among csc.exe compiles is NOT
+        // the mechanism, contrary to the original hypothesis. Root cause is
+        // still open (Defender scanning the freshly-compiled temp assembly and
+        // a full-system stall from Appium+WinAppDriver are both untested).
+        // This call is already best-effort (try/caught, non-fatal on failure),
+        // so widening the budget only reduces false timeouts -- it cannot mask
+        // a real hang differently than before.
         execSync(
             `powershell -NoProfile -File "${_helperFile('osActivate.ps1')}" ${args}`,
-            { stdio: 'pipe', timeout: 15000 }
+            { stdio: 'pipe', timeout: 30000 }
         );
     } catch (e) {
         console.warn('[osActivate] failed:', String(e.message || e).substring(0, 100));

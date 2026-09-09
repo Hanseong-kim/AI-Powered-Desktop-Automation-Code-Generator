@@ -1201,9 +1201,12 @@ function normalizeWindow(frag, left, top, width, height) {
 function osActivate(titleLike, hwnd) {
     try {
         const args = hwnd ? `-hwnd ${hwnd}` : `-titleLike "${titleLike}"`;
+        // See the simple-mode osActivate() above for the 2026-09-09 measurement
+        // behind this 15000 -> 30000 bump -- same helper, same file, same
+        // unconfirmed root cause.
         execSync(
             `powershell -NoProfile -File "${_helperFile('osActivate.ps1')}" ${args}`,
-            { stdio: 'pipe', timeout: 15000 }
+            { stdio: 'pipe', timeout: 30000 }
         );
     } catch (e) {
         console.warn('[osActivate] failed:', String(e.message || e).substring(0, 100));
