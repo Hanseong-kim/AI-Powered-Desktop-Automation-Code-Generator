@@ -57,7 +57,16 @@ def is_elevated():
 
 
 def kill_app(exe):
-    """Hard reset between controls. Only ever targets the app under test."""
+    """Hard reset between controls. Only ever targets the app under test.
+
+    CAVEAT for host processes (2026-09-08): with `mshta.exe` the image name is
+    not the app, so this kills EVERY .hta running on the machine, not just the
+    one under test. For Medflow that is what you want -- its four windows are
+    four mshta processes and all of them must go for a clean restart -- but a
+    tier 2 run will also close an unrelated HTA the user happens to have open.
+    Narrowing it needs per-PID tracking of what this harness launched; not done
+    because tier 2 already demands --yes and an elevated shell.
+    """
     if "!" in exe:  # UWP -- no image name to kill; /api/start's state reset covers it
         return
     image = os.path.basename(exe)
@@ -137,6 +146,7 @@ def one_control(uia, entry, ctrl, keep_open=False):
     kill_app(entry["exePath"])
     status, body = request("POST", "/api/start", {
         "appName": entry["appName"], "exePath": entry["exePath"],
+        "exeArgs": entry.get("exeArgs") or [],
         "platform": entry["platform"]}, timeout=45)
     if status != 200 or not body.get("ok"):
         res["verdicts"].append("START-FAILED")
@@ -222,9 +232,12 @@ def one_control(uia, entry, ctrl, keep_open=False):
                          "capture-layer (agent.py) gap, invisible to Tier 1")
         return res
 
+    # Always sent, [] included -- omitting it inherits the server's global
+    # sessionInfo.exeArgs (see the note in tier1_codegen.generate_for).
     status, body = request("POST", "/api/generate", {
         "appName": entry["appName"], "exePath": entry["exePath"],
-        "platform": entry["platform"]}, timeout=60)
+        "platform": entry["platform"],
+        "exeArgs": entry.get("exeArgs") or []}, timeout=60)
     if status != 200 or not body.get("ok"):
         res["verdicts"].append("GENERATE-FAILED")
         res["detail"] = "status=%s %s" % (status, str(body)[:200])

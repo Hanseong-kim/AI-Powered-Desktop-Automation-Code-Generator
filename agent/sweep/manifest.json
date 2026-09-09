@@ -24,7 +24,8 @@
     "app": "PuTTY",
     "titleHint": "PuTTY",
     "denyNames": ["Delete", "Load", "Open"],
-    "allowNames": [],
+    "_allowNames": "'Only on clean exit' is a logging radio, not an exit action. It is the single false positive introduced by matching DEFAULT_DENY case-insensitively (measured 2026-09-08 over all six caches), bought back here by name.",
+    "allowNames": ["Only on clean exit"],
     "enabled": true
   },
   {
@@ -40,5 +41,14 @@
     "denyNames": ["연결", "원격 제어", "세션 참가", "로그아웃"],
     "allowNames": [],
     "enabled": false
+  },
+  {
+    "app": "Medflow",
+    "_titleHint": "All four HTA windows are titled 'Medflow ...' (Login / Clinical System / Settings / Patient Detail). Since exePath is the shared host mshta.exe, this hint is the ONLY thing identifying the app -- _match_windows() drops its PID matcher when exeArgs is present.",
+    "titleHint": "Medflow",
+    "_denyNames": "EXIT / CLOSE / LOGOUT are already covered by DEFAULT_DENY now that it matches case-insensitively. Listed here only for the ones it cannot know: 확인 confirms the exit dialog.",
+    "denyNames": ["확인"],
+    "allowNames": [],
+    "enabled": true
   }
 ]

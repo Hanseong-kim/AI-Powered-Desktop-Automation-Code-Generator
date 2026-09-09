@@ -78,6 +78,19 @@ DEFAULT_DENY = (
     r"\bOverwrite\b|\bWipe\b"
 )
 
+# Matched case-INSENSITIVELY (2026-09-08). It was case-sensitive, and Medflow --
+# whose every button label is upper case -- therefore had `EXIT`, `CLOSE` and
+# `LOGOUT` classified SAFE: `\bExit\b` does not match `EXIT`. Tier 2 would have
+# clicked the button that quits the app and only learned better afterwards, via
+# the learned denylist.
+#
+# Blast radius measured over the six existing enumeration caches before making
+# the change (324 clickable controls): exactly ONE name is newly denied,
+# PuTTY's "Only on clean exit" radio, which is a false positive and is bought
+# back by name in that app's allowNames below. So the change is provably
+# no-op for every app already swept, and real protection for this one.
+DENY_FLAGS = re.IGNORECASE
+
 # ControlTypes that are structure, not an action target.
 SKIP_CONTROL_TYPES = {"Window", "TitleBar", "Pane", "Separator", "ToolTip",
                       "ProgressBar", "ScrollBar", "Header", "Menu", "MenuBar"}
@@ -150,6 +163,11 @@ def load_manifest():
             # destroy a real verified capture.
             "appName": "Sweep" + app,
             "exePath": o.get("exePath", g["exePath"]),
+            # Medflow runs as `mshta.exe <path>.hta`, so the exe alone launches
+            # nothing usable and the generated launchApp() would have no
+            # document to open. Carried from the golden manifest for the same
+            # reason exePath is -- one source of truth, not a third copy.
+            "exeArgs": o.get("exeArgs", g.get("exeArgs") or []),
             "platform": g.get("platform", "Windows"),
             "titleHint": o.get("titleHint", ""),
             "denyNames": o.get("denyNames", []),
@@ -172,10 +190,10 @@ def deny_regex(entry):
     if entry.get("denyNames"):
         pat += "|" + "|".join(entry["denyNames"])
     allow = entry.get("allowNames") or []
-    rx = re.compile(pat)
+    rx = re.compile(pat, DENY_FLAGS)
     if not allow:
         return rx
-    allow_rx = re.compile("|".join(allow))
+    allow_rx = re.compile("|".join(allow), DENY_FLAGS)
 
     class _Rx:
         def search(self, s):

@@ -42,10 +42,11 @@ def launch_and_wait(entry, timeout=25):
     'Single-instance apps break launchApp()').
     """
     exe = entry["exePath"]
+    args = entry.get("exeArgs") or []
     hint = (entry.get("titleHint") or entry["app"]).lower()
 
     before = {w["hwnd"] for w in all_windows()}
-    existing = _match_windows(hint, exe)
+    existing = _match_windows(hint, exe, args)
     if existing:
         w = max(existing, key=lambda w: w["area"])
         activate(w["hwnd"])
@@ -54,23 +55,33 @@ def launch_and_wait(entry, timeout=25):
     if "!" in exe:  # UWP AUMID
         subprocess.Popen(["explorer.exe", "shell:AppsFolder\\%s" % exe])
     else:
-        subprocess.Popen([exe], cwd=os.path.dirname(exe) or None)
+        # exeArgs is what makes a host process launch anything at all:
+        # `mshta.exe` with no document opens nothing (Medflow, 2026-09-08).
+        subprocess.Popen([exe] + list(args), cwd=os.path.dirname(exe) or None)
 
     deadline = time.time() + timeout
     while time.time() < deadline:
-        cands = [w for w in _match_windows(hint, exe) if w["hwnd"] not in before]
+        cands = [w for w in _match_windows(hint, exe, args)
+                 if w["hwnd"] not in before]
         if cands:
             w = max(cands, key=lambda w: w["area"])
             activate(w["hwnd"])
             return w, True
         time.sleep(0.4)
-    raise SystemExit("sweep: %s window did not appear within %ds (exe=%s)"
-                     % (entry["app"], timeout, exe))
+    raise SystemExit("sweep: %s window did not appear within %ds (exe=%s%s)"
+                     % (entry["app"], timeout, exe,
+                        (" " + " ".join(args)) if args else ""))
 
 
-def _match_windows(hint, exe):
+def _match_windows(hint, exe, args=()):
+    # The PID shortcut identifies an app by its image name, which is only an
+    # identity when the exe IS the app. With exeArgs the exe is a HOST -- every
+    # .hta on the machine runs as `mshta.exe`, so pids_for_image() would return
+    # unrelated documents' windows and, since this is an OR, adopt one of them
+    # as the app under test. When a document is what identifies the app, the
+    # title hint is the only honest matcher, so drop the PID half entirely.
     image = os.path.basename(exe) if "!" not in exe else ""
-    pids = pids_for_image(image) if image else set()
+    pids = set() if args else (pids_for_image(image) if image else set())
     out = []
     for w in all_windows():
         if not w["title"] or w["area"] < 10000:
@@ -193,6 +204,7 @@ def run(app, timeout=25):
         "app": entry["app"],
         "appName": entry["appName"],
         "exePath": entry["exePath"],
+        "exeArgs": entry.get("exeArgs") or [],
         "platform": entry["platform"],
         "window": {"hwnd": win["hwnd"], "title": win["title"],
                    "class": win["class"], "rect": list(win["rect"])},
