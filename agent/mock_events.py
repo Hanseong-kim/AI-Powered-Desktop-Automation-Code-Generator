@@ -4227,6 +4227,7 @@ def step_output_folders_isolated():
         "SevenZipStateReset",
         "MockGoldenCalculator", "MockGoldenFileZilla", "MockGoldenHeidiSQL",
         "MockGoldenPuTTY", "MockGoldenSevenZip", "MockGoldenTeamViewer",
+        "MockGoldenMedflow", "MockGoldenMedflowDropdown",
         # agent/sweep/ regenerates these once per control it audits, so they
         # are clobbered far more often than anything above. Same rule applies.
         "SweepCalculator", "SweepFileZilla", "SweepHeidiSQL",
