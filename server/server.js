@@ -126,7 +126,12 @@ app.post('/api/stop', async (req, res) => {
 app.get('/api/status', async (req, res) => {
   let agent = { online: false };
   try { agent = await callAgent('/status'); agent.online = true; } catch { /* offline */ }
-  res.json({ agentOnline: agent.online, isAdmin: agent.isAdmin ?? null, recording, eventCount: events.length });
+  // targetHwnds (2026-09-09): the actual window(s) agent.py is tracking for
+  // this recording session -- see agent.py's /status handler for why this
+  // needs to exist at all (a sweep-side rediscovery can disagree with what
+  // agent.py adopted, especially for mshta.exe's launch race).
+  res.json({ agentOnline: agent.online, isAdmin: agent.isAdmin ?? null, recording, eventCount: events.length,
+             targetHwnds: agent.targetHwnds || [] });
 });
 
 // ---------------------------------------------------------------------------

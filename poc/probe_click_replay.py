@@ -217,6 +217,20 @@ def top_level_windows_snapshot():
     return {w["hwnd"]: w["title"] for w in all_windows()}
 
 
+# Must match agent.py's TIER2_CLICK_EXTRA_INFO exactly. Windows marks every
+# SendInput-originated event LLMHF_INJECTED, and agent.py's mouse hook drops
+# every injected click unconditionally by design (real recordings must not
+# pick up automation noise) -- so without this marker, Tier 2's whole click
+# step is silently invisible to the very capture layer it exists to verify
+# (found 2026-09-09: no earlier Tier 2 run had ever gotten far enough to hit
+# this, since every prior attempt failed at an earlier stage). agent.py's
+# _CaptureMouseListener checks this exact value in dwExtraInfo and, only
+# then, reports the click as non-injected. It does not change the click's
+# geometry, flags, or timing, so it does not affect what this function
+# measures about replay's actual mouse mechanics (see the docstring below).
+TIER2_CLICK_EXTRA_INFO = 0x54325A17
+
+
 def send_click(x, y, double=False):
     """Mirrors server.js send_input_click()'s mouse mechanics exactly --
     same SendInput flags, same move/down/up spacing, same double-click
@@ -231,7 +245,7 @@ def send_click(x, y, double=False):
 
     def send(flags):
         inp = INPUT(type=INPUT_MOUSE)
-        inp.mi = MOUSEINPUT(nx, ny, 0, flags, 0, 0)
+        inp.mi = MOUSEINPUT(nx, ny, 0, flags, 0, TIER2_CLICK_EXTRA_INFO)
         return u.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
     send(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)

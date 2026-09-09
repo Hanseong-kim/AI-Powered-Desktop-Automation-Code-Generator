@@ -34,6 +34,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import requests
 from pynput import keyboard, mouse
+from pynput._util.win32 import SystemHook
 
 # Windows-only imports
 import ctypes
@@ -3184,6 +3185,71 @@ def _window_has_size(hwnd):
         return False
 
 
+# A SendInput click carrying this exact value in MOUSEINPUT.dwExtraInfo is
+# accepted despite the LLMHF_INJECTED flag Windows always sets on it -- see
+# _CaptureMouseListener below. The one and only sender is
+# poc/probe_click_replay.py's send_click(); the two files must agree on this
+# constant.
+TIER2_CLICK_EXTRA_INFO = 0x54325A17
+
+
+class _CaptureMouseListener(mouse.Listener):
+    """pynput's Windows mouse Listener, with one exception carved into the
+    injected-input filter.
+
+    2026-09-09: agent/sweep/tier2_live.py exists to verify that a PHYSICAL
+    click on a control records and replays correctly -- its whole reason to
+    exist over Tier 1 (CLAUDE.md, tier2_live.py's own docstring). It drives
+    that click via SendInput (probe_click_replay.py's send_click(), the same
+    mechanism generated replay code uses), because that is what "physical"
+    means here. But Windows marks EVERY SendInput-originated event
+    LLMHF_INJECTED at the OS level (confirmed via pynput's own hook struct),
+    and _on_click below drops every injected click unconditionally -- by
+    design, to keep automation noise (e.g. UWP's own injected keystrokes on
+    a button click) out of a REAL user's recording. The two are in direct
+    conflict: Tier 2's click could never reach a real recording through
+    this path, for any app, ever. No earlier Tier 2 run had exposed this --
+    every one failed at an earlier stage (elevation, control not found at
+    replay) before a real click was ever attempted.
+    pynput's stock Listener does not expose dwExtraInfo to on_click at all,
+    so this is a full override of _handle_message (copied from
+    pynput.mouse._win32.Listener, the only change is the injected override
+    below) rather than a small patch. Only a click carrying
+    TIER2_CLICK_EXTRA_INFO is treated as non-injected; every other synthetic
+    click (some other automation tool, a UWP control's own injected
+    keystrokes) is still dropped exactly as before -- this is deliberately
+    narrow, not a blanket unblock of injected input.
+    """
+
+    def _handle_message(self, code, msg, lpdata):
+        if code != SystemHook.HC_ACTION:
+            return
+        data = ctypes.cast(lpdata, self._LPMSLLHOOKSTRUCT).contents
+        injected = (
+            data.flags
+            & (self._MSLLHOOKSTRUCT.LLMHF_INJECTED
+               | self._MSLLHOOKSTRUCT.LLMHF_LOWER_IL_INJECTED)
+            != 0
+        )
+        if injected and data.dwExtraInfo == TIER2_CLICK_EXTRA_INFO:
+            injected = False
+        if self._event_filter(msg, data) is False:
+            return
+        if msg == self.WM_MOUSEMOVE:
+            self.on_move(data.pt.x, data.pt.y, injected)
+        elif msg in self.CLICK_BUTTONS:
+            button, pressed = self.CLICK_BUTTONS[msg]
+            self.on_click(data.pt.x, data.pt.y, button, pressed, injected)
+        elif msg in self.X_BUTTONS:
+            button, pressed = self.X_BUTTONS[msg][data.mouseData >> 16]
+            self.on_click(data.pt.x, data.pt.y, button, pressed, injected)
+        elif msg in self.SCROLL_BUTTONS:
+            from pynput.mouse._win32 import WHEEL_DELTA
+            mx, my = self.SCROLL_BUTTONS[msg]
+            dd = wintypes.SHORT(data.mouseData >> 16).value // WHEEL_DELTA
+            self.on_scroll(data.pt.x, data.pt.y, dd * mx, dd * my, injected)
+
+
 # ----------------------------------------------------------------------------
 # Recorder
 # ----------------------------------------------------------------------------
@@ -3347,7 +3413,7 @@ class Recorder:
 
         # Hooks: callbacks ONLY enqueue raw data and return immediately,
         # so the OS input pipeline is never blocked.
-        self._mouse_listener = mouse.Listener(on_click=self._on_click,
+        self._mouse_listener = _CaptureMouseListener(on_click=self._on_click,
                                               on_scroll=self._on_scroll)
         self._kb_listener = keyboard.Listener(on_press=self._on_key)
         self._mouse_listener.start()
@@ -6082,6 +6148,19 @@ class Recorder:
 recorder = Recorder()
 
 
+def _safe_target_hwnds_snapshot():
+    """recorder.target_hwnds is mutated by the worker and watcher threads
+    with no lock (same as every other Recorder field this HTTP handler's
+    thread already reads unsynchronized). A concurrent .add() during
+    iteration can raise; on that rare race, report an empty list rather than
+    500 the whole status endpoint -- a caller polling this can just try
+    again next tick."""
+    try:
+        return sorted(recorder.target_hwnds)
+    except RuntimeError:
+        return []
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):  # silence default logging
         pass
@@ -6102,6 +6181,19 @@ class Handler(BaseHTTPRequestHandler):
                 "recording": recorder.recording,
                 "eventCount": recorder.event_count,
                 "isAdmin": bool(ctypes.windll.shell32.IsUserAnAdmin()),
+                # 2026-09-09 (Medflow Tier 2, first login-gated app): sweep's
+                # enum.launch_and_wait() independently rediscovers "the" app
+                # window by title, completely decoupled from what THIS
+                # process is actually tracking as target_hwnds -- and
+                # mshta.exe's launch has a real race that can produce two
+                # near-simultaneous "Medflow Login" windows in different
+                # processes (measured repeatedly, 2026-09-09 agent.log).
+                # When sweep and agent.py pick different windows, every
+                # click sweep performs is genuinely outside every window
+                # this process would ever accept, no matter how long
+                # anything waits. Exposing the actual tracked set lets sweep
+                # use the SAME window instead of gambling on agreement.
+                "targetHwnds": _safe_target_hwnds_snapshot(),
             })
         else:
             self._json(404, {"error": "not found"})

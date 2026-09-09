@@ -36,9 +36,8 @@ from common import (  # noqa: E402
     request, get_uia, describe, patterns_of, find_all_settled, all_windows,
     activate, capture_one, top_level_windows_snapshot,
     REPO_ROOT, add_learned_deny, control_key, get_app, read_controls,
-    write_report, run_prefix,
+    write_report, run_prefix, wait_for_agent_window,
 )
-import enumerate_controls as enum  # noqa: E402
 
 REPLAY_TIMEOUT = 240
 # Seconds to let the agent's worker thread discover the freshly launched
@@ -46,7 +45,23 @@ REPLAY_TIMEOUT = 240
 AGENT_SETTLE = 2.0
 # Seconds to wait for a captured click to reach the server before concluding
 # the capture layer dropped it.
-CAPTURE_WAIT = 6.0
+#
+# 2026-09-09 (Medflow Main screen, first real Tier 2 run against a login-gated
+# app): raised from 6.0. The actual bug that made every Medflow click read
+# NOT-CAPTURED was unrelated to timing -- agent.py's mouse hook drops every
+# SendInput-originated click unconditionally (LLMHF_INJECTED), which silently
+# made Tier 2's whole click step invisible to capture for every app, always;
+# fixed in agent.py (TIER2_CLICK_EXTRA_INFO / _CaptureMouseListener) and
+# poc/probe_click_replay.py (send_click() now sets that marker). This 10.0 is
+# a smaller, still-real margin left over from ruling that out: Medflow's HTA
+# windows are `HTML Application Host Window Class` + `Internet
+# Explorer_Server` (MSHTML), which agent.py's is_web_host() does not
+# recognize (it only checks Chromium host classes) -- so a window the login
+# prefix just navigated to gets none of the progressive-tree-population
+# settle treatment CLAUDE.md documents for WebView2/TeamViewer (measured
+# there: 3-7s to fully populate). Not confirmed to matter in practice; kept
+# as headroom rather than reverting to 6.0 outright.
+CAPTURE_WAIT = 10.0
 
 
 def is_elevated():
@@ -153,9 +168,15 @@ def one_control(uia, entry, ctrl, keep_open=False, screen=None, screen_spec=None
         res["detail"] = "status=%s %s" % (status, str(body)[:200])
         return res
 
+    # wait_for_agent_window(), not enum.launch_and_wait(): the click this
+    # cycle performs is captured through agent.py, so the window it resolves
+    # the control in MUST be the same window agent.py adopted as its
+    # recording target -- an independent title-based rediscovery can pick a
+    # DIFFERENT window when a host process's launch races (mshta.exe,
+    # measured 2026-09-09; see the note above run_prefix() in common.py).
     try:
-        win, _ = enum.launch_and_wait(entry, timeout=25)
-    except SystemExit as e:
+        win = wait_for_agent_window(timeout=25)
+    except RuntimeError as e:
         request("POST", "/api/stop", {})
         res["verdicts"].append("WINDOW-NOT-FOUND")
         res["detail"] = str(e)
@@ -166,10 +187,15 @@ def one_control(uia, entry, ctrl, keep_open=False, screen=None, screen_spec=None
     # control that lives behind a login (screen_spec's "prefix"), reach that
     # screen via direct COM UIA calls before going near the control this
     # cycle is actually testing -- see run_prefix()'s docstring in common.py
-    # for why these steps deliberately do NOT go through agent.py's capture.
+    # for why these steps deliberately do NOT go through agent.py's capture
+    # (that's about the prefix's OWN actions, not the window they run in --
+    # require_agent_hwnd=True below is what keeps the window itself in
+    # agreement with agent.py throughout the whole prefix).
+    synth_events = []
     if screen_spec and screen_spec.get("prefix"):
         try:
-            win = run_prefix(uia, win, screen_spec["prefix"])
+            win, synth_events = run_prefix(uia, win, screen_spec["prefix"],
+                                            require_agent_hwnd=True, record_events=True)
         except RuntimeError as e:
             request("POST", "/api/stop", {})
             res["verdicts"].append("PREFIX-FAILED")
@@ -231,10 +257,14 @@ def one_control(uia, entry, ctrl, keep_open=False, screen=None, screen_spec=None
     # after the click reports zero events for a click that was captured fine,
     # so poll for the event to land before calling it NOT-CAPTURED.
     captured = []
+    session_meta = None
     deadline = time.time() + CAPTURE_WAIT
     while time.time() < deadline:
         _, events = request("GET", "/api/events")
-        captured = [e for e in (events or []) if isinstance(e, dict)
+        events = events or []
+        session_meta = next((e for e in events if isinstance(e, dict)
+                             and e.get("action") == "session_meta"), session_meta)
+        captured = [e for e in events if isinstance(e, dict)
                     and e.get("action") != "session_meta"]
         if captured:
             break
@@ -246,6 +276,27 @@ def one_control(uia, entry, ctrl, keep_open=False, screen=None, screen_spec=None
         res["detail"] = ("the physical click produced no event -- this is a "
                          "capture-layer (agent.py) gap, invisible to Tier 1")
         return res
+
+    # A recording of just the one control under test has no login in it --
+    # replay always starts from a fresh launch, so it can never get past the
+    # Login screen to reach this control (confirmed 2026-09-09: replayed
+    # click-not-found for exactly this reason). Splice synth_events (built by
+    # run_prefix() from the SAME live navigation that actually got us here)
+    # in front of the real captured event(s), keeping the real session_meta
+    # (it already correctly describes the Login window agent.py actually
+    # launched -- see below) and renumbering the real events to continue
+    # right after the synthetic ones.
+    if synth_events:
+        for i, ev in enumerate(captured, start=len(synth_events) + 1):
+            ev["index"] = i
+        request("DELETE", "/api/events")
+        if session_meta:
+            request("POST", "/api/events", session_meta)
+        for ev in synth_events:
+            request("POST", "/api/events", ev)
+        for ev in captured:
+            request("POST", "/api/events", ev)
+        res["prefixEventsInjected"] = len(synth_events)
 
     # Always sent, [] included -- omitting it inherits the server's global
     # sessionInfo.exeArgs (see the note in tier1_codegen.generate_for).

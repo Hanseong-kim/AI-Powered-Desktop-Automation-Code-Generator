@@ -208,7 +208,7 @@ def run(app, timeout=25, screen=None):
         if spec.get("prefix"):
             print("prefix       : replaying %d step(s) to reach %r"
                   % (len(spec["prefix"]), screen))
-            win = run_prefix(uia, win, spec["prefix"])
+            win, _ = run_prefix(uia, win, spec["prefix"])
         elif spec.get("titleHint") and spec["titleHint"].lower() not in win["title"].lower():
             raise SystemExit(
                 "sweep: screen %r expects window %r but the launched/adopted "

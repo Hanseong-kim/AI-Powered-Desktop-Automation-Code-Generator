@@ -230,24 +230,122 @@ def deny_regex(entry):
 # introduce a false-PASS, since it plays no part in the thing being verified.
 #
 # 2026-09-09: implemented against the design agreed in
-# project_medflow_coverage_plan, but NOT live-verified end to end in this
-# session -- this session has no Administrator PowerShell, which Tier 2's
-# actual click-and-capture step requires (CLAUDE.md §4 "live"). The
-# navigation half (this function, wired into enumerate_controls.py) does NOT
-# need elevation -- it launches and drives the app directly, the same as
-# Tier 0/1 already do -- and was smoke-tested end to end against the real
-# Medflow app. Only the Tier 2 wiring in tier2_live.py is unverified.
-def run_prefix(uia, win, steps, timeout=20.0):
+# project_medflow_coverage_plan, and now live-verified end to end against the
+# real app -- agent/sweep/reports/Medflow-live.json, Button 'Administration'
+# (nav_admin) on the Main screen: OK, replay exit code 0, "[PASS] all steps
+# completed" from a cold launch through login into Main. Getting there
+# surfaced THREE further, genuinely pre-existing bugs that had never been
+# reachable before (every earlier Tier 2 attempt, any app, failed at an
+# earlier stage than a real click):
+#   1. agent.py's mouse hook unconditionally dropped every SendInput click as
+#      "injected" -- fixed via TIER2_CLICK_EXTRA_INFO / _CaptureMouseListener
+#      in agent.py, matching sentinel in poc/probe_click_replay.py's
+#      send_click().
+#   2. mshta.exe's launch has a real race that can produce two
+#      near-simultaneous same-titled windows in different processes, so a
+#      click landing in the window enum.launch_and_wait() rediscovers by
+#      title can genuinely be a DIFFERENT window than the one agent.py
+#      adopted as its recording target, no matter how long anything waits
+#      (measured via agent.log: click's owning hwnd absent from agent's
+#      tracked target_hwnds set) -- fixed via wait_for_agent_window() and
+#      this function's require_agent_hwnd param, which require agreement
+#      with agent.py's own /api/status-reported target_hwnds instead of
+#      rediscovering blind.
+#   3. A recording of just the tested control has no login in it, so cold
+#      replay can never get past Login to reach it (measured: replayed
+#      click-not-found for the real control) -- fixed via record_events=True
+#      below, which splices synthetic login events in front of the real
+#      captured one before /api/generate.
+def get_agent_target_hwnds():
+    """The window(s) agent.py is currently tracking, straight from
+    /api/status. See the note above run_prefix() for why sweep must not
+    independently rediscover "the" window by title alone when a real click
+    is about to be captured through agent.py."""
+    _, body = request("GET", "/api/status")
+    return set(body.get("targetHwnds") or [])
+
+
+def wait_for_agent_window(timeout=15.0):
+    """Poll /api/status until agent.py reports at least one tracked window,
+    then return the largest-area one in the same shape
+    enum.launch_and_wait() returns. Use this (not an independent title
+    search) whenever the window returned will have a real click captured
+    through agent.py -- see the note above run_prefix()."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        tracked = get_agent_target_hwnds()
+        if tracked:
+            cands = [w for w in all_windows() if w["hwnd"] in tracked and w["area"] > 10000]
+            if cands:
+                return max(cands, key=lambda w: w["area"])
+        time.sleep(0.3)
+    raise RuntimeError(
+        "sweep: agent.py reported no tracked window within %ds of /api/start "
+        "-- check agent.log for [target] discovery failures" % timeout)
+
+
+def _screen_id_of(title):
+    return re.sub(r'[^a-z0-9]+', '_', (title or '').lower()).strip('_')
+
+
+def _prefix_step_events(action, d, rect, cur_win, value, start_index):
+    """Build the make_event()-shaped dict(s) for one prefix step, formatted
+    to match a REAL agent.py capture byte-for-byte (cross-checked against
+    agent/golden/recordings/MedflowDropdown.json's own login sequence,
+    2026-09-09) -- rootHwndHex/isPopup/popupTitle/winLeft.../screenId on the
+    click, none of that on the type that follows it, exactly as real
+    recordings show. Returns a list because a click may need to carry
+    different metadata from the type that follows the same resolved
+    element."""
+    left, top, right, bottom = cur_win["rect"]
+    common = dict(
+        name=d.get("name") or "", automation_id=d.get("automationId") or "",
+        class_name=d.get("className") or "", control_type=d.get("controlType") or "Button",
+        window_title=cur_win["title"], x=rect[0], y=rect[1], index=start_index,
+        winLeft=left, winTop=top, winWidth=right - left, winHeight=bottom - top,
+    )
+    if action == "click":
+        return [make_event(
+            "click", isPopup=True, popupTitle=cur_win["title"],
+            rootHwndHex=format(cur_win["hwnd"], "X"),
+            screenId=_screen_id_of(cur_win["title"]), **common)]
+    else:  # type
+        return [make_event("type", value=value, **common)]
+
+
+def run_prefix(uia, win, steps, timeout=20.0, require_agent_hwnd=False,
+               record_events=False, start_index=1):
     """Replay a fixed navigation sequence to reach a screen that only exists
-    after login. Returns the window dict for wherever the sequence ends up.
-    Raises RuntimeError on any step that cannot be completed -- callers
-    should treat that as a hard stop for this control, not something to
-    retry with a guessed fallback (CLAUDE.md §3, no guessed clicks)."""
+    after login. Returns (window, synth_events) -- window is wherever the
+    sequence ends up; synth_events is [] unless record_events=True. Raises
+    RuntimeError on any step that cannot be completed -- callers should
+    treat that as a hard stop for this control, not something to retry with
+    a guessed fallback (CLAUDE.md §3, no guessed clicks).
+
+    require_agent_hwnd=True additionally requires each waitWindow step's
+    match to be a window agent.py itself is tracking (see the note above),
+    not just a title match -- pass this when a real click will be captured
+    through agent.py afterwards (Tier 2). Tier 0/1 have no agent.py
+    involvement at all, so they should leave this False.
+
+    record_events=True additionally builds a make_event()-shaped dict for
+    each type/click step, using the SAME live element this function already
+    resolved to perform the action -- not a second, separately-authored copy
+    of the same facts. WHY THIS EXISTS: a Tier 2 recording of just the one
+    control under test has no login in it at all, so replaying it from a
+    fresh launch can never get past the Login screen (confirmed 2026-09-09:
+    a real Tier 2 run on Medflow's Main screen replayed
+    'click-not-found:~nav_admin' for exactly this reason). Prepending these
+    synthetic events to the real captured event before /api/generate gives
+    replay the login it needs. start_index numbers them so the caller can
+    renumber the real captured event(s) to continue right after."""
     import comtypes.client  # local import, mirrors agent.py's convention --
     # comtypes caches the generated module after the first call.
     mod = comtypes.client.GetModule("UIAutomationCore.dll")
 
     cur = win
+    synth_events = []
+    next_index = start_index
     for step in steps:
         action = step.get("action")
         if action in ("type", "click"):
@@ -257,19 +355,25 @@ def run_prefix(uia, win, steps, timeout=20.0):
                     "prefix: window %r (hwnd=%s) had no UIA element for step %r"
                     % (cur.get("title"), cur.get("hwnd"), step))
             target = None
+            target_d = None
             for el in find_all_settled(uia, root, timeout=6.0, quiet_for=0.8):
                 d = describe(el)
                 if step.get("automationId") and d["automationId"] == step["automationId"]:
-                    target = el
+                    target, target_d = el, d
                     break
                 if not step.get("automationId") and step.get("name") \
                         and d["name"] == step["name"]:
-                    target = el
+                    target, target_d = el, d
                     break
             if target is None:
                 raise RuntimeError(
                     "prefix: control not found for step %r in window %r"
                     % (step, cur.get("title")))
+            try:
+                r = target.CurrentBoundingRectangle
+                rect = (r.left, r.top, r.right, r.bottom)
+            except Exception:
+                rect = (0, 0, 0, 0)
             if action == "type":
                 pat = target.GetCurrentPattern(PATTERN_IDS["Value"])
                 if not pat:
@@ -286,26 +390,36 @@ def run_prefix(uia, win, steps, timeout=20.0):
                             "prefix: step %r has neither Invoke nor Legacy pattern" % step)
                     legacy.QueryInterface(
                         mod.IUIAutomationLegacyIAccessiblePattern).DoDefaultAction()
+            if record_events:
+                evs = _prefix_step_events(action, target_d, rect, cur, step.get("value"), next_index)
+                synth_events.extend(evs)
+                next_index += len(evs)
         elif action == "waitWindow":
             frag = step["titleContains"].lower()
             deadline = time.time() + timeout
             found = None
             while time.time() < deadline:
+                tracked = get_agent_target_hwnds() if require_agent_hwnd else None
                 found = next((w for w in all_windows()
-                             if frag in w["title"].lower() and w["area"] > 10000), None)
+                             if frag in w["title"].lower() and w["area"] > 10000
+                             and (tracked is None or w["hwnd"] in tracked)), None)
                 if found:
                     break
                 time.sleep(0.3)
             if not found:
                 raise RuntimeError(
-                    "prefix: no window matching %r appeared within %ds"
-                    % (step["titleContains"], timeout))
+                    "prefix: no window matching %r appeared within %ds%s"
+                    % (step["titleContains"], timeout,
+                       " that agent.py is tracking -- a title-matching window "
+                       "may exist but belongs to a different (untracked) "
+                       "process; check agent.log's [target] hwnds"
+                       if require_agent_hwnd else ""))
             activate(found["hwnd"])
             time.sleep(0.5)
             cur = found
         else:
             raise RuntimeError("prefix: unknown step action %r" % step)
-    return cur
+    return cur, synth_events
 
 
 # ───────────────────────────────────────────────────────────────── reports
