@@ -3914,7 +3914,12 @@ async function ensureAppium() {
     console.log(\`[appium] logging to \${appiumLogPath}\`);
     _spawnedAppium = spawn(process.execPath, [appiumBin, '--allow-insecure', '*:winappdriver', '--port', '4723'], { stdio: ['ignore', _appiumLogFd, _appiumLogFd] });
     _spawnedAppium.on('error', (e) => console.warn('[appium] spawn error:', String(e.message || e).substring(0, 150)));
-    const deadline = Date.now() + 30000;
+    // 90s not 30s (2026-09-16): require('appium-windows-driver') on a cold
+    // node_modules tree (uncached files / AV scan not yet warmed) can take
+    // well over 30s by itself — measured a \`du -sh node_modules\` on this
+    // tree not finishing inside 120s. 30s killed the very first run of every
+    // session even though Appium was still starting normally, not hung.
+    const deadline = Date.now() + 90000;
     while (Date.now() < deadline) {
         try {
             const r = await fetch(\`\${_APPIUM}/status\`, { signal: AbortSignal.timeout(2000) });
@@ -3922,7 +3927,7 @@ async function ensureAppium() {
         } catch {}
         await new Promise(res => setTimeout(res, 1000));
     }
-    throw new Error('Appium did not become ready within 30s');
+    throw new Error('Appium did not become ready within 90s');
 }
 
 function _killSpawnedAppium() {
@@ -6054,13 +6059,55 @@ function generateWdio(strategy, appName, eventList, useSession, exePath, exeArgs
         //    osActivate(titleLike, hwnd)로 확장, _listWindowHwnds도
         //    simple 헤더에 추가해 해결).
         //
-        // 고침: WAD REST(`_typeScoped`)를 아예 안 거친다. `_listWindowHwnds`로
+        // 고침(당시): WAD REST(`_typeScoped`)를 아예 안 거친다. `_listWindowHwnds`로
         // 대화상자의 진짜 hwnd를 라이브로 찾아 그 hwnd로 정확히 활성화한
         // 뒤, TeamViewer에서 이미 검증된 진짜 키 입력(osType, SendKeys
         // 기반)으로만 타이핑한다 — isWebContent 여부와 무관하게 모든
         // cross-window 타이핑에 동일하게 적용(네이티브도 거짓 성공을 내는
         // 게 확인됐으므로 WebView2에만 좁힐 이유가 없다).
-        pushMethod(
+        //
+        // 2026-09-16 (Medflow 재생 실측 — 위 전제가 이미 무효화됐음을 확인):
+        // 위 "거짓 성공" 문제는 2026-08-13에 `_typeScoped`가 `/text` readback
+        // 검증을 갖추면서 근본적으로 막혔다(값이 실제로 반영됐음을 증명했을
+        // 때만 true, 아니면 fail-open으로 폴백 — 정의부 주석 참고). 그런데 이
+        // 분기는 그 이후에도 요소 조회·검증 없이 osType()만 쏘는 채로 남아
+        // 있었다. 문제는 "블라인드 타이핑이 필요했다"가 아니라 "당시엔 검증
+        // 경로가 거짓 성공을 냈다"였는데, 그 검증 경로가 고쳐진 뒤에도 이
+        // 분기만 옛날 그대로였던 것.
+        // 게다가 isCrossWindowEvent()는 rect 4개 값만 비교하므로, "로그인
+        // 창이 파괴되고 크기가 다른 메인 창이 대신 뜨는" 흔한 구조의 앱에서
+        // recordedRect(녹화 전체의 첫 rect-bearing 이벤트)가 로그인 창에
+        // 고정돼 메인 창 전체가 영구히 이 분기로 온다(Medflow 실측: STEP
+        // 20/27 quickFilter/searchInput 타이핑이 로그 한 줄도 안 남기고
+        // 지나감 — osType()은 성공/실패 어느 쪽도 로그하지 않는다, §3 No
+        // false PASS 위반). session 모드 + 셀렉터가 있으면 클릭이 이미 쓰는
+        // 검증 경로(`_typeScopedOrCom` — owned 창은 COM osScopedType, 아니면
+        // 검증된 REST 후 실패 시 지금과 동일한 osType 폴백)로 시도하고, 그
+        // 경로를 탈 수 없을 때(simple 모드 / 셀렉터 없음 / 개행 포함 값)만
+        // 아래 블라인드 경로를 유지한다.
+        //
+        // isWebContent는 이 새 경로에서 제외한다 — 바로 아래 분기(2026-08-04
+        // 주석)가 기록한 문제 그대로다: WAD REST의 element/value든 COM
+        // osScopedInvoke.py의 type_item()이든 내부적으로 ValuePattern.SetValue
+        // 하나뿐이라 WebView2/React가 실제로 듣는 키 이벤트를 안 만든다.
+        // _typeScoped()의 2026-08-13 readback도 이걸 못 잡는다 — 읽어오는
+        // /text 자체가 SetValue가 쓴 바로 그 UIA 값이므로, 화면(DOM)은 여전히
+        // 비어 있어도 readback은 "일치"로 나올 수 있다(자기 자신과 비교).
+        // COM 쪽은 한술 더 떠 type_item()이 예외만 없으면 무조건 True를
+        // 반환해 readback 자체가 없다. 그래서 웹 콘텐츠는 종전처럼 진짜 키
+        // 입력(osType) 전용 경로에 남긴다.
+        const hasUsableSelectorXWin = !!(e.element?.automationId || e.element?.className || e.element?.name);
+        const hasEmbeddedNewlineXWin = /\n/.test(e.value || '');
+        if (useSession && hasUsableSelectorXWin && !hasEmbeddedNewlineXWin && !e.element?.isWebContent) {
+          const elSelXWin = sel || `'//*[@Name="${escapeAttr(e.element?.name)}"]'`;
+          usesGetWindowSession = true;
+          pushMethod(
+`    async type${stepNum}(value) {
+        await _typeScopedOrCom('${escapeStr(relTitle)}', ${elSelXWin}, value);
+    }`
+          );
+        } else {
+          pushMethod(
 `    async type${stepNum}(value) {
         const hs = _listWindowHwnds('${escapeStr(relTitle)}');
         if (!hs.length) {
@@ -6069,7 +6116,8 @@ function generateWdio(strategy, appName, eventList, useSession, exePath, exeArgs
         osActivate('${escapeStr(relTitle)}', hs[0]);
         osType(value);
     }`
-        );
+          );
+        }
       } else if (e.element?.isWebContent) {
         // 2026-08-04 (TeamViewer "세션 코드" 입력란 실측): 클릭 3개는
         // COM SendInput으로 실제 동작했는데, 이 타이핑 스텝은 _typeScoped()가

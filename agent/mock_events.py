@@ -1394,6 +1394,101 @@ def step_wdio_generate_type_merge():
         )
 
 
+# Login-window-hands-off-to-main-window typing scenario (2026-09-16, real
+# Medflow repro): recordedRect (server.js) is the geometry of the FIRST event
+# in the whole recording that carries winLeft/winTop/winWidth/winHeight.
+# isCrossWindowEvent() then classifies every LATER event purely by comparing
+# its rect against that one baseline. An app whose login window is destroyed
+# and replaced by a differently-sized main window (Medflow: login 600x400,
+# main 1900x1000 here) therefore has its ENTIRE main-window segment
+# permanently misclassified as cross-window — forever, not just at the
+# handoff. The cross-window type branch (server.js ~6037) used to respond to
+# that classification with blind osType() typing: no element lookup, no
+# verification, no log line on success or failure (§3 No false PASS). Real
+# replay log evidence: the two login-window type steps printed
+# "[typeScopedOrCom]"/"[osScopedInvoke] typed into ..."; the two main-window
+# type steps (into fields that DO have a usable automationId) printed
+# nothing at all.
+LOGIN_HANDOFF_APP = "MockLoginHandoffType"
+LOGIN_HANDOFF_EVENTS = [
+    make_event("click", name="User ID", automation_id="userInput", class_name="Edit",
+               control_type="Edit", window_title="Mock Login",
+               app_name=LOGIN_HANDOFF_APP, index=1,
+               winLeft=100, winTop=100, winWidth=600, winHeight=400,
+               rootHwndHex="1A0A2C"),
+    make_event("type", name="User ID", automation_id="userInput", class_name="Edit",
+               control_type="Edit", window_title="Mock Login", value="admin",
+               app_name=LOGIN_HANDOFF_APP, index=2,
+               winLeft=100, winTop=100, winWidth=600, winHeight=400,
+               rootHwndHex="1A0A2C"),
+    # Login window is destroyed; a differently-sized main window (a separate
+    # tracked top-level window — distinct rootHwndHex, newWindowSegment) takes
+    # over. Its rect never matches the baseline captured from event 1.
+    make_event("click", name="", automation_id="filterBox", class_name="Edit",
+               control_type="Edit", window_title="Mock Main",
+               app_name=LOGIN_HANDOFF_APP, index=3,
+               winLeft=0, winTop=0, winWidth=1900, winHeight=1000,
+               rootHwndHex="2B0C10", newWindowSegment=True),
+    make_event("type", name="", automation_id="filterBox", class_name="Edit",
+               control_type="Edit", window_title="Mock Main", value="ro",
+               app_name=LOGIN_HANDOFF_APP, index=4,
+               winLeft=0, winTop=0, winWidth=1900, winHeight=1000,
+               rootHwndHex="2B0C10"),
+]
+LOGIN_HANDOFF_SESSION_META = {
+    "action": "session_meta",
+    "app": LOGIN_HANDOFF_APP,
+    "platform": PLATFORM,
+    "timestamp": time.time(),
+    "isElectron": False,
+    "initialWindow": {"left": 100, "top": 100, "width": 600, "height": 400},
+}
+
+
+def step_wdio_generate_login_handoff_type_targets_element():
+    print("\n[26] main-window typing after a login-window handoff targets its element instead of blind-typing (real Medflow repro, 2026-09-16)")
+    request("DELETE", "/api/events")
+    request("POST", "/api/events", LOGIN_HANDOFF_SESSION_META)
+    for ev in LOGIN_HANDOFF_EVENTS:
+        request("POST", "/api/events", ev)
+    status, body = request("POST", "/api/generate", {
+        "appName": LOGIN_HANDOFF_APP,
+        "platform": PLATFORM,
+    }, timeout=30)
+    check("POST /api/generate (login handoff type) returns 200", status == 200, f"got {status}")
+    if status != 200:
+        check("(skipped login-handoff type checks)", False, body.get("message", ""))
+        return
+    for f in body.get("files", []):
+        fname, content = f.get("filename", ""), f.get("content", "")
+        type4_body = method_body(content, "type4")
+        check(
+            f"  {fname} main-window typing targets its element via the verified/COM path",
+            "_typeScopedOrCom(" in type4_body and "'~filterBox'" in type4_body,
+            "recordedRect is pinned to the login window's geometry forever "
+            "(it's the first rect-bearing event in the whole recording), so "
+            "the main window (a different size) is misclassified as "
+            "cross-window on every step — that must no longer mean typing "
+            "blind with no element lookup",
+        )
+        check(
+            f"  {fname} does not blind-type into the main window",
+            "osType(value)" not in type4_body,
+            "osType() alone logs nothing on success or failure — this path "
+            "could not tell a landed keystroke from a silent no-op (§3 No "
+            "false PASS); real Medflow replay showed zero log lines for "
+            "exactly this shape of step",
+        )
+        type2_body = method_body(content, "type2")
+        check(
+            f"  {fname} login-window typing still uses the verified path (no regression)",
+            "_typeScopedOrCom(" in type2_body,
+            "the login window IS the recordedRect baseline (cross=false) "
+            "and already took the verified path before this fix — it must "
+            "keep doing so",
+        )
+
+
 # winFrag contamination scenario (2026-08-12, real Notepad repro): a stray
 # click that lands on the recording tool's OWN Chrome tab (e.g. the user
 # missed the "Stop recording" button by a few pixels) gets isElectron=True
@@ -4223,6 +4318,7 @@ def step_output_folders_isolated():
         WEB_APP, DBLROW_APP, WINCLICK_APP, VOLATILE_MENUITEM_APP,
         MENU_INDEX_TRIGGER_APP,
         ANCESTOR_XWIN_APP, ANCESTOR_AMBIGUOUS_APP, TYPE_NEWLINE_APP, TYPE_MERGE_APP,
+        LOGIN_HANDOFF_APP,
         WINFRAG_CONTAM_APP,
         "SevenZipStateReset",
         "MockGoldenCalculator", "MockGoldenFileZilla", "MockGoldenHeidiSQL",
@@ -4294,6 +4390,7 @@ def main():
     step_wdio_generate_ancestor_ambiguous_capture()
     step_wdio_generate_type_embedded_newline()
     step_wdio_generate_type_merge()
+    step_wdio_generate_login_handoff_type_targets_element()
     step_wdio_generate_winfrag_contamination()
     step_com_sendinput_helpers()
     step_esc_recovery_guards()

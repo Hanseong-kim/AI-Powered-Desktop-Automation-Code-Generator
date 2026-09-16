@@ -115,7 +115,12 @@ async function ensureAppium() {
     console.log(`[appium] logging to ${appiumLogPath}`);
     _spawnedAppium = spawn(process.execPath, [appiumBin, '--allow-insecure', '*:winappdriver', '--port', '4723'], { stdio: ['ignore', _appiumLogFd, _appiumLogFd] });
     _spawnedAppium.on('error', (e) => console.warn('[appium] spawn error:', String(e.message || e).substring(0, 150)));
-    const deadline = Date.now() + 30000;
+    // 90s not 30s (2026-09-16): require('appium-windows-driver') on a cold
+    // node_modules tree (uncached files / AV scan not yet warmed) can take
+    // well over 30s by itself — measured a `du -sh node_modules` on this
+    // tree not finishing inside 120s. 30s killed the very first run of every
+    // session even though Appium was still starting normally, not hung.
+    const deadline = Date.now() + 90000;
     while (Date.now() < deadline) {
         try {
             const r = await fetch(`${_APPIUM}/status`, { signal: AbortSignal.timeout(2000) });
@@ -123,7 +128,7 @@ async function ensureAppium() {
         } catch {}
         await new Promise(res => setTimeout(res, 1000));
     }
-    throw new Error('Appium did not become ready within 30s');
+    throw new Error('Appium did not become ready within 90s');
 }
 
 function _killSpawnedAppium() {
@@ -1465,12 +1470,7 @@ class MockGoldenTeamViewerPageById {
     }
 
     async type10(value) {
-        const hs = _listWindowHwnds('빠른 연결 허용');
-        if (!hs.length) {
-            console.warn('[type10] window "빠른 연결 허용" not found by EnumWindows — activation/typing may miss');
-        }
-        osActivate('빠른 연결 허용', hs[0]);
-        osType(value);
+        await _typeScopedOrCom('빠른 연결 허용', '~1125', value);
     }
 
     async click11() {
@@ -1478,12 +1478,7 @@ class MockGoldenTeamViewerPageById {
     }
 
     async type12(value) {
-        const hs = _listWindowHwnds('빠른 연결 허용');
-        if (!hs.length) {
-            console.warn('[type12] window "빠른 연결 허용" not found by EnumWindows — activation/typing may miss');
-        }
-        osActivate('빠른 연결 허용', hs[0]);
-        osType(value);
+        await _typeScopedOrCom('빠른 연결 허용', '~1126', value);
     }
 
     async click13() {
