@@ -88,6 +88,18 @@ export default function ControlPanel({
         )}
       </div>
 
+      {recording && (
+        // 2026-09-17 (Medflow <select> 콤보 실측, agent/sweep menu-race 시나리오로
+        // 임계값 확정): 콤보/드롭다운을 열고 항목을 고르는 두 클릭 사이가 300ms
+        // 이하면 아직 안 열린 목록을 클릭이 통과해 엉뚱한 컨트롤이 캡처된다 —
+        // agent.py로는 고칠 수 없는 실제 렌더링 타이밍 레이스라, 녹화하는
+        // 사람에게 직접 안내한다.
+        <p className="recording-hint">
+          드롭다운/콤보박스를 열고 항목을 고를 땐 최소 <strong>0.5초</strong> 텀을 두고 클릭하세요 —
+          너무 빠르게 연속 클릭하면 아직 안 열린 목록을 클릭이 통과해 엉뚱한 컨트롤이 캡처됩니다.
+        </p>
+      )}
+
       <div className="fields">
         <div className="field">
           <label>Target App</label>
