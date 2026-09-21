@@ -34,6 +34,7 @@ required** (see §3 below for why this matters):
 | 7-Zip | native Win32 | file list navigation, double-click into folders |
 | HeidiSQL | Delphi/VCL, multi-window | owner-drawn ComboBoxEx item selection by position (network-type combo), cross-window session-manager ↔ preferences flow. The session-list tree (`TVirtualStringTree`) exposes zero UIA children and cannot be automated — see **Known Limitations**. The "더 보기" (More) overflow menu's items are captured by position but replay doesn't select them yet (parked, see below) |
 | TeamViewer | WebView2 (Chromium), single window | first confirmed Electron/Chromium-class target — ID/password copy buttons, session-code input, "Join session", the two settings checkboxes ("Windows와 함께 TeamViewer 시작" / "이 장치에 Easy Access 권한 부여" — click the **text label**, not the checkbox glyph itself, which sits in an unnamed wrapper), and the native "빠른 연결 허용" dialog (email/password/cancel) all replay end to end (`[PASS] all steps completed`). **Requires the agent, Express bridge's spawned processes, and the generated test itself to all run from an elevated (Administrator) terminal** — TeamViewer runs elevated, and Windows' UIPI blocks a non-elevated automation client from seeing anything past the window shell (see **WebView2 / Electron apps** below). Running the generated test from a non-elevated terminal is the single most common cause of every step failing at once. |
+| Medflow | HTA (mshta.exe-hosted), multi-window (4 windows) | in-house mockup app, launched via `exeArgs` pointing `mshta.exe` at an entry `.hta` file (see **Custom apps with a host process** below). Login window is destroyed and replaced by a differently-sized Main window — GUI-verified end to end (capture → generate → replay) through login and into the Main/Settings screens. The `<select>` dropdown item is the one control class here that still needs manual care: HTA is quirks-mode, and fast open+select clicks race the dropdown's render — see the recording-time hint added for this and **Known Limitations**. |
 
 Other presets in the UI (Paint, Registry Editor, IDM, VSCode, GitHub Desktop,
 Free Download Manager, Claude Desktop) are wired up but not currently
@@ -126,6 +127,12 @@ npm run dev
      UWP apps use an AUMID like `Package.Family.Name!App` instead of a file
      path — the agent detects the `!` and launches via
      `explorer shell:AppsFolder` automatically.
+   - **Exe Args** (optional) — for apps launched through a host process
+     rather than run directly, e.g. an HTA mockup opened via
+     `C:\Windows\System32\mshta.exe` with the `.hta` file path passed as
+     `exeArgs` (see **Custom apps with a host process** below). Sent to the
+     agent's `/start` and threaded through to codegen so the generated test
+     launches the same host+args pair, not just the bare exe.
 2. Click **Launch** — the target app opens and recording begins. Wait for the
    window to fully render before your first click.
 3. **Interact with the app.** Supported event scope: **Click, Type,
@@ -137,6 +144,12 @@ npm run dev
      second): a menu's light-dismiss overlay can race the element inspection.
      The agent re-resolves the element beneath the overlay automatically, but
      a deliberate pace gives the cleanest capture.
+   - **Give dropdowns/ComboBoxes at least ~0.5s between the click that opens
+     them and the click that picks an item.** This is a genuine render-timing
+     race (measured on Medflow's `<select>` combos and the agent/sweep
+     menu-race findings, safe gap 300–500ms), not a capture bug — the
+     recorder UI now shows this hint live while recording, but there's no
+     code-side fix for clicking faster than the dropdown renders.
 4. Watch the **live event feed** — each row shows the action, the resolved
    element (automationId / name / className), and the window. If a row shows
    an empty element, that step will be generated as an explicit FAIL step
@@ -157,6 +170,18 @@ npm run dev
 Recordings are also backed up as JSON under `recorded-events/` (git-ignored),
 and can be restored via `POST /api/events/restore` for re-generation without
 re-recording.
+
+### Custom apps with a host process
+
+Some target apps aren't launched directly by their own executable — an HTA
+mockup, for instance, runs as `mshta.exe <path-to-file.hta>`. Put the host
+exe in **Exe Path** and the file/argument it should open in **Exe Args**
+(e.g. Exe Path = `C:\Windows\System32\mshta.exe`, Exe Args =
+`C:\...\MedflowLogin.hta`, as the built-in **Medflow (HTA)** preset does).
+`exeArgs` is sent alongside `exePath` to the agent's `/start` and is also
+threaded through `/api/generate`, so the generated test launches the exact
+same host+args pair used during recording — not just the bare host exe with
+no file to open.
 
 ### Generated output
 
@@ -292,6 +317,23 @@ Recording captures the click(s) that open + select from these controls as
 separate events; `server/server.js` merges them at codegen time into a single
 call so the open→search happens without a step boundary in between.
 
+### Cross-window typing is verified, never blind (fixed 2026-09-16)
+
+`isCrossWindowEvent()` classifies every event by comparing its window rect
+against the geometry of the *first* rect-bearing event in the whole
+recording. That means an app whose login window is destroyed and replaced by
+a differently-sized main window (Medflow) has its entire post-login segment
+classified as "cross-window" — and until 2026-09-16, the cross-window `type`
+branch handled that by typing **blind**: no element lookup, no verification,
+no log line either way, a silent violation of this project's "no false
+PASS" rule. Session-mode cross-window typing now routes through the same
+verified/COM path (`_typeScopedOrCom`) clicks already used, whenever a
+selector exists, the text has no embedded newline, and the element isn't
+`isWebContent` — those three cases still fall back to the old blind
+SendKeys path (COM's `type_item()` can't turn `\n` into a real Enter, and
+WebView2's `ValuePattern.SetValue` doesn't fire the keyboard events a React
+app listens for regardless of which path types into it).
+
 ### Checkbox clicks are value-verified, not just error-checked
 
 A plain WinAppDriver `element/click()` reports success the moment the click
@@ -415,6 +457,19 @@ python agent/verify_replay.py --app FileZilla --strategy byclass
 
 ## Known Limitations
 
+- **HTA apps run in quirks mode (validated: Medflow).** No `<!DOCTYPE>` means
+  IE's legacy rendering engine applies inheritance rules that break naive CSS
+  fixes — e.g. `font-size` set on an ancestor does not inherit into a
+  `<table>`, and `table-layout: fixed` cannot be trusted to keep a layout
+  stable. This affects only how the app itself renders, not selector
+  resolution, but matters if you're extending or debugging the Medflow mock
+  app under `mock-app/medflow-hta/`.
+- **Combo/dropdown open→select clicks race the render.** Clicking to open a
+  dropdown and then immediately clicking an item can land on the not-yet-
+  rendered list and capture the wrong control — a real UI-timing race, not a
+  capture bug, so there's no code fix; the recorder UI shows a live hint
+  asking for at least ~0.5s between the two clicks (see **2. Recording a
+  Session** above).
 - **Electron/Chromium apps are supported (validated: TeamViewer/WebView2),
   not out of scope** — see **WebView2 / Electron apps** above for the three
   fixes this needed and the elevation requirement. This reverses an earlier

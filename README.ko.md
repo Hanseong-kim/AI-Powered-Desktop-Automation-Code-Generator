@@ -38,6 +38,7 @@ Windows 데스크톱 앱에서 사용자의 상호작용(클릭, 타이핑, 더�
 | 7-Zip | 네이티브 Win32 | 파일 목록 탐색, 더블클릭으로 폴더 진입 |
 | HeidiSQL | Delphi/VCL, 멀티윈도우 | owner-drawn ComboBoxEx 항목을 위치로 선택(네트워크 유형 콤보), 세션 관리자 ↔ 환경설정 창 간 흐름. 세션 목록 트리(`TVirtualStringTree`)는 UIA 자식을 하나도 노출하지 않아 자동화가 불가능함 — **Known Limitations** 참고. "더 보기" 오버플로 메뉴 항목은 위치 기반으로 캡처되지만 재생 쪽에서 아직 선택하지 못함(보류 중, 아래 참고) |
 | TeamViewer | WebView2(Chromium), 단일 창 | 처음으로 검증된 Electron/Chromium 계열 대상 — ID/비밀번호 복사 버튼, 세션 코드 입력, "Join session", 설정 체크박스 2개("Windows와 함께 TeamViewer 시작" / "이 장치에 Easy Access 권한 부여" — 체크박스 글리프 자체가 아니라 **텍스트 라벨**을 클릭해야 함, 글리프는 이름 없는 wrapper 안에 있음), 그리고 네이티브 "빠른 연결 허용" 다이얼로그(이메일/비밀번호/취소)까지 전부 처음부터 끝까지 재생됨(`[PASS] all steps completed`). **agent, Express 브릿지가 띄우는 프로세스들, 생성된 테스트 자체가 전부 관리자(Administrator) 터미널에서 실행돼야 합니다** — TeamViewer가 상승된 권한으로 실행되고, Windows의 UIPI가 비상승 자동화 클라이언트가 창 껍데기 너머를 보는 걸 막기 때문입니다(아래 **WebView2 / Electron apps** 참고). 비상승 터미널에서 생성된 테스트를 실행하는 게 모든 스텝이 한꺼번에 실패하는 가장 흔한 원인입니다. |
+| Medflow | HTA(mshta.exe 호스팅), 멀티윈도우(창 4개) | 사내 목업 앱. `mshta.exe`를 `exeArgs`로 진입 `.hta` 파일 경로를 넘겨 실행함(아래 **호스트 프로세스가 필요한 커스텀 앱** 참고). 로그인 창이 파괴되고 다른 크기의 Main 창으로 교체되는 구조 — 캡처→생성→재생 전 과정이 로그인부터 Main/Settings 화면까지 GUI로 검증됨. 여기서 유일하게 손이 더 가는 컨트롤은 `<select>` 드롭다운으로, HTA가 quirks 모드인 데다 열기→선택 클릭이 드롭다운 렌더링과 타이밍 레이스를 벌인다 — 녹화 시점 안내 힌트와 **Known Limitations** 참고. |
 
 UI에 있는 다른 프리셋(Paint, 레지스트리 편집기, IDM, VSCode, GitHub Desktop,
 Free Download Manager, Claude Desktop)은 연결은 돼 있지만 아직 GUI로
@@ -131,6 +132,12 @@ npm run dev
      UWP 앱은 파일 경로 대신 `Package.Family.Name!App` 형태의 AUMID를
      씁니다 — agent가 `!`를 감지해서 `explorer shell:AppsFolder`로 자동
      실행합니다.
+   - **Exe Args**(선택) — 앱 자체가 아니라 호스트 프로세스를 통해 실행되는
+     대상용입니다. 예: HTA 목업 앱을 `C:\Windows\System32\mshta.exe`로
+     실행하면서 `.hta` 파일 경로를 `exeArgs`로 넘기는 경우(아래 **호스트
+     프로세스가 필요한 커스텀 앱** 참고). agent의 `/start`로 전달되고
+     코드 생성까지 그대로 이어져서, 생성된 테스트가 녹화 때와 같은
+     호스트+인자 조합으로 앱을 실행합니다.
 2. **Launch**를 클릭하면 대상 앱이 열리고 녹화가 시작됩니다. 첫 클릭 전에
    창이 완전히 렌더링될 때까지 기다리세요.
 3. **앱과 상호작용하세요.** 지원하는 이벤트 범위: **Click, Type,
@@ -142,6 +149,11 @@ npm run dev
      열기): 메뉴의 light-dismiss 오버레이가 요소 검사와 레이스를 일으킬 수
      있습니다. agent가 오버레이 아래 요소를 자동으로 다시 찾아내긴 하지만,
      여유 있는 페이스가 가장 깔끔한 캡처를 만듭니다.
+   - **드롭다운/콤보박스를 열고 항목을 고를 땐 최소 0.5초 텀을 두세요.**
+     실제 렌더링 타이밍 레이스입니다(Medflow의 `<select>` 콤보와
+     agent/sweep 메뉴-레이스 측정 기준 안전 구간 300–500ms) — 캡처 버그가
+     아니라서 코드로 고칠 수 없으며, 녹화 UI가 녹화 중일 때 이 안내를
+     실시간으로 보여줍니다.
 4. **실시간 이벤트 피드**를 지켜보세요 — 각 행은 액션, 해결된 요소
    (automationId / name / className), 창 정보를 보여줍니다. 요소가 비어
    있는 행이 보이면 그 스텝은 명시적 FAIL 스텝으로 생성됩니다(좌표는 절대
@@ -160,6 +172,17 @@ npm run dev
 녹화는 `recorded-events/`(git-ignored) 아래 JSON으로도 백업되며,
 `POST /api/events/restore`로 다시 녹화하지 않고도 복원해서 재생성할 수
 있습니다.
+
+### 호스트 프로세스가 필요한 커스텀 앱
+
+일부 대상 앱은 자기 자신의 실행 파일로 바로 뜨지 않습니다 — 예를 들어 HTA
+목업 앱은 `mshta.exe <파일.hta 경로>` 형태로 뜹니다. 이럴 땐 **Exe Path**에
+호스트 exe를, **Exe Args**에 그 exe가 열어야 할 파일/인자를 넣으세요(예:
+Exe Path = `C:\Windows\System32\mshta.exe`, Exe Args =
+`C:\...\MedflowLogin.hta` — 내장된 **Medflow (HTA)** 프리셋이 바로 이 형태).
+`exeArgs`는 agent의 `/start`로 `exePath`와 함께 전달되고 `/api/generate`까지
+이어져서, 생성된 테스트가 녹화 때와 똑같은 호스트+인자 조합으로 실행됩니다 —
+열어야 할 파일 없이 호스트 exe만 뜨는 게 아니라요.
 
 ### 생성된 결과물
 
@@ -293,6 +316,22 @@ codegen 시점의 메커니즘 두 가지가 이걸 처리합니다(둘 다 WinA
 `server/server.js`가 codegen 시점에 그것들을 하나의 호출로 합쳐서, 열기→
 검색 사이에 스텝 경계가 안 생기게 합니다.
 
+### 창을 넘나드는 타이핑도 값까지 검증합니다, 블라인드 입력 아님 (2026-09-16 수정)
+
+`isCrossWindowEvent()`는 모든 이벤트를, 녹화 전체에서 rect가 있는 *첫*
+이벤트의 창 크기와 비교해서 분류합니다. 그래서 로그인 창이 파괴되고 다른
+크기의 Main 창으로 교체되는 앱(Medflow)은 로그인 이후 구간 전체가
+"cross-window"로 영구히 오분류됩니다 — 2026-09-16 이전까지 cross-window
+`type` 분기는 이걸 **블라인드 입력**으로 처리했습니다: 요소 조회도, 검증도,
+성공/실패 로그 한 줄도 없이 — 이 프로젝트의 "false PASS 금지" 원칙을 조용히
+어기는 셈이었습니다. 이제 session 모드의 cross-window 타이핑은, 셀렉터가
+있고 텍스트에 개행이 없고 요소가 `isWebContent`가 아닌 경우엔 클릭이 이미
+쓰던 것과 같은 검증/COM 경로(`_typeScopedOrCom`)를 탑니다 — 이 세 조건 중
+하나라도 안 맞으면 여전히 기존 블라인드 SendKeys 경로로 폴백합니다(COM의
+`type_item()`은 `\n`을 실제 Enter로 바꿀 수 없고, WebView2의
+`ValuePattern.SetValue`는 어느 경로로 타이핑하든 React 앱이 듣는 키보드
+이벤트를 발생시키지 않기 때문입니다).
+
 ### 체크박스 클릭은 값까지 검증합니다, 에러 여부만 확인하는 게 아니라
 
 일반 WinAppDriver `element/click()`은 클릭 호출이 예외 없이 반환되는 순간
@@ -413,6 +452,18 @@ python agent/verify_replay.py --app FileZilla --strategy byclass
 
 ## 알려진 제약사항
 
+- **HTA 앱은 quirks 모드로 렌더링됩니다(검증됨: Medflow).** `<!DOCTYPE>`이
+  없어서 IE의 레거시 렌더링 규칙이 적용되고, 단순한 CSS 수정으로는 안 고쳐지는
+  경우가 있습니다 — 예를 들어 조상 요소에 건 `font-size`가 `<table>` 안으로
+  상속되지 않고, `table-layout: fixed`도 레이아웃을 안정시킨다고 신뢰할 수
+  없습니다. 이건 앱 자체의 렌더링에만 영향을 주고 셀렉터 해석에는 영향이
+  없지만, `mock-app/medflow-hta/` 아래 Medflow 목업 앱을 확장하거나
+  디버깅할 때는 알아두세요.
+- **콤보/드롭다운의 열기→선택 클릭이 렌더링과 타이밍 레이스를 벌입니다.**
+  드롭다운을 여는 클릭 직후 바로 항목을 클릭하면 아직 렌더링 안 된 목록을
+  클릭이 통과해서 엉뚱한 컨트롤이 캡처될 수 있습니다 — 실제 UI 타이밍
+  레이스라 코드로 고칠 방법이 없고, 녹화 UI가 두 클릭 사이 최소 0.5초를
+  두라는 안내를 실시간으로 보여줍니다(위 **2. 세션 녹화하기** 참고).
 - **Electron/Chromium 앱은 지원됩니다(검증됨: TeamViewer/WebView2), 스코프
   밖이 아닙니다** — 이게 왜 필요했는지 세 가지 수정과 권한 요구사항은 위
   **WebView2 / Electron apps** 참고. 이건 이 앱 부류를 한 번의 낡은
