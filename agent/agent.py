@@ -2057,10 +2057,17 @@ class UIAInspector:
         # 캡처 샘플링 타이밍의 문제였다. osExpandCollapse는 캐시된 개수와
         # 실제 개수가 다르면 위치로 찍지 않고 정확히 거부하는데(CLAUDE.md
         # §3 No false PASS), 그 안전장치 자체는 옳으므로 손대지 않고 캡처가
-        # 안정된 값을 넘기도록 고친다. settled_subtree_count()(WebView2용,
-        # 최대 8초)만큼 오래 기다릴 필요는 없다 — 네이티브 WPF 리스트라
-        # 수백ms면 충분하고, 콤보가 실제로 열려 있는 것으로 확인된 경로에만
-        # 국한되므로 다른 클릭에는 지연을 더하지 않는다.
+        # 안정된 값을 넘기도록 고친다.
+        # 2026-09-17 (Medflow <select> 실측, 사용자 리포트 "빠르게 클릭하면
+        # 드롭다운 항목이 정확히 인식 안 됨"): 이 settle-loop의 캡을 0.6->2.0초로
+        # 늘려 시험했으나 재현 로그(빠른 클릭 시퀀스가 여전히 깨짐, sha256=d87dd959
+        # 빌드로 확인)로 가설이 기각됐다 — 실패 지점은 이 함수가 도는 시점(클릭
+        # 이후)이 아니라 그보다 앞, 클릭이 물리적으로 전달되는 순간이었다: 열리는
+        # 중인 facilitySelect 드롭다운이 아직 화면에 그려지기 전에 다음 클릭이
+        # 도착해 그 밑의 deptSelect 콤보를 그대로 맞혔다(agent.log 확인:
+        # facilitySelect open 다음 클릭이 TC2가 아니라 deptSelect의 rect에
+        # 떨어짐). 이 함수는 클릭 '이후'에야 UIA를 읽으므로 클릭 자체가 엉뚱한
+        # 곳에 물리적으로 떨어진 걸 되돌릴 수 없다 — 원래 값으로 되돌린다.
         deadline = time.time() + 0.6
         last_len, stable_since = items.Length, time.time()
         while True:
