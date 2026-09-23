@@ -7026,7 +7026,10 @@ function saveFiles(files, dir, extraObsolete = []) {
 app.post('/api/generate', (req, res) => {
   const name  = req.body.appName  || sessionInfo.appName  || 'MyApp';
   const exe   = req.body.exePath  || sessionInfo.exePath  || '';
-  const exeArgs = (Array.isArray(req.body.exeArgs) && req.body.exeArgs.length)
+  // An explicit [] means "no arguments", not "inherit" -- falling back on it
+  // leaked the last recording's args (MedflowLogin.hta) into every other
+  // app's golden (2026-09-23). The UI sends undefined, not [], when empty.
+  const exeArgs = Array.isArray(req.body.exeArgs)
     ? req.body.exeArgs
     : (sessionInfo.exeArgs || []);
   const targetEvents = (Array.isArray(req.body.events) && req.body.events.length > 0) ? req.body.events : events;
